@@ -90,6 +90,63 @@ Identity, Perft, LegalityTorture, GiveCheckVerify, HashConsumptionExact
 PTCache IdenticalTree + RandomWalk (4060), Attacked Diff/Distribution,
 WAC, TreeSize, Mates, IterativeDeepening, BankedBuild. engine.bin md5
 aee43fd592c321413f54df1a1241f1ea (256 bytes smaller).
+## 2026-07-20 — selective checks-in-QS screen (task #37): DO NOT PORT
+
+Schröder-style quiet checks in quiescence, screened in the mirror with
+the node-budgeted self-play rig (the task #42 protocol; mirror wins are
+an optimistic upper bound on asm reality). Implementation:
+`QSParams.Checks` — at the first N qs plies, generate quiet CHECKING
+moves in addition to captures/promotions, as a dedicated pass 5 after
+the capture passes; the child of a quiet check is the existing full
+in-check evasion node (all evasions + mate detection), which the QS
+already had. Gives-check reuses make()'s per-child `curInCheck()` flag —
+no new movegen path — and was cross-checked node-exact against refchess
+over 40 random-walk games / ~4000 checking moves
+(`TestGivesCheckVsRefchess`). Optional `SafeChecks` gate: skip a check
+whose destination is attacked by an enemy pawn. `Checks=0` reproduces
+the shipped captures-only QS bit-for-bit (perft/WAC/budget tests
+unchanged). CLI: `-aqs/-bqs plycap,recapafter[,checks[,safechecks]]`.
+
+**Node shape (depth 6, bench FENs; baseline QS = 87% of all nodes):**
+
+| variant         | total nodes | QS nodes | quiet-check moves searched |
+|-----------------|-------------|----------|----------------------------|
+| checks1 (N=1)   | +10.2%      | +12.5%   | 3% of QS nodes             |
+| checks2 (N=2)   | +38.6%      | +44.9%   | 7% of QS nodes             |
+| checks1+safe    | +7.6%       | +9.5%    | 2% of QS nodes             |
+| recap2+checks1  | −17.7%      | −20.4%   | 5% of QS nodes (vs recap2 alone: +9.6% total) |
+
+**Node-budget Elo (250 pairs = 500 games per cell, candidate POV):**
+
+| candidate vs opponent        | 10k        | 30k        | 100k       |
+|------------------------------|------------|------------|------------|
+| checks1 vs base (uncapped)   | −9 ± 25    | +29 ± 26   | +22 ± 25   |
+| checks2 vs base              | —          | −5 ± 25    | —          |
+| checks1+safe vs base         | —          | +22 ± 26   | —          |
+| recap2+checks1 vs recap2     | −10 ± 26   | −1 ± 26    | −17 ± 25   |
+| recap2+checks1+safe vs recap2| —          | +3 ± 26    | —          |
+
+Seed-777 confirmation of the decisive pairing (30k):
+recap2+checks1 = **−8 ± 26**. Aggregates: checks1 vs unshaped base
+**+14 ± 15** (1500 games — weakly positive, does not clear zero);
+recap2+checks1 vs recap2 **−9 ± 13** (2000 games — neutral-to-negative,
+CI top +4). Secondary signals: depth-3 WAC subset unchanged (5/7 for
+caps-only, checks1, and checks2).
+
+**Verdict: clear "not worth it" — do NOT port.** The engine's adopted
+QS shape is recap2 (+30 under budget, task #42); on top of it, quiet
+checks are ≤ 0 at every budget tested even in the mirror's optimistic
+rig. The coherent story: checks1's tactical coverage is worth roughly
+its +10% node cost against an unshaped QS, but recap2's −25% node
+saving converts to depth that finds the same tactics one iteration
+deeper, leaving nothing for check generation to add. On the 6502 the
+case is strictly worse: mirror gives-check is a free byproduct of the
+Go make(), but the asm would pay a per-quiet-move gives-check test (an
+attack scan or difference-table extension) inside the hottest loop to
+buy Elo that is negative in the best case measured here. Branch
+`task37-qschecks` keeps the implementation and the refchess-verified
+gives-check cross-check for any future revisit (e.g. if the QS shape
+ever changes away from recap2).
 
 ## 2026-07-20 — round-2 speedup Elo conversion: +35 ± 32 (300 games)
 

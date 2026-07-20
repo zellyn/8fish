@@ -169,6 +169,19 @@ func main() {
 	b.WriteString("\n.align 256\n")
 	emit(&b, "BPASSB", bPassB[:])
 
+	// DBLTAB[bits] = 12 if the file holds two or more pawns (the flat
+	// doubled-pawn penalty magnitude; pawnterm applies the sign), else 0.
+	// Keyed on a side's per-file rank mask; replaces the inline
+	// bits&(bits-1) test in the unrolled pawnterm file walk.
+	var dblTab [256]byte
+	for bits := 1; bits < 256; bits++ {
+		if bits&(bits-1) != 0 {
+			dblTab[bits] = 12
+		}
+	}
+	b.WriteString("\n.align 256\n")
+	emit(&b, "DBLTAB", dblTab[:])
+
 	// TT addressing: TTPTR = TTBASE + index*8, index = (HASH1&0x0F)<<8 | HASH0.
 	// SHL3TAB/SHR5TAB split HASH0*8 across the pointer bytes; TTHITAB puts
 	// HASH1's nibble in bits 3-6. Page-aligned so lda abs,x never crosses.

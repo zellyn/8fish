@@ -518,6 +518,114 @@ ptnext: dex
         bpl ptscan
         rts
 
+; PTFILE: one file's white+black terms, fully unrolled (deep
+; optimization review r3). All loads are absolute (PWBITS/PBBITS bytes
+; and page-aligned lookup tables), boundary files drop the missing
+; neighbor at assembly time, and the doubled test is a DBLTAB lookup
+; (12 iff >= 2 bits set) instead of bits&(bits-1). The 16-bit T0/T1
+; accumulator updates are inlined on the (rarer) term-hit paths.
+; Common case (both sides have pawns on the file; no doubled/isolated/
+; passed hit) is 86 cycles/file vs 195 for the old helper-call loop.
+.macro PTFILE f
+        ; ---- white terms ----
+        ldy PWBITS+f            ; Y = own-file bits, kept for lookups
+        beq .ident(.sprintf("ptbw%d", f))       ; no white pawns here
+        lda DBLTAB,y            ; 12 iff doubled (>= 2 pawns)
+        beq :+
+        lda T0
+        sec
+        sbc #12
+        sta T0
+        bcs :+
+        dec T1
+:
+.if f = 0
+        lda PWBITS+1            ; isolated: no own pawns on neighbors
+.elseif f = 7
+        lda PWBITS+6
+.else
+        lda PWBITS+(f-1)
+        ora PWBITS+(f+1)
+.endif
+        bne :+
+        lda T0
+        sec
+        sbc #7
+        sta T0
+        bcs :+
+        dec T1
+:
+.if f = 0
+        lda PBBITS+0            ; black bits on files f-1..f+1
+        ora PBBITS+1
+.elseif f = 7
+        lda PBBITS+6
+        ora PBBITS+7
+.else
+        lda PBBITS+(f-1)
+        ora PBBITS+f
+        ora PBBITS+(f+1)
+.endif
+        and WBLOCKM,y           ; any black pawn at rank >= our best?
+        bne .ident(.sprintf("ptbw%d", f))
+        lda WPASSB,y            ; passed: bonus by the best pawn's rank
+        clc
+        adc T0
+        sta T0
+        bcc .ident(.sprintf("ptbw%d", f))
+        inc T1
+.ident(.sprintf("ptbw%d", f)):
+        ; ---- black terms, mirrored (advancement = low rank) ----
+        ldy PBBITS+f
+        beq .ident(.sprintf("ptfd%d", f))
+        lda DBLTAB,y
+        beq :+
+        lda T0
+        clc
+        adc #12
+        sta T0
+        bcc :+
+        inc T1
+:
+.if f = 0
+        lda PBBITS+1
+.elseif f = 7
+        lda PBBITS+6
+.else
+        lda PBBITS+(f-1)
+        ora PBBITS+(f+1)
+.endif
+        bne :+
+        lda T0
+        clc
+        adc #7
+        sta T0
+        bcc :+
+        inc T1
+:
+.if f = 0
+        lda PWBITS+0
+        ora PWBITS+1
+.elseif f = 7
+        lda PWBITS+6
+        ora PWBITS+7
+.else
+        lda PWBITS+(f-1)
+        ora PWBITS+f
+        ora PWBITS+(f+1)
+.endif
+        and BBLOCKM,y
+        bne .ident(.sprintf("ptfd%d", f))
+        lda BPASSB,y            ; T0/T1 -= bonus, via +(~bonus)+1
+        eor #$FF
+        sec
+        adc T0
+        sta T0
+        bcs .ident(.sprintf("ptfd%d", f))
+        dec T1
+.ident(.sprintf("ptfd%d", f)):
+.endmacro
+
 pawnterm:
         lda #0
         sta PDIRTY
@@ -526,45 +634,15 @@ pawnterm:
 .ifdef PTNOCACHE
         jsr ptbuild             ; oracle: fresh masks, ignore maintenance
 .endif
-        ; per-file terms (helpers preserve X and Y)
-        ldx #7
-ptfile: lda PWBITS,x
-        beq ptwd0               ; no white pawns on this file
-        tay                     ; Y = own-file bits, kept for lookups
-        sec
-        sbc #1
-        and PWBITS,x
-        beq :+                  ; bits & (bits-1): doubled iff nonzero
-        jsr ptsub12
-:       jsr ptneighw            ; isolated: no own pawns on neighbors
-        bne :+
-        jsr ptsub7
-:       jsr ptorb3              ; A = black bits on files x-1..x+1
-        and WBLOCKM,y           ; any black pawn at rank >= our best?
-        bne ptwd0
-        lda WPASSB,y            ; passed: bonus by the best pawn's rank
-        jsr ptadda
-ptwd0:  ; black side, mirrored (advancement = low rank)
-        lda PBBITS,x
-        beq ptnextf
-        tay
-        sec
-        sbc #1
-        and PBBITS,x
-        beq :+
-        jsr ptadd12
-:       jsr ptneighb
-        bne :+
-        jsr ptadd7
-:       jsr ptorw3
-        and BBLOCKM,y
-        bne ptnextf
-        lda BPASSB,y
-        jsr ptsuba
-ptnextf:
-        dex
-        bmi ptkings
-        jmp ptfile
+ptfile:
+        PTFILE 0
+        PTFILE 1
+        PTFILE 2
+        PTFILE 3
+        PTFILE 4
+        PTFILE 5
+        PTFILE 6
+        PTFILE 7
 
 ptkings:
         ; king shield: only for kings on their own back two ranks
@@ -604,63 +682,9 @@ ptsuba: sta MULCNT              ; NOT EVTMP: the king-shield loops keep
         bcs :+
         dec T1
 :       rts
-ptadd12:
-        lda #12                 ; doubled
-        bne ptadda              ; always
-ptsub12:
-        lda #12
-        bne ptsuba              ; always
-ptadd7:
-        lda #7                  ; isolated (Texel-tuned, diversified corpus)
-        bne ptadda              ; always
-ptsub7:
-        lda #7
-        bne ptsuba              ; always
-
-; ptneighw/b: Z set if both neighbor files have no own pawns.
-; The final ora #0 is load-bearing: on the file-h path the last
-; flag-setting op would otherwise be cpx #7 (Z set!), which mis-
-; flagged h-file pawns as isolated in the count-based version.
-ptneighw:
-        lda #0
-        cpx #0
-        beq :+
-        ora PWBITS-1,x
-:       cpx #7
-        beq :+
-        ora PWBITS+1,x
-:       ora #0
-        rts
-ptneighb:
-        lda #0
-        cpx #0
-        beq :+
-        ora PBBITS-1,x
-:       cpx #7
-        beq :+
-        ora PBBITS+1,x
-:       ora #0
-        rts
-
-; ptorb3/ptorw3: A = OR of that side's bits on files x-1, x, x+1
-ptorb3:
-        lda PBBITS,x
-        cpx #0
-        beq :+
-        ora PBBITS-1,x
-:       cpx #7
-        beq :+
-        ora PBBITS+1,x
-:       rts
-ptorw3:
-        lda PWBITS,x
-        cpx #0
-        beq :+
-        ora PWBITS-1,x
-:       cpx #7
-        beq :+
-        ora PWBITS+1,x
-:       rts
+; (doubled/isolated magnitudes — 12 and 7, Texel-tuned on the
+; diversified corpus — are inlined in the PTFILE macro; DBLTAB gates
+; the doubled hit.)
 
 ; ptshieldw/b: A = king file; +8 per shielded file, -10 for an open
 ; own file under the king. Clobbers Y, EVTMP.

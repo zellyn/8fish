@@ -3,6 +3,32 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-20 — Sargon III gauntlet #2 (post-optimization): PARITY at 1.5× time
+
+Same fair conditions as the morning's −117 gauntlet — 40 games, varied
+openings via setboard (no book for either side), Sargon at 1.5×
+pondering-equivalent time — but with the day's optimized engine
+(aee43fd stack + FT_ROOKX off) and the fixed promotion driver, plus
+the new screen-dump audit on every adapter-judgment ending.
+
+Raw cutechess: 18W-18L-4D (50.0%). **Audited reclassification:
+15W-18L-7D = 46.25% ≈ −26 ± ~100 Elo — statistical parity.**
+
+Audit (the point of the screen dumps): exactly 3 adapter-judgment
+endings, all "MY MOVE DRAWS BY REPETITION" at material +0 — in two,
+WE held perpetual check (knight-check shuttles) and Sargon declared
+the draw to accept it; in one, Sargon held the perpetual. All genuine
+draws. Zero promotion/boot/panic failures — the driver fixes held.
+All other endings were cutechess-native (mates, adjudications).
+
+Trajectory: −117 (morning, pre-optimization) → −26 ± 100 (tonight)
+after +92 ± 33 of measured self-play gain — the speed-derived strength
+carried to a foreign opponent essentially undiminished. Next levers
+for a decisive lead: checks-in-QS (#37 — notably, three games ended
+in perpetual-check draws, the exact motif QS check awareness
+addresses), the FT_ROOKX eval set (pending its cost optimization +
+SPRT), and the remaining documented micro-scraps.
+
 ## 2026-07-20 — FULL-STACK speedup Elo conversion: +92 ± 33 (300 games)
 
 The headline measurement of the day's deep-optimization campaign:

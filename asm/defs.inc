@@ -57,6 +57,22 @@ PLY       = $03
 ROOTDEPTH = $04         ; perft depth (poked by the test rig)
 SENDL     = $05         ; search move loop: list-end lo (PLYENDLO[PLY] mirror)
 SENDH     = $06         ; search move loop: list-end hi
+HVALID    = $07         ; hash-validity watermark (deep opt r3): HASH0-3
+                        ; equals the hash of the current-path position at
+                        ; ply HVALID, and HASHSTK*[p] is correct for all
+                        ; p < HVALID. make elides hash maintenance for
+                        ; quiescence children that provably never consume
+                        ; it (no TT probe/store, 50-move clock < 4 so no
+                        ; repetition scan, not in check); hashcatchup in
+                        ; board.s replays undo records to repair the
+                        ; suffix when a consumer appears. unmake restores
+                        ; HASH from HASHSTK only when PLY < HVALID, then
+                        ; clamps HVALID to PLY. Reset per iteration by
+                        ; the driver (engine.s). Exception to the HASH
+                        ; invariant: while inside a null-move subtree
+                        ; whose null ply v == HVALID (UNDOFROM[v] = NOSQ),
+                        ; HASH = position v+1 (makenull applied stm/ep
+                        ; itself); hashcatchup steps past the marker.
 PCOUNT    = $08         ; 32-bit little-endian perft leaf counter
 MSP       = $10         ; 16-bit pointer: top of move stack
 FROM      = $12

@@ -249,10 +249,9 @@ mkfmove:
 .ifndef NOEVAL
         beq mkfnocch
         lda UNDOCASTLE,x
-        jsr hashcastle          ; xor out the old rights
+        jsr hashcastle          ; xor out the old rights (X preserved)
         lda CASTLE
         jsr hashcastle          ; xor in the new
-        ldx PLY
 mkfnocch:
         ; ep: never a double push here; hash out the old ep file if set
         lda UNDOEP,x
@@ -411,12 +410,10 @@ mkflip:
         lda UNDOCASTLE,x
         cmp CASTLE
         beq mknocch
-        jsr hashcastle          ; xor out the old rights
-        ldx PLY
+        jsr hashcastle          ; xor out the old rights (X preserved)
         lda CASTLE
         jsr hashcastle          ; xor in the new
 mknocch:
-        ldx PLY
         lda UNDOEP,x
         cmp EPSQ
         beq mknoech
@@ -563,13 +560,14 @@ ckdone:
 .else
         ; refresh the pawn/king structure term if a pawn or king moved
         lda PDIRTY
-        beq :+
+        beq mkpdone             ; already clean: skip the redundant clear
         lda FEATURES
         and #FT_PSTRUCT
         beq :+
         jmp pawnterm            ; clears PDIRTY; rts returns to caller
 :       lda #0
         sta PDIRTY
+mkpdone:
 .endif
 .endif
         rts
@@ -736,14 +734,22 @@ unmake:
         lda UNDOCAPSQ,x
         sta PIECESQ,y
 .ifndef NOEVAL
-        ; pawn victim: its file bit returns (pbtoggle is self-inverse)
+        ; pawn victim: its file bit returns (inlined self-inverse toggle)
         lda UNDOCAP,x
         and #TYPEMASK
         cmp #PAWN
         bne umfnocap
-        ldy UNDOCAPSQ,x
         lda UNDOCAP,x
-        jsr pbtoggle
+        and #COLORMASK
+        sta GTMP
+        lda UNDOCAPSQ,x
+        tay
+        and #$07
+        ora GTMP
+        tax
+        lda RANKBIT,y
+        eor PWBITS,x
+        sta PWBITS,x
         ldx PLY
 .endif
 umfnocap:
@@ -753,13 +759,26 @@ umfnocap:
         and #TYPEMASK
         cmp #PAWN
         bne umfdone
-        ldy UNDOFROM,x
         lda UNDOPIECE,x
-        jsr pbtoggle
-        ldx PLY                 ; pbtoggle clobbered X
-        ldy UNDOTO,x
-        lda UNDOPIECE,x
-        jsr pbtoggle
+        and #COLORMASK
+        sta GTMP
+        lda UNDOFROM,x
+        tay
+        and #$07
+        ora GTMP
+        tax
+        lda RANKBIT,y
+        eor PWBITS,x
+        sta PWBITS,x
+        ldx PLY
+        lda UNDOTO,x
+        tay
+        and #$07
+        ora GTMP
+        tax
+        lda RANKBIT,y
+        eor PWBITS,x
+        sta PWBITS,x
 .endif
 umfdone:
         rts

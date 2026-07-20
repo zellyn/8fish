@@ -152,29 +152,30 @@ hashpiece:
 ; movepiece pawn prologue (deep optimization review r2): keep the
 ; per-file pawn bitmasks current so pawnterm never rescans the piece
 ; list. XOR toggles; unmake re-applies the same toggles (self-inverse).
-; r3: both toggles inlined (color half computed once, no jsr/rts) —
-; 106 -> 74 cycles. pbtoggle itself remains for the board.s callers
-; (promotion make, ep capture, unmake tail).
+; The toggles are inlined (r3), sharing one color-bit computation; the
+; FROM toggle runs last so Y = FROM holds for the mvpbody contract.
+; pbtoggle itself remains for the board.s callers (promotion make, ep
+; capture, slow-path unmake records).
 mvppawn:
         ora PDIRTY
         sta PDIRTY
         lda MVPIECE
-        and #COLORMASK          ; color half of the PWBITS index
-        sta GTMP
-        ldy FROM
-        tya
-        and #$07
-        ora GTMP
-        tax
-        lda RANKBIT,y           ; toggle FROM file bit
-        eor PWBITS,x
-        sta PWBITS,x
+        and #COLORMASK
+        sta GTMP                ; color bit = PWBITS/PBBITS selector
         ldy TO
         tya
         and #$07
         ora GTMP
         tax
-        lda RANKBIT,y           ; toggle TO file bit
+        lda RANKBIT,y
+        eor PWBITS,x
+        sta PWBITS,x
+        ldy FROM
+        tya
+        and #$07
+        ora GTMP
+        tax
+        lda RANKBIT,y
         eor PWBITS,x
         sta PWBITS,x
         lda MVPIECE             ; re-establish X for the psqt body
@@ -191,6 +192,7 @@ movepiece:
         ora PDIRTY
         sta PDIRTY
 mvpbody:
+        ; contract: Y = FROM on entry (make and both prologues ensure it)
         lda TYPEPG0X,x          ; PSQT pages for this type
         sta PSP0+1
         lda TYPEPG1X,x
@@ -198,7 +200,6 @@ mvpbody:
         ; hash: xor key[kind][FROM] ^ key[kind][TO], all four planes
         lda ZKHI0,x
         sta ZPTR+1
-        ldy FROM
         lda (ZPTR),y            ; p0[from]
         eor HASH0
         sta HASH0
@@ -300,23 +301,21 @@ mpgo:   ldy T1                  ; MG += mg[T1]
         rts
 
 ; takepiece pawn prologue: a pawn was captured — toggle its file bit.
-; Y still holds the capture square here and is preserved (r3: toggle
-; inlined, 61 -> 46 cycles; the old ldy EVTMP reload was already
-; redundant since pbtoggle preserved Y).
+; Y holds the capture square throughout (the inlined toggle keeps it).
 tkppawn:
         ora PDIRTY
         sta PDIRTY
         lda VICTIM
         and #COLORMASK
         sta GTMP
-        tya                     ; Y = capture square (still live)
+        tya
         and #$07
         ora GTMP
         tax
-        lda RANKBIT,y           ; toggle the victim's file bit
+        lda RANKBIT,y
         eor PWBITS,x
         sta PWBITS,x
-        lda VICTIM
+        lda VICTIM              ; re-establish X (nibble); Y unchanged
         and #$0F
         tax
         jmp tkpbody
@@ -443,35 +442,44 @@ pbtoggle:
         sta PWBITS,x
         rts
 
-; hashcastle: xor CASTKEYS[A] into HASH0-3. Clobbers A,X,Y.
+; hashcastle: xor CASTKEYS[A] into HASH0-3. Clobbers A,Y; X preserved.
 hashcastle:
         asl
         asl
         tay
-        ldx #0
-hcloop: lda CASTKEYS,y
-        eor HASH0,x
-        sta HASH0,x
-        iny
-        inx
-        cpx #4
-        bne hcloop
+        lda CASTKEYS+0,y
+        eor HASH0
+        sta HASH0
+        lda CASTKEYS+1,y
+        eor HASH1
+        sta HASH1
+        lda CASTKEYS+2,y
+        eor HASH2
+        sta HASH2
+        lda CASTKEYS+3,y
+        eor HASH3
+        sta HASH3
         rts
 
 ; hashep: xor EPKEYS[file of A] into HASH0-3 (A = ep square, not NOSQ).
+; Clobbers A,Y; X preserved.
 hashep:
         and #$07
         asl
         asl
         tay
-        ldx #0
-heloop: lda EPKEYS,y
-        eor HASH0,x
-        sta HASH0,x
-        iny
-        inx
-        cpx #4
-        bne heloop
+        lda EPKEYS+0,y
+        eor HASH0
+        sta HASH0
+        lda EPKEYS+1,y
+        eor HASH1
+        sta HASH1
+        lda EPKEYS+2,y
+        eor HASH2
+        sta HASH2
+        lda EPKEYS+3,y
+        eor HASH3
+        sta HASH3
         rts
 
 ; hashstm (the side-to-move xor) is emitted unrolled by cmd/gentables,

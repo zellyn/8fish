@@ -327,14 +327,17 @@ func parseOrd(s string) mirror.OrderParams {
 	return mirror.OrderParams{LosingLast: ll != 0, HistMalus: hm != 0}
 }
 
-// parseQS parses "plycap,recapafter".
+// parseQS parses "plycap,recapafter[,checks[,safechecks]]". The last two
+// fields (task #37 quiet-checks-in-QS) are optional and default to off.
 func parseQS(s string) mirror.QSParams {
 	var q mirror.QSParams
-	n, err := fmt.Sscanf(s, "%d,%d", &q.PlyCap, &q.RecapAfter)
-	if err != nil || n != 2 {
-		fmt.Fprintf(os.Stderr, "bad QS params %q\n", s)
+	var safe int
+	n, _ := fmt.Sscanf(s, "%d,%d,%d,%d", &q.PlyCap, &q.RecapAfter, &q.Checks, &safe)
+	if n < 2 {
+		fmt.Fprintf(os.Stderr, "bad QS params %q (want plycap,recapafter[,checks[,safechecks]])\n", s)
 		os.Exit(2)
 	}
+	q.SafeChecks = safe != 0
 	return q
 }
 

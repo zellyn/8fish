@@ -251,7 +251,12 @@ func (e *Engine) moveLoop() int {
 	if !qs && e.Features&FtOrder != 0 {
 		return e.orderedMoveLoop()
 	}
-	list := e.generate(qs)
+	// QS quiet-checks (task #37): at the first QS.Checks qs plies, also
+	// search quiet checking moves. This needs the full move list (quiets
+	// included), so generate all moves and add a dedicated quiet-checks
+	// pass (pass 5) after the two capture passes.
+	genChecks := qs && e.QS.Checks > 0 && ply-e.MaxDepth < e.QS.Checks
+	list := e.generate(qs && !genChecks)
 
 	pass := 1
 	if !qs && e.ttFrom[ply] != NoSq {
@@ -281,6 +286,13 @@ func (e *Engine) moveLoop() int {
 						}
 					case 4: // final pass: skip killers (already done)
 						if e.Features&FtKiller != 0 && e.killerMatch(ply, m) {
+							continue
+						}
+					case 5: // QS quiet-checks pass: keep quiets; the
+						// gives-check filter is applied after make() below.
+						// Optional SafeChecks gate: skip a check whose
+						// destination is attacked by an enemy pawn.
+						if e.QS.SafeChecks && e.pawnAttacks(m.To, p.Side^ColorMask) {
 							continue
 						}
 					default: // capture passes: no quiets
@@ -330,6 +342,16 @@ func (e *Engine) moveLoop() int {
 			if e.attacked(moverKing, p.Side) {
 				e.unmake()
 				continue
+			}
+			// QS quiet-checks pass: only search moves that give check.
+			// make() has already set e.inChk[p.Ply] for the child, so this
+			// reuses the same perft-verified attack scan.
+			if pass == 5 {
+				if !e.inChk[p.Ply] {
+					e.unmake()
+					continue
+				}
+				e.QSCheckNodes++
 			}
 			e.legal[ply]++
 
@@ -419,17 +441,22 @@ func (e *Engine) moveLoop() int {
 		case 0, 1:
 			pass++
 		case 2:
-			if qs || e.futile[ply] {
+			if qs {
+				if genChecks {
+					pass = 5 // QS quiet-checks pass after the captures
+				} else {
+					return e.done()
+				}
+			} else if e.futile[ply] {
 				return e.done()
-			}
-			if e.Features&FtKiller != 0 {
+			} else if e.Features&FtKiller != 0 {
 				pass = 3
 			} else {
 				pass = 4
 			}
 		case 3:
 			pass = 4
-		default:
+		default: // pass 4 (full-width final) or pass 5 (QS quiet-checks)
 			return e.done()
 		}
 	}

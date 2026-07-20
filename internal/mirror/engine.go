@@ -30,8 +30,9 @@ type Engine struct {
 	LMR LMRParams
 
 	// QS-shape knobs (zero values = the asm's current unlimited QS).
-	QS      QSParams
-	QSNodes uint64 // nodes entered at ply >= MaxDepth (evasion included)
+	QS           QSParams
+	QSNodes      uint64 // nodes entered at ply >= MaxDepth (evasion included)
+	QSCheckNodes uint64 // quiet checking moves searched from QS nodes (task #37)
 
 	// Ord configures the scored move ordering used when FtSEE/FtHistory
 	// are enabled (task #35).
@@ -147,6 +148,17 @@ type QSParams struct {
 	// RecapAfter: at qs ply >= this, capture nodes consider only
 	// captures landing on the previous move's TO square. 0 = off.
 	RecapAfter int
+	// Checks: generate quiet CHECKING moves (in addition to captures/
+	// promotions) at qs ply < this. 0 = off (captures-only QS, the asm's
+	// current behavior). Checks=1 adds quiet checks at the first qs ply
+	// only; Checks=2 at the first two. A quiet check's child is a normal
+	// in-check node (all evasions, mate detection), so a quiet mating or
+	// forcing check is now seen in quiescence. Task #37 (Schröder-style).
+	Checks int
+	// SafeChecks gates the quiet-check generation: skip a checking move
+	// whose destination square is attacked by an enemy pawn (cheap "the
+	// checker hangs to a pawn" filter). Off = all quiet checks searched.
+	SafeChecks bool
 }
 
 // NewEngine returns an engine with all features on and the asm's
@@ -278,6 +290,31 @@ func (e *Engine) attacked(sq byte, bySide byte) bool {
 			if p.Board[cur] != 0 {
 				break
 			}
+		}
+	}
+	return false
+}
+
+// pawnAttacks reports whether square sq is attacked by a pawn of side
+// bySide (0 = white, 8 = black). Cheap gate for QS SafeChecks: a white
+// pawn attacking sq sits on sq-0x0F/sq-0x11; a black pawn on sq+0x0F/
+// sq+0x11.
+func (e *Engine) pawnAttacks(sq, bySide byte) bool {
+	p := &e.Pos
+	var offs [2]int
+	if bySide == 0 {
+		offs = [2]int{-0x0F, -0x11}
+	} else {
+		offs = [2]int{0x0F, 0x11}
+	}
+	for _, off := range offs {
+		s := int(sq) + off
+		if s < 0 || s&0x88 != 0 {
+			continue
+		}
+		pc := p.Board[s]
+		if pc != 0 && pc&ColorMask == bySide && pc&TypeMask == Pawn {
+			return true
 		}
 	}
 	return false

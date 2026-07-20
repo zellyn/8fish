@@ -322,8 +322,24 @@ func (e *engine) recoverResign(where string) {
 // attributes it to this engine). A result string like "1-0 {...}" is a *claim*
 // that cutechess validates against the board and rejects ("invalid result
 // claim") when the game isn't actually over, so it must not be used to resign.
+// Every adapter-initiated resignation dumps Sargon's full text screen to the
+// log first: the dump lands immediately before cutechess's "result" line in
+// the debug stream, so each game-ending decision can be audited afterward
+// against what Sargon was actually displaying.
 func (e *engine) resign() {
+	e.dumpScreen("at resign")
 	e.send("resign")
+}
+
+// dumpScreen logs Sargon's 24-row text screen with framing markers so
+// post-match tooling (and humans) can correlate screens with outcomes.
+func (e *engine) dumpScreen(why string) {
+	if e.m == nil {
+		log.Printf("SCREEN-DUMP (%s): no machine", why)
+		return
+	}
+	log.Printf("SCREEN-DUMP-BEGIN (%s) sargonWhite=%v\n%s\nSCREEN-DUMP-END",
+		why, e.m.SargonWhite, e.m.Screen())
 }
 
 // replyCoord converts Sargon's reply to xboard coordinate notation, preferring

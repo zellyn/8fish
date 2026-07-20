@@ -3,6 +3,44 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-20 — deep optimization review round 3 COMPLETE: −29.1% total cycles at identical trees (task #49)
+
+Five parallel per-routine reviews, each with license to renegotiate
+contracts (register conventions, call boundaries, data layouts), each
+proven tree-identical by the MicroAB fingerprint (make count + score +
+best move over 18 fixed searches) plus per-cluster oracles:
+
+| cluster | change (headline) | alone vs ba8a940 |
+|---|---|---|
+| search/TT | 4-byte tier-tagged moves, per-pass scan loops, ZP cursor, TT probe early-bail | −8.87% |
+| QS movegen | unrolled rays w/ carry-invariant stepping, unrolled steps/pawns/promo, king-first dispatch | −7.89% |
+| eval | pawnterm file walk fully unrolled, king-shield count+lookup, quarter-squares taper multiply (exhaustively proven), toggle inlining | −5.66% |
+| make/unmake | flag-free fast paths, hash-xor unrolls, QS HASH ELISION (HVALID watermark + deferred hashcatchup) | −6.30% |
+| attacked() | unrolled slot scan, borrow-as-tombstone filter; superpiece rewrite REJECTED on measured operand distribution (90,512 states) | −1.57% |
+
+**Union (all five merged): 6,159,590,974 → 4,368,733,938 = −29.1%**,
+slightly better than naive compounding (−27.4%). Integration resolved
+two cross-branch collisions: mvppawn/tkppawn inlining (kept the
+make-branch variant whose FROM-toggle-last preserves the new Y=FROM
+mvpbody entry contract) and an HVALID/SENDL zero-page collision
+(HVALID relocated $05→$07).
+
+Union battery all green: MicroAB, HashConsumptionExact (60,345
+consumption points, Go-side oracle at every ttprobe/ttstore/rep-scan),
+HashElisionCoverage, HashConsistency, PStructParity (4045), PTCache
+IdenticalTree + RandomWalk (4060), RecapGenEquivalence (1280),
+LegalityTorture, GiveCheckVerify, WAC (6/7 unchanged), full short
+suite. engine.bin md5 49129bd3d492f9e3f062aba0f40e0dea.
+
+**Cumulative day total (rounds 2+3): −39.5% of all search cycles —
+1.65× faster — at provably identical search trees throughout.**
+
+Post-round-3 profile is flat (top label 3.5–5.7%): generateq residual,
+emtier+emitmove (~4–5%, the designed emit-interface fusions — Y=victim
+argument, X=to + SMC stack base — are the remaining ~1–1.5%), make/
+unmake residuals. Diminishing returns; next leverage is features
+(checks-in-QS #37) and eval terms, not more cycle-shaving.
+
 ## 2026-07-20 — deep optimization review round 3, search/TT cluster: −8.87% total cycles at identical trees (task #49)
 
 Move-storage format change: moves are now 4 bytes — (tier, from, to,

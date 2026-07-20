@@ -3,6 +3,39 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-20 — FAIR Sargon III gauntlet: varied openings, Sargon at pondering-equivalent time (task #44 partial)
+
+The first *fair* Sargon III benchmark: 40 games (20 openings × both
+colors) from the varied-openings pool via the validated setboard path,
+our engine (36bdaa7 = corrected futility + recap2) at 30M cyc/move,
+**Sargon at budget-multiplier 1.5×** (pondering-equivalent — Sargon
+thinks on 45M cyc/move). This removes the two big unfairnesses of the
+first gauntlet: Sargon's opening book no longer applies (varied
+positions), and Sargon is no longer handicapped to Easy-mode time.
+
+Raw cutechess: 14W-22L-4D (40%, −70 ± 108). **Honest reclassification**
+(5 of our 7 resignation "wins" were SARGON-DECLARED-DRAW — Sargon
+declaring repetition; the adapter must resign to end the game):
+
+**9W-22L-9D = 33.8% ≈ −117 Elo vs Sargon III at 1.5× time.**
+
+Caveats, both directions:
+- 2 of our remaining wins ended on a **driver bug: promotion moves
+  (c2c1q, f2f1n) failed to submit into Sargon** ("no reply after
+  CTRL-T" / "not accepted, screen: CHECK"). We were promoting, so
+  likely winning anyway, but the games didn't finish over the board.
+  Driver promotion entry needs fixing before the next gauntlet.
+- 14 of our 22 losses were material adjudications (down material,
+  legitimate).
+
+Verdict: at matched-to-1.5× compute with no book skew, **Sargon III is
+still ~100–120 Elo ahead**. Combined with the earlier even result vs
+Easy-mode Sargon at 1×, the picture is consistent: we are in Sargon's
+neighborhood but below its full pondering strength. The lever that
+converts (recap2: −74% QS cycles → +9.9) says speed→depth is the path;
+ordering micro-tweaks are not (history, LMR ports washed on the asm).
+Per protocol this stays a periodic milestone, not an inner-loop gate.
+
 ## 2026-07-20 — node-budgeted self-play + the conversion re-measurements (task #42)
 
 Built a **node-budgeted self-play mode** in the mirror

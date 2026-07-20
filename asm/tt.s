@@ -1,7 +1,7 @@
 ; Transposition table: 4096 entries x 8 bytes in aux RAM $0200-$81FF.
 ;
 ; Aux access discipline (D4): reads of $0200-$BFFF with RAMRD on switch
-; instruction fetches too, so the read loop (ttread) lives in Language
+; instruction fetches too, so the read loop (ttfetch) lives in Language
 ; Card RAM, installed by the loader in engine.s. Writes need only RAMWRT,
 ; which doesn't affect fetches, so ttstore runs from ordinary code.
 ; Arguments/results stay in zero page, which neither switch affects.
@@ -29,25 +29,18 @@ ttaddr:
         rts
 
 ; ---------------------------------------------------------------
-; ttprobe: carry set = hit; TTENTRY holds the entry, mate scores
-; adjusted to be relative to this node (score -= PLY sense).
+; ttprobe: carry set = hit; TTENTRY+3..7 holds the entry, mate scores
+; adjusted to be relative to this node (score -= PLY sense). The
+; verify compare happens inside ttfetch, still in aux-read mode, so
+; a miss bails without copying anything (TTENTRY+0..2 are never
+; written on the probe path; ttstore rebuilds them from HASH1..3).
 ; ---------------------------------------------------------------
 ttprobe:
         jsr ttaddr
-        jsr ttread              ; LC-resident aux copy into TTENTRY
-        lda TTENTRY+7
-        and #$03
-        beq ttmiss              ; bound 0: empty
-        lda TTENTRY
-        cmp HASH1
-        bne ttmiss
-        lda TTENTRY+1
-        cmp HASH2
-        bne ttmiss
-        lda TTENTRY+2
-        cmp HASH3
-        bne ttmiss
-        ; mate-score adjustment: stored scores are node-relative
+        jsr ttfetch             ; LC-resident: verify + copy, cc = miss
+        bcs :+
+        rts                     ; carry clear: miss
+:       ; mate-score adjustment: stored scores are node-relative
         lda TTENTRY+6
         cmp #$74                ; >= +29696: winning mate
         bcc ttpneg
@@ -70,8 +63,6 @@ ttpneg: cmp #$8C                ; <= $8B..: losing mate
         bcc tthit
         inc TTENTRY+6
 tthit:  sec
-        rts
-ttmiss: clc
         rts
 
 ; ---------------------------------------------------------------
@@ -157,36 +148,50 @@ tsgo:   lda HASH1
 
         .segment "LCCODE"
 
-; ttread: copy the 8-byte entry at aux (TTPTR) into TTENTRY. Runs from
-; LC RAM because RAMRD switches all $0200-$BFFF reads including fetches.
-ttread:
+; ttfetch: verify-and-read the entry at aux (TTPTR). Runs from LC RAM
+; because RAMRD switches all $0200-$BFFF reads including fetches; zero
+; page (HASH1..3, TTENTRY) is unaffected, so the verify compare runs
+; against main ZP while aux is still switched in, and a miss bails
+; before copying anything. Carry set = verified hit, TTENTRY+3..7
+; filled; carry clear = empty or key mismatch.
+; (Entries are 8-aligned: (TTPTR),y never crosses a page.)
+ttfetch:
         sta $C003               ; RAMRD on
-        ; unrolled: entries are 8-aligned, (TTPTR),y never crosses
         ldy #7
         lda (TTPTR),y
         sta TTENTRY+7
-        dey
+        and #$03
+        beq ttfmiss             ; bound 0: empty entry
+        ldy #0
         lda (TTPTR),y
-        sta TTENTRY+6
-        dey
+        cmp HASH1
+        bne ttfmiss
+        iny
         lda (TTPTR),y
-        sta TTENTRY+5
-        dey
+        cmp HASH2
+        bne ttfmiss
+        iny
         lda (TTPTR),y
-        sta TTENTRY+4
-        dey
+        cmp HASH3
+        bne ttfmiss
+        iny
         lda (TTPTR),y
         sta TTENTRY+3
-        dey
+        iny
         lda (TTPTR),y
-        sta TTENTRY+2
-        dey
+        sta TTENTRY+4
+        iny
         lda (TTPTR),y
-        sta TTENTRY+1
-        dey
+        sta TTENTRY+5
+        iny
         lda (TTPTR),y
-        sta TTENTRY
+        sta TTENTRY+6
         sta $C002               ; RAMRD off
+        sec
+        rts
+ttfmiss:
+        sta $C002               ; RAMRD off
+        clc
         rts
 
         .segment "CODE"

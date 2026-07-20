@@ -26,9 +26,9 @@ func TestDebugRootMoves(t *testing.T) {
 	endLo := m.Mem.Main[defs["PLYENDLO"]]
 	endHi := m.Mem.Main[defs["PLYENDHI"]]
 	end := uint16(endLo) | uint16(endHi)<<8
-	t.Logf("generated %d moves:", (end-base)/3)
-	for a := base; a < end; a += 3 {
-		from, to, flags := m.Mem.Main[a], m.Mem.Main[a+1], m.Mem.Main[a+2]
+	t.Logf("generated %d moves:", (end-base)/4)
+	for a := base; a < end; a += 4 { // 4 bytes: tier,from,to,flags
+		from, to, flags := m.Mem.Main[a+1], m.Mem.Main[a+2], m.Mem.Main[a+3]
 		t.Logf("  %s%s flags=%02x", SqName(from), SqName(to), flags)
 	}
 	// Also dump the piece list.

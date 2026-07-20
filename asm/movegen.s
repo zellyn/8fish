@@ -5,6 +5,11 @@
 
 ; ---------------------------------------------------------------
 ; emitmove: A = flags; GFROM/GTO = squares. Advances MSP.
+; Emits 4 bytes: tier, from, to, flags. The tier byte classifies the
+; move for the search's pass scans at generation time (victim type
+; << 4 | class; see MOVESTACK in defs.inc); TIERTAB maps the victim
+; piece byte (its low 3 type bits) to that tier, with ep and promo
+; special-cased off the flags.
 ; CONTRACT: the quiescence generator (generateq below) must emit no
 ; quiet moves. That is enforced structurally: every quiet call site
 ; in movegenbody.inc sits inside .if QMODE = 0, and the QMODE = 1
@@ -15,20 +20,34 @@
 ; of the bump.
 ; ---------------------------------------------------------------
 emitmove:
-        ldy #2
-        sta (MSP),y
-        dey
-        lda GTO
-        sta (MSP),y
-        dey
+        ldy #3
+        sta (MSP),y             ; flags
+        and #FL_EP|FL_PROMO
+        bne emsp                ; ep/promo: fixed tiers
+        ldy GTO                 ; (Y, not X: genrecap keeps its slot
+        lda a:BOARD,y           ;  index in X across this call)
+        tay                     ; victim piece byte (0 = quiet move)
+        lda TIERTAB,y           ; victimtype<<4 | class
+emtier: ldy #0
+        sta (MSP),y             ; tier
+        iny
         lda GFROM
+        sta (MSP),y
+        iny
+        lda GTO
         sta (MSP),y
         lda MSP
         clc
-        adc #3
+        adc #4
         sta MSP
         bcs empage
         rts
+emsp:   and #FL_PROMO
+        bne emprom
+        lda #(PAWN<<4)|2        ; ep: pawn victim, light-capture class
+        bne emtier              ; always
+emprom: lda #$01                ; promotion: heavy class, no delta filter
+        bne emtier              ; always
 empage: inc MSP+1
         lda MSP+1
         cmp #>MOVESTACKTOP

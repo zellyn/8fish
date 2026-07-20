@@ -69,7 +69,7 @@ pnotdone:
         sta CURPTR
         lda CURSORHI,y
         sta CURPTR+1
-        ldy #0
+        ldy #1                  ; moves are (tier,from,to,flags)
         lda (CURPTR),y
         sta FROM
         iny
@@ -100,7 +100,7 @@ pillegal:
         sta MSP+1
         lda CURSORLO,y
         clc
-        adc #3
+        adc #4
         sta CURSORLO,y
         bcc ploop
         lda CURSORHI,y
@@ -143,6 +143,19 @@ pnib:   cmp #10
 pdig:   adc #'0'
         sta COUT_TRAP
         rts
+
+; TIERTAB: emitmove's victim-byte -> tier map (see search.s for the
+; engine's copy; perft ignores the tier byte but shares emitmove).
+        .segment "TABLES"
+        .align 256
+TIERTAB:
+.repeat 32
+        .byte $04
+        .byte (PAWN<<4)|2, (KNIGHT<<4)|2, (BISHOP<<4)|2
+        .byte (ROOK<<4)|1, (QUEEN<<4)|1, (KING<<4)|1
+        .byte $04
+.endrepeat
+        .segment "CODE"
 
         .include "board.s"
         .include "movegen.s"

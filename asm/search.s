@@ -19,10 +19,8 @@ gennode:
         ldy PLY
         lda MSP
         sta PLYBASELO,y
-        sta CURSORLO,y
         lda MSP+1
         sta PLYBASEHI,y
-        sta CURSORHI,y
         lda QSKIND,y
         beq :+
         ; recap2 gate: past RecapAfter=2 qs plies, restrict generateq
@@ -48,8 +46,14 @@ genq:   jsr generateq
 gennd2: ldy PLY
         lda MSP
         sta PLYENDLO,y
-        lda MSP+1
+        sta SENDL               ; ZP mirrors for the scan loops; the
+        lda MSP+1               ;  cursor starts at the list base
         sta PLYENDHI,y
+        sta SENDH
+        lda PLYBASELO,y
+        sta CURPTR
+        lda PLYBASEHI,y
+        sta CURPTR+1
         rts
 
 ; ---------------------------------------------------------------
@@ -194,17 +198,24 @@ ckvdone:
         lda #0                  ; (INCHK,y is NOT cleared here: it was
         sta LEGALCNT,y          ;  propagated by make / the root driver)
         sta QSKIND,y
+        tya
+        cmp MAXDEPTH
+        bcc :+
+        jmp squiesce            ; quiescence entry below
+:       ; Init read only by full-width/evasion nodes: pure qs nodes
+        ; never touch RAISED/FUTILE (sdone and p2done test QSKIND
+        ; first), TTFROMA (snode tests QSKIND first), or TTBF (only
+        ; sret reads it), and qs sets its own delta threshold before
+        ; snode (qsdelta/qsnodelta).
+        lda #0
         sta RAISED,y
         sta FUTILE,y
         sta DELTATL,y
         lda #$80                ; delta threshold -32768: no delta pruning
-        sta DELTATH,y           ; (qs stand-pat raises it when applicable)
+        sta DELTATH,y
         lda #NOSQ
         sta TTFROMA,y
         sta TTBF,y
-        lda PLY
-        cmp MAXDEPTH
-        bcs squiesce            ; quiescence entry below
         ; full-width node: probe the transposition table
         jsr ttprobe
         bcc snodej
@@ -269,13 +280,19 @@ ttexact:
         rts
 
 squiesce:
-        ldy PLY
-        lda INCHK,y             ; propagated by make
+        lda INCHK,y             ; propagated by make (Y = PLY)
         beq :+
-        jmp snode               ; in check: full evasion node
-:
-        ldy PLY
-        lda #1
+        lda #0                  ; in check: full evasion node, which
+        sta RAISED,y            ;  exits through sret/p2done like a
+        sta FUTILE,y            ;  full-width one: full init
+        sta DELTATL,y
+        lda #$80
+        sta DELTATH,y
+        lda #NOSQ
+        sta TTFROMA,y
+        sta TTBF,y
+        jmp snode
+:       lda #1
         sta QSKIND,y
         jsr eval
         ldy PLY
@@ -310,7 +327,8 @@ qsnofh: ; if SCORE > ALPHA: ALPHA = SCORE
 qsdelta:
         ; delta pruning threshold: search a capture only if its victim
         ; is worth at least alpha - standpat - margin. Disabled at low
-        ; phase, where every pawn matters.
+        ; phase, where every pawn matters. (Node entry no longer sets
+        ; the no-prune sentinel, so the low-phase path writes it here.)
         lda PHASE
         cmp #6
         bcc qsnodelta
@@ -328,8 +346,13 @@ qsdelta:
         lda DELTATH,y
         sbc #>200
         sta DELTATH,y
-qsnodelta:
         jmp snode               ; qs nodes skip sprep (no null/futility)
+qsnodelta:
+        lda #0                  ; low phase: no delta pruning (-32768)
+        sta DELTATL,y
+        lda #$80
+        sta DELTATH,y
+        jmp snode
 
 ; ---------------------------------------------------------------
 ; sprep: full-width-node pruning, before move generation.
@@ -589,43 +612,139 @@ unmakenull:
         sta HASH3
         rts
 
-snode:  jsr gennode             ; picks generate/generateq via QSKIND
-        ; initial pass: 0 (TT move first) when we have one and this is
-        ; not a qs-capture node; else straight to pass 1
+; ---------------------------------------------------------------
+; Move loop. Moves are 4 bytes: +0 tier, +1 from, +2 to, +3 flags
+; (tier = victimtype<<4 | class, computed by emitmove; see defs.inc).
+; Each pass runs its own specialized scan loop over the list, so a
+; wrong-pass move is skipped on a single tier-byte compare; pass 0
+; consumes the TT move by zeroing its tier, which makes passes 1-4
+; skip it with no from/to comparisons at all.
+;
+; The live cursor is CURPTR (ZP) and the list end SENDL/H. A searched
+; move persists the advanced cursor in CURSORLO/HI[PLY] (sgo); after
+; the recursion sloopret rebuilds the ZP state (cursor, end, pass
+; mirrors) from the per-ply arrays and re-enters the right loop.
+; Pass structure is unchanged: 0 TT move -> 1 heavy captures/promos
+; -> 2 light captures -> 3 killer quiets -> 4 remaining quiets; qs
+; and futility nodes stop after pass 2.
+; ---------------------------------------------------------------
+snode:  jsr gennode             ; CURPTR = base, SENDL/H = end
         ldy PLY
-        ldx #1
         lda QSKIND,y
-        bne :+
+        bne stop1               ; qs capture node: no TT pass
         lda TTFROMA,y
         cmp #NOSQ
-        beq :+
-        ldx #0
-:       txa
+        beq stop1
+        sta TTF0                ; pass 0: hunt the TT move
+        lda TTTOA,y
+        sta TTT0
+        lda #0
         sta PASSNO,y
-sloop:  ldy PLY
-        lda CURSORLO,y
-        cmp PLYENDLO,y
-        bne sfetch              ; common: A = cursor lo, Y = PLY
-        lda CURSORHI,y
-        cmp PLYENDHI,y
-        beq slpass              ; both bytes equal: end of list
-        lda CURSORLO,y          ; rare (move stack crossed a page): reload lo
-        jmp sfetch
-slpass:
-        ; end of list: 0 (TT move) -> 1 (heavy captures: promotions and
-        ; victims >= rook) -> 2 (light captures) -> 3 (killers) ->
-        ; 4 (quiets) -> done; qs and futility nodes stop after pass 2
-        lda PASSNO,y
-        cmp #4
-        bcc :+
-        jmp sdone
-:       cmp #0
-        beq spass1
+        beq p0loopj             ; always
+stop1:  lda #1
+        sta PASSNO,y
+        ldy #0
+        beq p1loop              ; always
+p0loopj:
+        jmp p0loop
+
+; ---- pass 1: heavy captures and promotions (tier class 1) ----
+; Y = 0 on entry and kept 0 throughout the scan.
+p1page: inc CURPTR+1            ; rare: list crossed a page
+        jmp p1loop
+p1next: lda CURPTR
+        clc
+        adc #4
+        sta CURPTR
+        bcs p1page
+p1loop: lda CURPTR
+        cmp SENDL
+        bne p1go
+        lda CURPTR+1
+        cmp SENDH
+        beq p1done
+p1go:   lda (CURPTR),y          ; tier byte
+        tax
+        and #$0F
         cmp #1
-        beq spass2
-        cmp #3
-        beq spass4
-        ; pass 2 (light captures) finished
+        bne p1next              ; not this pass: 1-byte skip
+        ; heavy capture or promotion; X = tier (victimtype<<4 | 1)
+        ldy #3
+        lda (CURPTR),y
+        sta MVFLAGS
+        and #FL_PROMO
+        bne p1promo
+        ldy PLY                 ; delta filter: victim value vs threshold
+        sec
+        lda VV16L,x
+        sbc DELTATL,y
+        lda VV16H,x
+        sbc DELTATH,y
+        bvc :+
+        eor #$80
+:       bpl sload               ; victim value >= threshold: search it
+p1rej:  ldy #0
+        beq p1next              ; always
+p1promo:
+        ldy PLY                 ; promos skip delta; qs takes queen only
+        lda QSKIND,y
+        beq sload
+        lda MVFLAGS
+        and #FL_PROMO
+        cmp #QUEEN
+        bne p1rej
+sload:  ldy #1                  ; searched: fetch from/to and go
+        lda (CURPTR),y
+        sta FROM
+        iny
+        lda (CURPTR),y
+        sta TO
+        jmp sgo
+p1done: ldy PLY                 ; -> pass 2 over the same list
+        lda #2
+        sta PASSNO,y
+        lda PLYBASELO,y
+        sta CURPTR
+        lda PLYBASEHI,y
+        sta CURPTR+1
+        ldy #0
+        beq p2loop              ; always
+
+; ---- pass 2: light captures (tier class 2) ----
+p2page: inc CURPTR+1
+        jmp p2loop
+p2next: lda CURPTR
+        clc
+        adc #4
+        sta CURPTR
+        bcs p2page
+p2loop: lda CURPTR
+        cmp SENDL
+        bne p2go
+        lda CURPTR+1
+        cmp SENDH
+        beq p2done
+p2go:   lda (CURPTR),y          ; tier byte
+        tax
+        and #$0F
+        cmp #2
+        bne p2next
+        ; light capture (never a promo); X = tier
+        ldy #3
+        lda (CURPTR),y
+        sta MVFLAGS
+        ldy PLY                 ; delta filter
+        sec
+        lda VV16L,x
+        sbc DELTATL,y
+        lda VV16H,x
+        sbc DELTATH,y
+        bvc :+
+        eor #$80
+:       bpl sload
+        ldy #0
+        beq p2next              ; always
+p2done: ldy PLY
         lda QSKIND,y
         beq :+
         jmp sdone               ; qs: captures only
@@ -634,36 +753,115 @@ slpass:
         jmp sdone               ; futility: quiets can't raise alpha
 :       lda FEATURES
         and #FT_KILLER
-        bne spass3
-        beq spass4              ; killers off: skip their pass
-spass1: lda #1
+        beq p2tonk              ; killers off: single quiet pass
+        lda #3                  ; killer pass: mirror this ply's killers
         sta PASSNO,y
-        bne spassgo             ; always
-spass2: lda #2
-        sta PASSNO,y
-        bne spassgo             ; always
-spass3: lda #3
-        sta PASSNO,y
-        bne spassgo             ; always
-spass4: lda #4
-        sta PASSNO,y
-spassgo:
+        lda KILLER1F,y
+        sta KF1
+        lda KILLER1T,y
+        sta KT1
+        lda KILLER2F,y
+        sta KF2
+        lda KILLER2T,y
+        sta KT2
         lda PLYBASELO,y
-        sta CURSORLO,y
+        sta CURPTR
         lda PLYBASEHI,y
-        sta CURSORHI,y
-        jmp sloop
-sfetch: sta CURPTR              ; A = cursor lo (from sloop), Y = PLY
-        ; advance cursor now, so skipping a move is just "jmp sloop"
+        sta CURPTR+1
+        jmp p3loop
+p2tonk: lda #4
+        sta PASSNO,y
+        lda PLYBASELO,y
+        sta CURPTR
+        lda PLYBASEHI,y
+        sta CURPTR+1
+        jmp p4nk
+
+; ---- pass 0: scan for the TT move (from/to match) ----
+p0page: inc CURPTR+1
+        jmp p0loop
+p0next: lda CURPTR
         clc
-        adc #3
-        sta CURSORLO,y
-        lda CURSORHI,y
-        sta CURPTR+1            ; pointer high = unadvanced cursor high
-        bcc :+
-        adc #0                  ; carry from adc #3: bump the stored high
-        sta CURSORHI,y
-:       ldy #0
+        adc #4
+        sta CURPTR
+        bcs p0page
+p0loop: lda CURPTR
+        cmp SENDL
+        bne p0go
+        lda CURPTR+1
+        cmp SENDH
+        beq p0done
+p0go:   ldy #1
+        lda (CURPTR),y
+        cmp TTF0
+        bne p0next
+        sta FROM
+        iny
+        lda (CURPTR),y
+        cmp TTT0
+        bne p0next
+        sta TO
+        ldy #3
+        lda (CURPTR),y
+        sta MVFLAGS
+        lda #0
+        tay
+        sta (CURPTR),y          ; consume: passes 1-4 skip it by tier
+        jmp sgo
+p0done: ldy PLY                 ; TT pass done: captures next
+        lda #1
+        sta PASSNO,y
+        lda PLYBASELO,y
+        sta CURPTR
+        lda PLYBASEHI,y
+        sta CURPTR+1
+        ldy #0
+        beq p1loopj             ; always
+p1loopj:
+        jmp p1loop
+
+; ---- pass 3: killer quiets (tier $04 matching a killer) ----
+p3page: inc CURPTR+1
+        jmp p3loop
+p3next: lda CURPTR
+        clc
+        adc #4
+        sta CURPTR
+        bcs p3page
+p3loop: lda CURPTR
+        cmp SENDL
+        bne p3go
+        lda CURPTR+1
+        cmp SENDH
+        beq p3done
+p3go:   ldy #0
+        lda (CURPTR),y
+        cmp #$04
+        bne p3next              ; captures/consumed: other passes
+        iny
+        lda (CURPTR),y          ; from
+        cmp KF1
+        beq p3f1
+        cmp KF2
+        bne p3next              ; matches neither killer's from
+        iny                     ; killer-2 from: its to must match too
+        lda (CURPTR),y
+        cmp KT2
+        bne p3next
+        beq p3hit               ; always
+p3f1:   iny
+        lda (CURPTR),y          ; to
+        cmp KT1
+        beq p3hit
+        dey                     ; killer-1 from, other to: killer 2?
+        lda (CURPTR),y
+        cmp KF2
+        bne p3next
+        iny
+        lda (CURPTR),y
+        cmp KT2
+        bne p3next
+p3hit:  ldy #1                  ; a killer: load the move and search it
         lda (CURPTR),y
         sta FROM
         iny
@@ -672,127 +870,144 @@ sfetch: sta CURPTR              ; A = cursor lo (from sloop), Y = PLY
         iny
         lda (CURPTR),y
         sta MVFLAGS
-        ; pass 0: search only the TT move; passes 1/2 skip it
-        ldy PLY
-        lda PASSNO,y
-        bne snotp0
+        jmp sgo
+p3done: ldy PLY                 ; -> final quiet pass
+        lda #4
+        sta PASSNO,y
+        lda PLYBASELO,y
+        sta CURPTR
+        lda PLYBASEHI,y
+        sta CURPTR+1
+        jmp p4loop
+
+; ---- pass 4: remaining quiets (killers already searched) ----
+p4page: inc CURPTR+1
+        jmp p4loop
+p4next: lda CURPTR
+        clc
+        adc #4
+        sta CURPTR
+        bcs p4page
+p4loop: lda CURPTR
+        cmp SENDL
+        bne p4go
+        lda CURPTR+1
+        cmp SENDH
+        beq sdonej
+p4go:   ldy #0
+        lda (CURPTR),y
+        cmp #$04
+        bne p4next
+        iny
+        lda (CURPTR),y
+        sta FROM
+        iny
+        lda (CURPTR),y
+        sta TO
         lda FROM
-        cmp TTFROMA,y
-        beq :+
-        jmp sloop
-:       lda TO
-        cmp TTTOA,y
-        beq :+
-        jmp sloop
-:       jmp sdomove
-snotp0: ldx TTFROMA,y
-        cpx #NOSQ
-        beq snotttm
-        cpx FROM
-        bne snotttm
-        ldx TTTOA,y
-        cpx TO
-        bne snotttm
-        jmp sloop               ; the TT move: already searched in pass 0
-snotttm:
-        ; heavy captures in pass 1, light in pass 2, killer quiets in
-        ; pass 3, remaining quiets in pass 4
-        ldx TO
-        lda BOARD,x
-        bne siscap
-        lda MVFLAGS
-        and #FL_EP|FL_PROMO
-        bne siscap
-        lda PASSNO,y
-        cmp #3
-        beq squietk
-        cmp #4
-        beq squietr
-        jmp sloop               ; capture passes: no quiets
-squietk:                        ; killer pass: only killer matches
-        lda KILLER1F,y
-        cmp FROM
-        bne :+
+        cmp KF1
+        bne p4k2
+        lda TO
+        cmp KT1
+        beq p4next              ; killer 1: searched in pass 3
+p4k2:   lda FROM
+        cmp KF2
+        bne p4hit
+        lda TO
+        cmp KT2
+        beq p4next              ; killer 2: searched in pass 3
+p4hit:  ldy #3
+        lda (CURPTR),y
+        sta MVFLAGS
+        jmp sgo
+sdonej: jmp sdone
+
+; ---- pass 4 variant when FT_KILLER is off: every quiet ----
+p4nkpg: inc CURPTR+1
+        jmp p4nk
+p4nknx: lda CURPTR
+        clc
+        adc #4
+        sta CURPTR
+        bcs p4nkpg
+p4nk:   lda CURPTR
+        cmp SENDL
+        bne p4nkgo
+        lda CURPTR+1
+        cmp SENDH
+        beq sdonej
+p4nkgo: ldy #0
+        lda (CURPTR),y
+        cmp #$04
+        bne p4nknx
+        iny
+        lda (CURPTR),y
+        sta FROM
+        iny
+        lda (CURPTR),y
+        sta TO
+        ldy #3
+        lda (CURPTR),y
+        sta MVFLAGS
+        jmp sgo
+
+; sloopret: re-enter the move loop after a recursion (or an unmade
+; illegal move): rebuild the ZP loop state from the per-ply arrays
+; and dispatch on PASSNO.
+sloopret:
+        ldy PLY
+        lda CURSORLO,y
+        sta CURPTR
+        lda CURSORHI,y
+        sta CURPTR+1
+        lda PLYENDLO,y
+        sta SENDL
+        lda PLYENDHI,y
+        sta SENDH
+        ldx PASSNO,y
+        beq srp0
+        cpx #3
+        bcs srp34
+        ldy #0
+        cpx #1
+        bne srp2
+        jmp p1loop
+srp2:   jmp p2loop
+srp0:   lda TTFROMA,y           ; pass 0: refresh the TT-move mirrors
+        sta TTF0
+        lda TTTOA,y
+        sta TTT0
+        jmp p0loop
+srp34:  lda KILLER1F,y          ; quiet passes: refresh killer mirrors
+        sta KF1
         lda KILLER1T,y
-        cmp TO
-        beq sdomovej
-:       lda KILLER2F,y
-        cmp FROM
-        bne :+
+        sta KT1
+        lda KILLER2F,y
+        sta KF2
         lda KILLER2T,y
-        cmp TO
-        beq sdomovej
-:       jmp sloop
-squietr:                        ; final pass: skip killers (already done)
+        sta KT2
+        cpx #3
+        beq srp3
         lda FEATURES
         and #FT_KILLER
-        beq sdomovej
-        lda KILLER1F,y
-        cmp FROM
-        bne :+
-        lda KILLER1T,y
-        cmp TO
-        beq skskip
-:       lda KILLER2F,y
-        cmp FROM
-        bne sdomovej
-        lda KILLER2T,y
-        cmp TO
-        bne sdomovej
-skskip: jmp sloop
-sdomovej:
-        jmp sdomove
-siscap: lda PASSNO,y
-        cmp #3
-        bcc :+
-        jmp sloop               ; captures were passes 1/2
-:       ; promotions: always heavy; qs nodes take queen promos only
-        lda MVFLAGS
-        and #FL_PROMO
-        beq scapvic
-        lda PASSNO,y
-        cmp #1
-        beq :+
-        jmp sloop               ; promos belong to the heavy pass
-:       lda QSKIND,y
-        beq sdomovej
-        lda MVFLAGS
-        and #FL_PROMO
-        cmp #QUEEN
-        beq sdomovej
-        jmp sloop
-scapvic:
-        ; victim type: ep captures take a pawn
-        lda MVFLAGS
-        and #FL_EP
-        beq :+
-        ldx #PAWN
-        bne scaptier            ; always
-:       ldx TO
-        lda BOARD,x
-        and #TYPEMASK
-        tax
-scaptier:
-        ; tier: victims >= rook are heavy (pass 1), others light (pass 2)
-        lda PASSNO,y
-        cpx #ROOK
-        bcs :+
-        cmp #2                  ; light capture: pass 2 only
-        beq sdelta
-        jmp sloop
-:       cmp #1                  ; heavy capture: pass 1 only
-        beq sdelta
-        jmp sloop
-sdelta: ; delta pruning: skip if the victim can't lift standpat to alpha
-        sec
-        lda VICVALL,x
-        sbc DELTATL,y
-        lda VICVALH,x
-        sbc DELTATH,y
-        bvc :+
-        eor #$80
-:       bpl sdomove             ; victim value >= threshold: search it
-        jmp sloop
+        beq srp4nk
+        jmp p4loop
+srp3:   jmp p3loop
+srp4nk: jmp p4nk
+
+; sgo: search the move at CURPTR (FROM/TO/MVFLAGS loaded): advance
+; the cursor past it and persist for sloopret/setmove4, then make.
+sgo:    ldy PLY
+        lda CURPTR
+        clc
+        adc #4
+        sta CURPTR
+        sta CURSORLO,y
+        lda CURPTR+1
+        adc #0
+        sta CURPTR+1
+        sta CURSORHI,y
+        ; fall through to sdomove
 sdomove:
         jsr make
         ; lazy legality (perf review F1): when the mover was not in
@@ -835,7 +1050,7 @@ slfull: ; full check: mover must not leave their king attacked
         jsr attacked
         bcc slegal
         jsr unmake
-sloopj: jmp sloop
+sloopj: jmp sloopret
 slegal: ldy PLY                 ; PLY = child here
         dey
         lda LEGALCNT,y
@@ -973,23 +1188,23 @@ sdemote1:
 sdemote0:
         lda #0
 :       sta SMODE,y
-        ; refetch the move (cursor is 3 past it) and re-make it;
+        ; refetch the move (cursor is 4 past it) and re-make it;
         ; legality is already proven, no attacked() re-check
         lda CURSORLO,y
         sec
-        sbc #3
-        sta CURPTR
+        sbc #4
+        sta T0
         lda CURSORHI,y
         sbc #0
-        sta CURPTR+1
-        ldy #0
-        lda (CURPTR),y
+        sta T1
+        ldy #1
+        lda (T0),y
         sta FROM
         iny
-        lda (CURPTR),y
+        lda (T0),y
         sta TO
         iny
-        lda (CURPTR),y
+        lda (T0),y
         sta MVFLAGS
         jsr make
         ldy PLY
@@ -1010,7 +1225,7 @@ scheckbc:
         sta SCORE+1
         lda QSKIND,y            ; TT: lower bound + the cutting move
         bne sbetapop
-        jsr setmove3
+        jsr setmove4
         ; killers: remember quiet cutoff moves
         lda FEATURES
         and #FT_KILLER
@@ -1018,8 +1233,8 @@ scheckbc:
         ldx TTENTRY+4
         lda BOARD,x             ; board is restored: nonzero = capture
         bne snokupd
-        ldy #2
-        lda (CURPTR),y          ; setmove3 left CURPTR at the move
+        ldy #3
+        lda (T0),y              ; setmove4 left T0 at the move
         and #FL_EP|FL_PROMO
         bne snokupd
         ldy PLY
@@ -1055,15 +1270,15 @@ snocut: ; alpha improvement? (strict >)
         bvc :+
         eor #$80
 :       bmi :+                  ; SCORE > ALPHA: improvement
-        jmp sloop
+        jmp sloopret
 :       lda SCORE
         sta ALPHALO,y
         lda SCORE+1
         sta ALPHAHI,y
-        ; record this move (cursor was already advanced by 3)
+        ; record this move (cursor was already advanced by 4)
         lda #1
         sta RAISED,y
-        jsr setmove3
+        jsr setmove4
         ldy PLY
         lda TTENTRY+3
         sta TTBF,y
@@ -1071,15 +1286,15 @@ snocut: ; alpha improvement? (strict >)
         sta TTBT,y
         cpy #0
         beq :+
-        jmp sloop
+        jmp sloopret
 :       lda TTENTRY+3           ; root: also for the driver
         sta BESTFROM
         lda TTENTRY+4
         sta BESTTO
-        ldy #2
-        lda (CURPTR),y          ; setmove3 left CURPTR at the move
+        ldy #3
+        lda (T0),y              ; setmove4 left T0 at the move
         sta BESTFLAGS
-        jmp sloop
+        jmp sloopret
 
 sdone:  ; return alpha; full-width nodes with no legal moves: mate/stalemate
         ldy PLY
@@ -1144,28 +1359,70 @@ spop:   ldy PLY
         sta MSP+1
         rts
 
-; Victim values for delta pruning, by piece type. A pseudo-legal king
-; "capture" must always be searched, hence the huge value.
-VICVALL:
-        .byte 0, <100, <320, <330, <500, <975, <20000, 0
-VICVALH:
-        .byte 0, >100, >320, >330, >500, >975, >20000, 0
-
-; setmove3: TTENTRY+3/4 = the from/to of the move at cursor[PLY] - 3
-; (the move just searched; the cursor advances before make).
-setmove3:
+; setmove4: TTENTRY+3/4 = the from/to of the move at cursor[PLY] - 4
+; (the move just searched; the cursor advances before make). Leaves
+; T0/T1 pointing at the move for the callers' flags reads; must not
+; touch CURPTR (the live loop cursor, restored by sloopret).
+setmove4:
         ldy PLY
         lda CURSORLO,y
         sec
-        sbc #3
-        sta CURPTR
+        sbc #4
+        sta T0
         lda CURSORHI,y
         sbc #0
-        sta CURPTR+1
-        ldy #0
-        lda (CURPTR),y
+        sta T1
+        ldy #1
+        lda (T0),y
         sta TTENTRY+3
         iny
-        lda (CURPTR),y
+        lda (T0),y
         sta TTENTRY+4
         rts
+
+        .segment "TABLES"
+
+; TIERTAB: victim piece byte -> move tier (victimtype<<4 | class).
+; Only the low 3 type bits matter (0 = empty square -> quiet); heavy
+; class 1 for victims >= rook, light class 2 below. A pseudo-legal
+; king "capture" must always be searched, hence its huge VV16 value.
+        .align 256
+TIERTAB:
+.repeat 32
+        .byte $04                       ; empty: quiet
+        .byte (PAWN<<4)|2, (KNIGHT<<4)|2, (BISHOP<<4)|2
+        .byte (ROOK<<4)|1, (QUEEN<<4)|1, (KING<<4)|1
+        .byte $04                       ; type 7: never occurs
+.endrepeat
+
+; VV16L/VV16H: victim value for delta pruning, indexed by the full
+; tier byte (row = victimtype, 16 bytes per row; promotions bypass
+; the filter, so row 0 is never consulted).
+.macro VROW val
+.repeat 16
+        .byte <(val)
+.endrepeat
+.endmacro
+.macro VROWH val
+.repeat 16
+        .byte >(val)
+.endrepeat
+.endmacro
+VV16L:
+        VROW 0
+        VROW 100
+        VROW 320
+        VROW 330
+        VROW 500
+        VROW 975
+        VROW 20000
+VV16H:
+        VROWH 0
+        VROWH 100
+        VROWH 320
+        VROWH 330
+        VROWH 500
+        VROWH 975
+        VROWH 20000
+
+        .segment "CODE"

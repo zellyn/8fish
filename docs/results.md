@@ -3,6 +3,36 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-20 — deep optimization review round 3, search/TT cluster: −8.87% total cycles at identical trees (task #49)
+
+Move-storage format change: moves are now 4 bytes — (tier, from, to,
+flags) — with the tier byte computed once by emitmove at generation
+time (victimtype<<4 | class; class 1 = heavy capture/promo, 2 = light
+capture, 4 = quiet, $00 = TT move consumed by pass 0). The search's
+five ordering passes each run a specialized scan loop with the cursor
+ZP-resident (CURPTR + SENDL/H, persisted per-ply only around
+recursion), so skipping a wrong-pass move costs ~33 cycles instead of
+the old ~120-140 (sloop+sfetch+snotp0+snotttm+classify). Pass 0 marks
+the TT move's tier $00 when it searches it, which deletes the per-fetch
+4-way TT-move compare (snotttm, ~2.2% of all cycles) outright. The QS
+delta filter reads victim value straight off the tier byte (VV16
+tables) instead of re-deriving it from the board.
+
+MicroAB fixed-depth suite (18 cases, masks 1f/07/00): every
+search/make/eval/attacked/ttprobe/generate count, score, and best move
+identical to baseline; cycles 6,159.6M → 5,613.4M (−8.87%; per mask:
+1f −8.6%, 07 −9.2%, 00 −8.9%). Move-loop cluster share (2-FEN budget
+profile): ~13.5% → ~5.2%; emitmove grew 3.7% → ~5.0% as designed
+(+23 cyc/emit buys the tier byte). Also: ttprobe now verifies the hash
+inside the LC-resident aux reader and bails before copying on a miss;
+pure-QS nodes skip node-init stores only full-width/evasion nodes read.
+
+Consumers updated for the format: perft.s iteration, recapgen/debug
+test readers. Move-stack capacity now 1151 moves (peak measured usage
+~1.3K bytes of 4.5K; emitmove's exit-100 overflow trap unchanged).
+One contract note: emitmove must preserve X (genrecap keeps its slot
+index there) — the tier lookup runs through Y.
+
 ## 2026-07-20 — deep optimization review round 2 COMPLETE: −14.7% total cycles at identical trees (tasks #46/#47/#48 + micro pass)
 
 The full round-2 batch, every change proven tree-identical (same best

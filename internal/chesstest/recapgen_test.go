@@ -77,8 +77,8 @@ func callGenerateq(t *testing.T, bin []byte, labels map[string]uint16,
 	}
 	end := uint16(m.Mem.Main[defs["MSP"]]) | uint16(m.Mem.Main[defs["MSP"]+1])<<8
 	var moves [][3]byte
-	for p := uint16(moveStack); p < end; p += 3 {
-		moves = append(moves, [3]byte{m.Mem.Main[p], m.Mem.Main[p+1], m.Mem.Main[p+2]})
+	for p := uint16(moveStack); p < end; p += 4 { // 4 bytes: tier,from,to,flags
+		moves = append(moves, [3]byte{m.Mem.Main[p+1], m.Mem.Main[p+2], m.Mem.Main[p+3]})
 	}
 	return moves
 }

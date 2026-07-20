@@ -55,6 +55,8 @@ EPSQ      = $01         ; 0x88 square behind a double push, or NOSQ
 CASTLE    = $02         ; CR_* bits
 PLY       = $03
 ROOTDEPTH = $04         ; perft depth (poked by the test rig)
+SENDL     = $05         ; search move loop: list-end lo (PLYENDLO[PLY] mirror)
+SENDH     = $06         ; search move loop: list-end hi
 PCOUNT    = $08         ; 32-bit little-endian perft leaf counter
 MSP       = $10         ; 16-bit pointer: top of move stack
 FROM      = $12
@@ -75,7 +77,10 @@ GDELTA    = $1F         ; movegen: current step delta
 PROMTYPE  = $21         ; movegen: promotion loop scratch
 GTO       = $22         ; movegen scratch target square
 ATBITS    = $23         ; attacked(): attack-table bits for current diff
-CURPTR    = $24         ; 16-bit: perft move-iteration pointer
+CURPTR    = $24         ; 16-bit: move-iteration pointer. In search this is
+                        ;  the LIVE move-loop cursor between recursions
+                        ;  (persisted in CURSORLO/HI[PLY] across them);
+                        ;  perft and movegen use it as scratch.
 DIFF      = $26         ; attacked(): saved difference index
 ATDELTA   = $27         ; attacked(): slider step delta
 GCOUNT    = $28         ; movegen: offset-loop counter
@@ -83,9 +88,15 @@ CRTMP     = $29         ; castle helpers: rook piece byte
 ATT78     = $2A         ; attacked(): ATSQ + $78 ($77 + 1 for the
                         ;  carry-clear complement-add diff trick)
 VICTIM    = $2B         ; make: captured piece byte
+KF1       = $2C         ; search passes 3/4: killer mirrors for this ply
+KT1       = $2D         ;  (KILLER1F/1T/2F/2T[PLY]; stable during a node's
+KF2       = $2E         ;  move loop, rebuilt by sloopret after recursion)
+KT2       = $2F
 RECAPSQ   = $0C         ; recap2 qs gate: target square recaptures must hit
 RECAPONLY = $0D         ; recap2 qs gate: nonzero -> generateq emits only
                         ;  captures landing on RECAPSQ (prev move's TO)
+TTF0      = $0E         ; search pass 0: TT-move from (TTFROMA[PLY] mirror)
+TTT0      = $0F         ; search pass 0: TT-move to (TTTOA[PLY] mirror)
 
 BOARD     = $40         ; 128-byte 0x88 board, $40..$BF. The 64 off-board
                         ;  bytes (files 8-F of each rank: $48-4F,58-5F,68-6F,
@@ -241,7 +252,12 @@ ITSTART0   = $0230      ; 24-bit CLOCK snapshot at iteration start
 ITSTART1   = $0231      ;  (predictive gate: est next = 2x last cost)
 ITSTART2   = $0232
 
-MOVESTACK  = $0E00      ; 3 bytes/move (from,to,flags); through $1FFF
+MOVESTACK  = $0E00      ; 4 bytes/move (tier,from,to,flags); through $1FFF
+                        ;  (1151-move capacity; emitmove traps overflow with
+                        ;  exit 100). tier = victimtype<<4 | class: class
+                        ;  1 = heavy capture/promo (pass 1), 2 = light
+                        ;  capture (pass 2), 4 = quiet (passes 3/4);
+                        ;  $00 = TT move already consumed by pass 0.
 MOVESTACKTOP = $2000    ; exclusive end; generator overflow-checks this
 
 ; Transposition table: 4096 x 8 bytes in AUX $0200-$81FF (see D6).

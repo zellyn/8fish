@@ -19,8 +19,10 @@ import (
 
 func main() {
 	var (
-		binfile  = flag.String("bin", "asm/engine.bin", "engine binary")
-		defsfile = flag.String("defs", "asm/defs.inc", "memory-layout defs")
+		binfile   = flag.String("bin", "asm/engine.bin", "engine binary")
+		defsfile  = flag.String("defs", "asm/defs.inc", "memory-layout defs")
+		binBfile  = flag.String("binB", "", "side-B engine binary (default: same as -bin)")
+		defsBfile = flag.String("defsB", "", "side-B memory-layout defs (required with -binB)")
 		aBits    = flag.String("a", "0x07", "feature bits for side A")
 		bBits    = flag.String("b", "0x00", "feature bits for side B")
 		budgetMs = flag.Uint64("budget", 5000, "emulated ms per move")
@@ -50,9 +52,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	var binB []byte
+	var defsB chesstest.Defs
+	if *binBfile != "" {
+		if binB, err = os.ReadFile(*binBfile); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if defsB, err = chesstest.ParseDefs(*defsBfile); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+
 	res := sprt.Run(sprt.Config{
 		Bin:          bin,
 		Defs:         defs,
+		BinB:         binB,
+		DefsB:        defsB,
 		FeaturesA:    byte(a),
 		FeaturesB:    byte(b),
 		BudgetCycles: *budgetMs * chesstest.CyclesPerMs,

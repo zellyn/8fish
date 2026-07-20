@@ -41,10 +41,14 @@ var Openings = [][]string{
 }
 
 // Config for a match between two feature configurations of the same
-// engine binary.
+// engine binary, or between two different binaries (set BinB/DefsB;
+// each side needs its own defs since memory layouts drift between
+// builds).
 type Config struct {
 	Bin          []byte
 	Defs         chesstest.Defs
+	BinB         []byte         // nil: side B runs Bin
+	DefsB        chesstest.Defs // nil: side B uses Defs
 	FeaturesA    byte
 	FeaturesB    byte
 	BudgetCycles uint64
@@ -234,7 +238,7 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 	}
 	seen := map[uint64]int{}
 	auxes := map[bool][]byte{} // per-side TT carryover
-	for ply := 0; ply < 400; ply++ {
+	for range 400 {
 		if ref.HalfmoveClock() >= 100 || ref.InsufficientMaterial() {
 			return 0, nil
 		}
@@ -254,20 +258,24 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 			return 1, nil
 		}
 		features := cfg.FeaturesA
+		bin, defs := cfg.Bin, cfg.Defs
 		if !aTurn {
 			features = cfg.FeaturesB
+			if cfg.BinB != nil {
+				bin, defs = cfg.BinB, cfg.DefsB
+			}
 		}
 		pos, err := chesstest.ParseFEN(ref.FEN())
 		if err != nil {
 			return 0, err
 		}
-		m, err := chesstest.NewMachine(cfg.Bin, cfg.Defs, pos, 0, nil)
+		m, err := chesstest.NewMachine(bin, defs, pos, 0, nil)
 		if err != nil {
 			return 0, err
 		}
-		chesstest.SetFeatures(m, cfg.Defs, features)
-		chesstest.SetBudget(m, cfg.Defs, cfg.BudgetCycles, 24)
-		m.Mem.Main[cfg.Defs["HALFMOVE"]] = byte(min(ref.HalfmoveClock(), 255))
+		chesstest.SetFeatures(m, defs, features)
+		chesstest.SetBudget(m, defs, cfg.BudgetCycles, 24)
+		m.Mem.Main[defs["HALFMOVE"]] = byte(min(ref.HalfmoveClock(), 255))
 		if aux := auxes[aTurn]; aux != nil {
 			copy(m.Mem.Aux[:], aux)
 		}
@@ -285,9 +293,9 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 		if code != 0 {
 			return 0, fmt.Errorf("engine exit code %d (fen %q)", code, ref.FEN())
 		}
-		from := m.Mem.Main[cfg.Defs["BESTFROM"]]
-		to := m.Mem.Main[cfg.Defs["BESTTO"]]
-		flags := m.Mem.Main[cfg.Defs["BESTFLAGS"]]
+		from := m.Mem.Main[defs["BESTFROM"]]
+		to := m.Mem.Main[defs["BESTTO"]]
+		flags := m.Mem.Main[defs["BESTFLAGS"]]
 		ms := chesstest.MoveUCI(from, to, flags)
 		mv, err := refchess.ParseMove(ms)
 		if err != nil {

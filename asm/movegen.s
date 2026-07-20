@@ -50,24 +50,12 @@ empage: inc MSP+1
 ; recap2 quiescence shaping: past RecapAfter=2 qs plies, generateq
 ; emits ONLY recaptures - captures whose destination is the square
 ; the previous move landed on (RECAPSQ = UNDOTO[PLY-1], set by
-; gennode when RECAPONLY != 0). The filter lives only in the QMODE=1
-; copy: full-width generate expands EMITJSR/EMITJMP to the same
-; `jsr/jmp emitmove` it always used, so it is byte-for-byte untouched.
+; gennode when RECAPONLY != 0). The QMODE=1 copy dispatches to an
+; attacker-driven generator (genrecap in movegenbody.inc) that asks
+; "which of my pieces capture on RECAPSQ" instead of generating the
+; full move surface and filtering the emissions; the full-width
+; generate copy is untouched.
 ; ---------------------------------------------------------------
-.macro  EMITJSR
-.if ::QMODE = 1
-        jsr qemit
-.else
-        jsr emitmove
-.endif
-.endmacro
-.macro  EMITJMP
-.if ::QMODE = 1
-        jmp qemit
-.else
-        jmp emitmove
-.endif
-.endmacro
 
 QMODE   .set 0
 .proc generate

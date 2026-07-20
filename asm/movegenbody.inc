@@ -1,3 +1,12 @@
+.if ::QMODE = 1
+        ; recap2 shaping: when gennode set RECAPONLY, take the
+        ; attacker-driven recapture generator instead of walking every
+        ; piece's full move surface and filtering the emissions.
+        lda RECAPONLY
+        beq :+
+        jmp genrecap
+:
+.endif
         lda SIDE
         asl
         sta GSLOT
@@ -74,7 +83,7 @@ gswalk: clc
         and #COLORMASK
         beq gsnextdir           ; own piece: stop
         lda #0
-        EMITJSR                 ; capture: emit, then stop
+        jsr emitmove            ; capture: emit, then stop
         jmp gsnextdir
 gsempty:
 .if ::QMODE = 0
@@ -120,7 +129,7 @@ gstloop:
         and #COLORMASK
         beq gstnext             ; own piece
         lda #0
-        EMITJSR
+        jsr emitmove
         jmp gstnext
 gstquiet:
 .if ::QMODE = 0
@@ -319,14 +328,14 @@ gwcap1: clc
         cmp #$70
         beq gwc1promo
         lda #0
-        EMITJMP
+        jmp emitmove
 gwc1promo:
         jmp promoloop
 gwc1ep: lda GTO
         cmp EPSQ
         bne gwc1out
         lda #FL_EP
-        EMITJMP
+        jmp emitmove
 gwc1out:
         rts
 
@@ -387,12 +396,12 @@ gbcap1: clc
         jmp promoloop
 gbc1nopromo:
         lda #0
-        EMITJMP
+        jmp emitmove
 gbc1ep: lda GTO
         cmp EPSQ
         bne gbc1out
         lda #FL_EP
-        EMITJMP
+        jmp emitmove
 gbc1out:
         rts
 
@@ -401,7 +410,7 @@ promoloop:
         lda #KNIGHT
         sta PROMTYPE
 prloop: lda PROMTYPE
-        EMITJSR
+        jsr emitmove
         inc PROMTYPE
         lda PROMTYPE
         cmp #QUEEN+1
@@ -409,25 +418,117 @@ prloop: lda PROMTYPE
         rts
 
 .if ::QMODE = 1
-; ---- recap2 filter (quiescence copy only) ----
-; qemit: gate a candidate capture/promotion before emitmove. When
-; RECAPONLY is clear (qs plies < RecapAfter) every move passes; when
-; set, only moves whose destination (GTO) is RECAPSQ survive. Reached
-; by both jsr (slider/step/promo) and jmp (pawn tail) call sites; the
-; jmp-to-emitmove tail and the drop-rts both return to the grandparent
-; exactly as the original `jmp emitmove` did.
-; A holds the move flags on entry (emitmove needs them); save across the
-; test since the RECAPONLY/GTO loads clobber it.
-qemit:  pha
-        lda RECAPONLY
-        beq qemitgo             ; recap gate off: emit unconditionally
-        lda GTO
+; ---- attacker-driven recapture generator (quiescence copy only) ----
+; genrecap: RECAPONLY=1 - emit exactly the captures whose destination
+; is RECAPSQ, i.e. the recapture subset of the full quiescence
+; emissions. RECAPSQ = UNDOTO[PLY-1] always holds the enemy piece that
+; just moved there (every make leaves its mover on TO; the plies above
+; a RECAPONLY node are qs plies, which never pass the move), so the
+; only candidates are captures ONTO RECAPSQ: a promotion PUSH would
+; need RECAPSQ empty, and an ep capture would need RECAPSQ == EPSQ
+; while a live EPSQ square is empty by construction - both impossible.
+; The empty/own-piece branches below are unreachable belt-and-braces:
+; they emit nothing.
+;
+; Scans the side's 16 piece slots in ASCENDING order - the order the
+; full generator walks GSLOT - and each piece can capture on RECAPSQ
+; at most one way, so the emitted sequence matches the old
+; generate-then-filter path move for move: identical search trees,
+; only cheaper. (A pawn that recaptures onto the last rank emits its
+; four promotion captures via promoloop, N/B/R/Q, same as before.)
+;
+; Structure mirrors attacked() in board.s: diff -> ATTACKTAB bits ->
+; TYPEATK2 piece test -> slider ray walk; same scratch, and the slot
+; half is patched into this routine's own PIECESQ operand low bytes
+; ($00/$10) exactly like attacked()'s SMC.
+genrecap:
+        ldx RECAPSQ
+        lda BOARD,x             ; RECAPSQ is a move destination: on-board
+        beq grout               ; empty: nothing to recapture (see above)
+        eor SIDE
+        and #COLORMASK
+        beq grout               ; own piece there: nothing to capture
+        lda SIDE
+        asl                     ; 0/$10 = slot-half base
+        sta grslot0+1
+        sta grslot1+1
+        lda RECAPSQ
+        clc
+        adc #$78                ; $77 + 1: absorbed by the carry-clear
+        sta ATT78               ;  adc below (eor #$FF is $FF-from)
+        ldx #0
+grloop:
+grslot0:lda PIECESQ,x           ; operand lo byte is SMC ($00/$10)
+        cmp #NOSQ
+        beq grnext              ; tombstone
+        ; diff = RECAPSQ - from + $77, via complement + add. The cmp
+        ; above fell through, so A < $FF and carry is provably CLEAR
+        ; here - the +1 it doesn't add is baked into ATT78. Do NOT
+        ; reorder these three instructions.
+        eor #$FF
+        adc ATT78
+        sta DIFF
+        tay
+        lda ATTACKTAB,y
+        beq grnext              ; no geometric relation (hot exit)
+        sta ATBITS
+grslot1:lda PIECESQ,x           ; reload from-square (operand SMC too)
+        sta GFROM
+        tay
+        lda a:BOARD,y
+        and #TYPEMASK|COLORMASK
+        tay
+        lda TYPEATK2,y          ; piece's attack bit (pawns by color)
+        and ATBITS
+        beq grnext              ; wrong piece for this diff, incl.
+                                ;  wrong-direction pawns
+        cmp #ATK_DIAG
+        bcc grhit               ; $01/$02: knight/king, no ray to walk
+        cmp #ATK_WPAWN
+        bcs grpawn              ; $10/$20: pawn, adjacent (promo check)
+        ; slider: walk the ray from attacker toward RECAPSQ
+        ldy DIFF
+        lda DELTATAB,y
+        sta ATDELTA
+        lda GFROM
+grwalk: clc
+        adc ATDELTA
         cmp RECAPSQ
-        bne qemitno             ; not a recapture: drop it
-qemitgo:
-        pla                     ; restore flags for emitmove
-        jmp emitmove
-qemitno:
-        pla                     ; discard flags; drop the move
-        rts
+        beq grhit
+        tay
+        ; UNMASKED board read: safe only because this ray walks BETWEEN two
+        ; on-board squares and exits at RECAPSQ before leaving the board (every
+        ; square colinear between two on-board squares is on-board). See the
+        ; off-board dead-space contract at BOARD in defs.inc.
+        lda a:BOARD,y
+        bne grnext              ; blocked
+        tya
+        jmp grwalk
+grhit:  lda RECAPSQ
+        sta GTO
+        lda #0
+        jsr emitmove            ; preserves X
+grnext: inx
+        cpx #$10
+        bne grloop
+grout:  rts
+grpawn: ; pawn capture onto RECAPSQ; promotes if that is its last rank
+        ldy RECAPSQ
+        sty GTO
+        and #ATK_WPAWN          ; A = the matched pawn bit ($10/$20)
+        beq grbp
+        tya                     ; white pawn: promotes on rank 8 ($7x)
+        and #$F0
+        cmp #$70
+        beq grpromo
+        bne grflat              ; always
+grbp:   tya                     ; black pawn: promotes on rank 1 ($0x)
+        and #$F0
+        beq grpromo
+grflat: lda #0
+        jsr emitmove
+        jmp grnext
+grpromo:
+        jsr promoloop           ; N,B,R,Q - as the full generator
+        jmp grnext
 .endif

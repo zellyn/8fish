@@ -182,6 +182,27 @@ func main() {
 	b.WriteString("\n.align 256\n")
 	emit(&b, "DBLTAB", dblTab[:])
 
+	// Quarter-square multiply tables for the taper (eval's evmul):
+	// SQRLO/HI[i] = floor(i*i/4), ISQLO/HI[i] = floor((i-32)*(i-32)/4).
+	// a*b = f(a+b) - f(a-b) (exact for integers: a+b and a-b share
+	// parity). eval self-modifies the operand low byte to a (a byte of
+	// |MG-EG|) and indexes with Y = w and X = 32-w, so SQR reads index
+	// a+w (max 255+31 = 286) and ISQ reads a-w+32 (range 1..286);
+	// 512 entries cover both with room, page-aligned for abs,y.
+	var sqrLo, sqrHi, isqLo, isqHi [512]byte
+	for i := range 512 {
+		q := i * i / 4
+		sqrLo[i], sqrHi[i] = byte(q), byte(q>>8)
+		d := i - 32
+		q = d * d / 4
+		isqLo[i], isqHi[i] = byte(q), byte(q>>8)
+	}
+	b.WriteString("\n.align 256\n")
+	emit(&b, "SQRLO", sqrLo[:])
+	emit(&b, "SQRHI", sqrHi[:])
+	emit(&b, "ISQLO", isqLo[:])
+	emit(&b, "ISQHI", isqHi[:])
+
 	// TT addressing: TTPTR = TTBASE + index*8, index = (HASH1&0x0F)<<8 | HASH0.
 	// SHL3TAB/SHR5TAB split HASH0*8 across the pointer bytes; TTHITAB puts
 	// HASH1's nibble in bits 3-6. Page-aligned so lda abs,x never crosses.
@@ -269,14 +290,17 @@ func emitPSQT(b *strings.Builder) {
 	b.WriteString(", 0\n")
 	// Phase contribution per piece type, and phase -> /32 taper weight.
 	b.WriteString("PHASEVAL:\n        .byte 0,0,1,1,2,4,0,0\n")
-	b.WriteString("PHASEW:\n        .byte ")
-	for p := 0; p <= 24; p++ {
-		if p > 0 {
-			b.WriteString(",")
-		}
-		fmt.Fprintf(b, "%d", (p*32+12)/24)
+	// PHASEWX[phase] over the whole byte range, with the >= 24 cap
+	// baked in (promotions can push PHASE past 24; the absolute
+	// ceiling, 9 queens + 2 rooks + 2 minors per side, is 88).
+	// Page-aligned so eval indexes PHASE directly with no cap compare.
+	var phaseWX [256]byte
+	for p := range 256 {
+		c := min(p, 24)
+		phaseWX[p] = byte((c*32 + 12) / 24)
 	}
-	b.WriteString("\n")
+	b.WriteString(".align 256\n")
+	emit(b, "PHASEWX", phaseWX[:])
 }
 
 // emitZobrist writes 32-bit Zobrist keys kind-major: ZKEYS + kind*512

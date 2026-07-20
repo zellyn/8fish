@@ -782,8 +782,8 @@ evinext:
 
 ; ---------------------------------------------------------------
 ; eval: SCORE = tapered eval from the side to move's point of view,
-; including tempo. score_w = EG + ((MG-EG) * w) >> 5, w = PHASEW[phase].
-; Clobbers A,X,Y, T0-T1, MUL0-1, EVTMP, PSQSQ.
+; including tempo. score_w = EG + ((MG-EG) * w) >> 5, w = PHASEWX[phase].
+; Clobbers A,X,Y, T0-T1, MUL0-1, EVTMP, PSQSQ, MULCNT, PSQPIECE.
 ; ---------------------------------------------------------------
 eval:
 .ifdef PTNOCACHE
@@ -798,12 +798,8 @@ eval:
         jsr pawnterm
 :
 .endif
-        lda PHASE
-        cmp #25
-        bcc :+
-        lda #24                 ; cap (early promotions can exceed 24)
-:       tax
-        lda PHASEW,x
+        ldx PHASE
+        lda PHASEWX,x           ; cap at 24 baked into the 256-entry table
         sta EVTMP               ; w, 0..32
         ; fast paths: w=32 (full middlegame) is pure MG, w=0 pure EG —
         ; no multiply needed. w=32 covers every opening/middlegame node.
@@ -842,29 +838,76 @@ eval:
         sbc T1
         sta T1
 evpos:  stx PSQSQ               ; sign flag (scratch reuse)
-        ; MUL1:MUL0 = (T1:T0 * w) >> 5 via right-shift multiply.
-        ; w is 1..31 here (w=32/w=0 fast-pathed above), so 5 iterations
-        ; produce the >>5 for free: the shifted-out bits are exactly
-        ; the product's low 5 bits. T1:T0 is a magnitude < $8000, so
-        ; the accumulator never exceeds 17 bits (carry + 16).
-        lda #0
-        sta MUL0
+        ; MUL1:MUL0 = (T1:T0 * w) >> 5 via quarter-square tables
+        ; (deep optimization review r3): a*b = f(a+b) - f(a-b),
+        ; f(i) = floor(i*i/4) — exact, a+b and a-b share parity.
+        ; SQRLO/HI[i] = f(i), ISQLO/HI[i] = f(i-32); the operand low
+        ; byte is self-modified to a magnitude byte and indexed with
+        ; Y = w, X = 32-w, giving f(a+w) - f(a-w) = a*w. Recombined by
+        ;   (D*w)>>5 = Dhi*w*8 + (Dlo*w)>>5
+        ; (exact: Dhi*w*256 is a multiple of 32) with the page-aligned
+        ; SHL3TAB/SHR5TAB shift tables. Safe for any |D| < $8000:
+        ; Dhi*w < 4096 keeps QH below 16, so SHL3TAB[QH] drops no bits
+        ; and the field ORAs never overlap; verified exhaustively for
+        ; all (D, w) byte-for-byte against this recombination. Old
+        ; shift-add loop cost 120-219 (worst at the heavy-bit w = 27-31
+        ; that dominate QS); this is 153 flat, 85 when |D| < 256.
+        ; Clobbers EVTMP/MULCNT/PSQPIECE as scratch.
+evmul:  lda T0
+        sta evsm1+1             ; SMC: table bases += Dlo
+        sta evsm2+1
+        sta evsm3+1
+        sta evsm4+1
+        ldy EVTMP               ; Y = w (1..31)
+        lda #32
+        sec
+        sbc EVTMP
+        tax                     ; X = 32-w
+evsm1:  lda SQRLO,y             ; f(Dlo+w) lo
+        sec
+evsm2:  sbc ISQLO,x             ; - f(Dlo-w) lo
+        sta EVTMP               ; PL (w now lives only in Y/X)
+evsm3:  lda SQRHI,y
+evsm4:  sbc ISQHI,x             ; PH = (Dlo*w) hi, < 31
+        sta MULCNT
+        lda T1
+        beq evtlo               ; |D| < 256: no high-byte product
+        sta evsm5+1             ; SMC: table bases += Dhi
+        sta evsm6+1
+        sta evsm7+1
+        sta evsm8+1
+evsm5:  lda SQRLO,y             ; f(Dhi+w) lo
+        sec
+evsm6:  sbc ISQLO,x             ; QL = (Dhi*w) lo
+        sta PSQPIECE
+evsm7:  lda SQRHI,y
+evsm8:  sbc ISQHI,x             ; QH = (Dhi*w) hi, < 16
+        tay
+        ldx PSQPIECE
+        ; MUL1:MUL0 = (QH:QL) << 3 = Dhi*w*8
+        lda SHR5TAB,x
+        ora SHL3TAB,y           ; disjoint fields: QH<<3 | QL>>5
         sta MUL1
-        ldx #5
-evmul:  lsr EVTMP
-        bcc evskip              ; bit clear: carry clear into the ror
-        clc                     ; carry is set here (from the lsr)
-        lda MUL0
-        adc T0
+        lda SHL3TAB,x
         sta MUL0
-        lda MUL1
-        adc T1
-        sta MUL1                ; adc carry-out falls into the ror
-evskip: ror MUL1
-        ror MUL0
-        dex
-        bne evmul
-        ; reapply sign
+        ; += (PH:PL) >> 5, a single byte: PH<<3 | PL>>5, disjoint
+        ldx MULCNT
+        ldy EVTMP
+        lda SHL3TAB,x
+        ora SHR5TAB,y
+        clc
+        adc MUL0
+        sta MUL0
+        bcc evsgn
+        inc MUL1
+        bne evsgn               ; always: MUL1 <= 127 before the inc
+evtlo:  sta MUL1                ; A = 0: product fits one byte
+        ldx MULCNT
+        ldy EVTMP
+        lda SHL3TAB,x
+        ora SHR5TAB,y
+        sta MUL0
+evsgn:  ; reapply sign
         lda PSQSQ
         beq evnosgn
         sec

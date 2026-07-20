@@ -45,6 +45,11 @@ type Engine struct {
 	// the asm's current single-PSQT eval.
 	KB *KBTables
 
+	// Extra holds the experimental cheap eval terms (task #18/#51). Zero
+	// value = all off (the asm's current eval). The asm ports the fixed
+	// RookTermsAsm subset behind FT_ROOKX.
+	Extra EvalTerms
+
 	Best      Move // root best move (BESTFROM/BESTTO/BESTFLAGS)
 	RootScore int
 

@@ -270,6 +270,9 @@ func (e *Engine) eval() int {
 	if e.Features&FtPstruct != 0 {
 		score += p.PStruct
 	}
+	if e.Extra.anyOn() {
+		score += e.extraEval()
+	}
 	if p.Side != 0 {
 		score = -score
 	}

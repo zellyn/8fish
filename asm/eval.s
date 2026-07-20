@@ -851,6 +851,189 @@ SHLDW:  .byte 0, 3, 6, 9, $FC, $FF, $02, 0
 SHLDB:  .byte 0, $FD, $FA, $F7, $04, $01, $FE, 0
 
 ; ---------------------------------------------------------------
+; extraterm (FT_ROOKX, task #51): experimental rook/blockade eval terms.
+; Computes the WHITE-POV flat sum into T2:T3 (16-bit signed):
+;   rook on a fully open file (no pawns of either color)  +25 per rook
+;   rook on a semi-open file (no own pawns, enemy present) +12 per rook
+;   2+ own rooks sharing a file                            +15 per file
+;   enemy piece directly in front of a passed pawn         -18
+; Signs are white-minus-black (black rooks/blockades negate). Mirrors
+; internal/mirror/evalterms.go extraEval + blockadeTerm exactly (same
+; open/semi/doubled definitions; same passed-pawn definition as pawnterm,
+; reusing WBLOCKM/BBLOCKM; same enemy-in-front blockade test). Reads the
+; maintained PWBITS/PBBITS for pawn presence and the passer scan. Clobbers
+; A,X,Y, T2/T3 (result), EVTMP, MULCNT, PSQSQ, PSQPIECE, and RKCNT scratch.
+; Gated by the caller (eval/evalinit); when FT_ROOKX is clear it never runs.
+
+; 16-bit signed add/subtract of a small immediate into the T2:T3 accum.
+.macro EXADD c
+        clc
+        lda T2
+        adc #(c)
+        sta T2
+        bcc :+
+        inc T3
+:
+.endmacro
+.macro EXSUB c
+        sec
+        lda T2
+        sbc #(c)
+        sta T2
+        bcs :+
+        dec T3
+:
+.endmacro
+
+extraterm:
+        lda #0
+        sta T2
+        sta T3
+        ldx #15                 ; clear per-file rook counts (file|color)
+etclr:  sta RKCNT,x
+        dex
+        bpl etclr
+        ; ---- pass 1: scan the 32 piece slots for rooks ----
+        ldx #31
+etscan: lda PIECESQ,x
+        cmp #NOSQ
+        beq etnext
+        tay                     ; Y = 0x88 square
+        lda a:BOARD,y
+        and #TYPEMASK
+        cmp #ROOK
+        bne etnext
+        tya
+        and #$07                ; A = file 0..7
+        cpx #16
+        bcs etbrook             ; slot >= 16 -> black
+        ; --- white rook, A = file ---
+        tay                     ; Y = file
+        lda RKCNT,y             ; white file count (colorbit 0)
+        clc
+        adc #1
+        sta RKCNT,y
+        lda PWBITS,y
+        bne etnext              ; own pawn on file: not open/semi
+        lda PBBITS,y
+        bne etwsemi
+        EXADD 25                ; open file
+        jmp etnext
+etwsemi:
+        EXADD 12                ; semi-open file
+        jmp etnext
+etbrook:
+        ; --- black rook, A = file ---
+        tay                     ; Y = file
+        lda RKCNT+8,y           ; black file count at RKCNT[file|8]
+        clc
+        adc #1
+        sta RKCNT+8,y
+        lda PBBITS,y
+        bne etnext              ; own (black) pawn on file: not open/semi
+        lda PWBITS,y
+        bne etbsemi
+        EXSUB 25
+        jmp etnext
+etbsemi:
+        EXSUB 12
+etnext: dex
+        bpl etscan
+        ; ---- doubled rooks: per file, count >= 2 ----
+        ldy #7
+etdbl:  lda RKCNT,y
+        cmp #2
+        bcc etdblb
+        EXADD 15
+etdblb: lda RKCNT+8,y
+        cmp #2
+        bcc etdbln
+        EXSUB 15
+etdbln: dey
+        bpl etdbl
+        ; ---- passed-pawn blockade (per file 0..7) ----
+        lda #0
+        sta MULCNT              ; MULCNT = file
+etblk:  ldy MULCNT
+        ; --- white passer on this file? ---
+        lda PWBITS,y
+        beq etbblk              ; no white pawn
+        sta PSQPIECE            ; own bits
+        lda PBBITS,y            ; black bits on files f-1..f+1
+        cpy #0
+        beq :+
+        ora PBBITS-1,y
+:       cpy #7
+        beq :+
+        ora PBBITS+1,y
+:       ldx PSQPIECE
+        and WBLOCKM,x           ; any black pawn at rank >= our best?
+        bne etbblk              ; not passed
+        lda PSQPIECE            ; MSB rank of own bits -> X
+        ldx #7
+etmsb:  asl                     ; old bit7 -> carry; N/Z here are stale
+        bcs etmsbf              ; the bit at rank X was the most advanced
+        dex
+        bpl etmsb              ; own bits nonzero: always terminates
+etmsbf: cpx #7
+        beq etbblk              ; r == 7 (defensive; pawns never rank 7)
+        inx                     ; r+1 = front rank
+        txa
+        asl
+        asl
+        asl
+        asl                     ; (r+1) << 4
+        ora MULCNT              ; | file -> front square
+        tay
+        lda a:BOARD,y
+        beq etbblk              ; empty front
+        and #COLORMASK
+        beq etbblk              ; own (white) piece: not an enemy blockade
+        EXSUB 18                ; black piece blockades white passer
+etbblk: ; --- black passer on this file? ---
+        ldy MULCNT
+        lda PBBITS,y
+        beq etblkn              ; no black pawn
+        sta PSQPIECE
+        lda PWBITS,y            ; white bits on files f-1..f+1
+        cpy #0
+        beq :+
+        ora PWBITS-1,y
+:       cpy #7
+        beq :+
+        ora PWBITS+1,y
+:       ldx PSQPIECE
+        and BBLOCKM,x           ; any white pawn at rank <= our best?
+        bne etblkn              ; not passed
+        lda PSQPIECE            ; LSB rank of own bits -> X
+        ldx #0
+etlsb:  lsr
+        bcs etlsbf
+        inx
+        bpl etlsb
+etlsbf: cpx #0
+        beq etblkn              ; r == 0 (defensive)
+        dex                     ; r-1 = front rank
+        txa
+        asl
+        asl
+        asl
+        asl
+        ora MULCNT
+        tay
+        lda a:BOARD,y
+        beq etblkn              ; empty front
+        and #COLORMASK
+        bne etblkn              ; own (black) piece: not an enemy blockade
+        EXADD 18                ; white piece blockades black passer
+etblkn: inc MULCNT
+        lda MULCNT
+        cmp #8
+        beq etblkx              ; done
+        jmp etblk               ; long back-edge (loop body > 128 bytes)
+etblkx: rts
+
+; ---------------------------------------------------------------
 ; evalinit: recompute accumulators and the Zobrist hash from the board
 ; (root setup, and a debug cross-check against the incremental path).
 ; ---------------------------------------------------------------
@@ -898,7 +1081,19 @@ evinext:
         beq :+
         jsr hashep
 :       jsr ptbuild             ; initial pawn-file bitmasks; make/unmake
-        jmp pawnterm            ;  maintain them from here on (clears PDIRTY)
+        jsr pawnterm            ;  maintain them from here on (clears PDIRTY)
+        ; task #51: cache the ROOT position's extra-term value for the
+        ; parity harness. eval recomputes it live (into T2/T3) and never
+        ; writes XSTRUCT, so this stays valid at the root after a search.
+        lda FEATURES
+        and #FT_ROOKX
+        beq :+
+        jsr extraterm
+        lda T2
+        sta XSTRUCT
+        lda T3
+        sta XSTRUCT+1
+:       rts
 
 ; ---------------------------------------------------------------
 ; eval: SCORE = tapered eval from the side to move's point of view,
@@ -1057,6 +1252,18 @@ evpov:  ; pawn-structure/king-shield term (white POV, kept current by
         sta SCORE
         lda SCORE+1
         adc PSTRUCT+1
+        sta SCORE+1
+:       ; experimental rook/blockade terms (white POV), FT_ROOKX-gated
+        lda FEATURES
+        and #FT_ROOKX
+        beq :+
+        jsr extraterm
+        clc
+        lda SCORE
+        adc T2
+        sta SCORE
+        lda SCORE+1
+        adc T3
         sta SCORE+1
 :       ; side-to-move POV
         lda SIDE

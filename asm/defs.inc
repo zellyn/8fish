@@ -196,6 +196,15 @@ FT_KILLER = $02         ; killer-move ordering
 FT_FUTIL  = $04         ; futility + reverse-futility at depth <= 2
 FT_PSTRUCT = $08        ; pawn-structure + king-shield eval term
 FT_LMR    = $10         ; PVS zero-window scouts + late move reductions
+FT_ROOKX  = $20         ; experimental rook/blockade eval terms (task #51):
+                        ;  rook open-file +25 / semi-open +12 (per rook),
+                        ;  doubled rooks on a file +15, passed-pawn
+                        ;  blockade -18. White-POV, flat (not tapered),
+                        ;  added to SCORE beside PSTRUCT. Computed live in
+                        ;  eval by extraterm (a piece-list scan + per-file
+                        ;  blockade pass); zero cost when the bit is clear
+                        ;  (arm A == the current engine byte-for-byte).
+                        ;  A/B via sprt -a 0x3F -b 0x1F.
 FT_CKVERIFY = $80       ; debug: verify make's gives-check against a
                         ; full scan at every node (exit 101 on mismatch)
 
@@ -262,6 +271,16 @@ UNDOPSH    = $0DC0
 SMODE      = $0DE0      ; child window mode for the move being searched:
                         ;  0 full window, 1 zero-window scout (PVS),
                         ;  2/3 scout reduced by 1/2 (LMR)
+
+; FT_ROOKX eval-term state (task #51), MAIN just above PWBITS/PBBITS.
+; RKCNT: per-file rook counts, file|colorbit indexed (colorbit = $08,
+; like PWBITS/PBBITS), scratch rebuilt on every extraterm call from the
+; piece-list scan; drives the doubled-rook bonus. XSTRUCT: the last
+; white-POV extra-term value; evalinit writes the ROOT position's value
+; here for the parity harness (eval recomputes live into T2/T3 and never
+; touches XSTRUCT, so it stays valid at the root after a search).
+RKCNT      = $0210      ; 16 bytes ($0210-$021F)
+XSTRUCT    = $0220      ; 16-bit signed, white POV
 
 ; Driver scratch (budget mode)
 ITSTART0   = $0230      ; 24-bit CLOCK snapshot at iteration start

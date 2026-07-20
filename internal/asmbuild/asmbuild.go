@@ -65,6 +65,43 @@ func Build(root string) error {
 	return nil
 }
 
+// BuildVariant assembles engine.s with extra ca65 -D defines into a
+// distinct binary + label file under asm/, named "<out>.bin"/"<out>.lbl"
+// (e.g. out="engine_noptcache", defines=["PTNOCACHE"]). It assumes the
+// generated tables are already up to date (Build, run by TestMain,
+// regenerates them), so it only re-assembles/links engine.s. Used by
+// differential and cycle-measurement tests that need an A/B binary.
+func BuildVariant(root, out string, defines ...string) error {
+	if _, err := exec.LookPath("ca65"); err != nil {
+		return ErrCA65NotInstalled
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	asm := filepath.Join(root, "asm")
+
+	run := func(name string, args ...string) error {
+		cmd := exec.Command(name, args...)
+		cmd.Dir = asm
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("%s %s (in %s): %w\n%s", name, strings.Join(args, " "), asm, err, out)
+		}
+		return nil
+	}
+
+	obj := out + ".o"
+	ca65 := []string{"-g"}
+	for _, d := range defines {
+		ca65 = append(ca65, "-D", d)
+	}
+	ca65 = append(ca65, "engine.s", "-o", obj)
+	if err := run("ca65", ca65...); err != nil {
+		return err
+	}
+	return run("ld65", "-C", "engine.cfg", obj, "-o", out+".bin", "-Ln", out+".lbl")
+}
+
 // BuildT is a testing.TB convenience wrapper around Build: it skips the
 // test cleanly if ca65 is not installed, and fails it on any other build
 // error. root is the chess6502 module root as Build expects it; callers

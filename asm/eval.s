@@ -697,6 +697,18 @@ evinext:
 ; Clobbers A,X,Y, T0-T1, MUL0-1, EVTMP, PSQSQ.
 ; ---------------------------------------------------------------
 eval:
+.ifdef PTNOCACHE
+        ; measurement baseline (task #47): recompute the pawn-structure
+        ; term from scratch on every eval instead of reading the
+        ; incrementally-maintained cache. Gated by FT_PSTRUCT to match
+        ; the consumer below. pawnterm clobbers A/X/Y/T0-T3/EVTMP/MULCNT/
+        ; PSQSQ and $0200-$020F scratch, all dead on entry to eval.
+        lda FEATURES
+        and #FT_PSTRUCT
+        beq :+
+        jsr pawnterm
+:
+.endif
         lda PHASE
         cmp #25
         bcc :+

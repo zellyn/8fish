@@ -398,6 +398,14 @@ cknone: ldx PLY
         lda #0
         sta INCHK,x
 ckdone:
+.ifdef PTNOCACHE
+        ; measurement baseline (task #47): disable the incremental
+        ; pawn-structure cache. make never recomputes; eval recomputes
+        ; PSTRUCT fresh on every call. Same PSTRUCT at every eval, so
+        ; identical search trees — only cycles differ.
+        lda #0
+        sta PDIRTY
+.else
         ; refresh the pawn/king structure term if a pawn or king moved
         lda PDIRTY
         beq :+
@@ -407,6 +415,7 @@ ckdone:
         jmp pawnterm            ; clears PDIRTY; rts returns to caller
 :       lda #0
         sta PDIRTY
+.endif
 .endif
         rts
 

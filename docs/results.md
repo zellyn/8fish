@@ -3,6 +3,26 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-20 — FULL-STACK speedup Elo conversion: +92 ± 33 (300 games)
+
+The headline measurement of the day's deep-optimization campaign:
+round-2+3 binary (49129bd, −39.5% cycles = ×1.65 speed) vs the
+pre-round-2 morning baseline (5573b65), both full-featured at equal
+30s-emulated/move budgets, 150 opening pairs, two-binary sprt mode.
+
+**+138 =102 −60 = 63.0% → +92 ± 33 Elo, llr(0,10) 3.58.**
+
+Together with the round-2-only point (+35 ± 32 at ×1.17), this puts
+the engine's speed→Elo conversion at roughly 130–150 Elo per speed
+doubling — well above the classic ~70/doubling, as expected at shallow
+6502 depths where each extra ply is worth a lot. Identical-tree cycle
+reduction is now the project's best-proven strength lever end to end:
+cycles → (measured) → Elo.
+
+Note: the emit-fusion (−1.92%, merged after this match started) and
+the FT_ROOKX port are not in the measured binary; current main is
+slightly ahead of the +92 point.
+
 ## 2026-07-20 — deep optimization review: emit-interface fusion, −1.92% total cycles at identical trees (task #50)
 
 The emit-interface fusions the round-3 movegen/search reviews designed

@@ -3,6 +3,22 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-20 — round-2 speedup Elo conversion: +35 ± 32 (300 games)
+
+First measurement of cycles→Elo on the asm engine using the new
+two-binary self-play mode (`cmd/sprt -binB/-defsB`; each side runs its
+own binary + memory-layout defs, per-side aux TT carryover): round-2
+binary (b5a3cfe, −14.7% cycles) vs pre-round-2 baseline (5573b65),
+both full-featured at equal 30s-emulated/move budgets, 150 opening
+pairs.
+
+**+113 =104 −83 = 55.0% → +35 ± 32 Elo.** The −14.7% cycle reduction
+(×1.17 speed) converted at or above the classic ~70-Elo-per-doubling
+rate. This is the direct experimental confirmation that identical-tree
+speedups convert to strength under the time budget — the lever the
+deep optimization reviews are pulling. A second match measuring the
+full round-2+3 stack (−39.5%, ×1.65) is running.
+
 ## 2026-07-20 — deep optimization review round 3 COMPLETE: −29.1% total cycles at identical trees (task #49)
 
 Five parallel per-routine reviews, each with license to renegotiate

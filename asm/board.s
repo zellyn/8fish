@@ -177,9 +177,108 @@ make:
         lda a:BOARD,y           ; force absolute: no lda zp,y mode exists
         sta MVPIECE
         sta UNDOPIECE,x
-
-        ; capture square: TO, or the pushed-past square for en passant
         lda MVFLAGS
+        beq mkfast              ; no flags: plain move or plain capture
+        jmp mkslow              ; ep/double/promo/castle: rare path
+
+; ---- fast path: MVFLAGS == 0 (plain quiet move or plain capture).
+; Implicitly: capture square is TO, no promotion, no castle, and the
+; new ep square is NOSQ. This covers the overwhelming share of makes.
+mkfast:
+        lda TO
+        sta UNDOCAPSQ,x
+        tay
+        lda a:BOARD,y           ; victim byte (0 if quiet move)
+        sta UNDOCAP,x
+        beq mkfquiet
+        ; capture: remove victim, clear square, tombstone list slot
+        sta VICTIM
+.ifndef NOEVAL
+        jsr takepiece           ; A = victim, Y = capture square: fused
+.endif
+        ldy TO
+        lda #0
+        sta a:BOARD,y
+.ifndef NOEVAL
+        sta HALFMOVE            ; capture: 50-move clock resets
+.endif
+        ldy VICTIM
+        lda SLOTTAB,y
+        tay
+        lda #NOSQ
+        sta PIECESQ,y
+        jmp mkfmove
+mkfquiet:
+.ifndef NOEVAL
+        ; quiet: a pawn push resets the 50-move clock, else it ticks
+        lda MVPIECE
+        and #TYPEMASK
+        cmp #PAWN
+        bne :+
+        lda #0
+        sta HALFMOVE
+        beq mkfmove             ; always
+:       inc HALFMOVE            ; bounded: root value + MAXPLY < 256
+.endif
+mkfmove:
+        ; move the piece: clear FROM, fused hash+psqt, place on TO
+        ldy FROM
+        lda #0
+        sta a:BOARD,y
+.ifndef NOEVAL
+        jsr movepiece           ; contract: Y = FROM at entry
+.endif
+        ldy TO
+        lda MVPIECE
+        sta a:BOARD,y
+        tay
+        lda SLOTTAB,y
+        tay
+        lda TO
+        sta PIECESQ,y
+        ; castling rights: CASTLE &= CASTLEMASK[FROM] & CASTLEMASK[TO];
+        ; cmp-before-sta leaves Z = "rights unchanged" (sta keeps flags)
+        ldy FROM
+        lda CASTLEMASK,y
+        ldy TO
+        and CASTLEMASK,y
+        and CASTLE
+        ldx PLY
+        cmp CASTLE
+        sta CASTLE
+.ifndef NOEVAL
+        beq mkfnocch
+        lda UNDOCASTLE,x
+        jsr hashcastle          ; xor out the old rights
+        lda CASTLE
+        jsr hashcastle          ; xor in the new
+        ldx PLY
+mkfnocch:
+        ; ep: never a double push here; hash out the old ep file if set
+        lda UNDOEP,x
+        cmp #NOSQ
+        beq mkfnoep
+        jsr hashep
+mkfnoep:
+.endif
+        lda #NOSQ
+        sta EPSQ
+.ifndef NOEVAL
+        jsr hashstm
+.endif
+        lda SIDE
+        eor #COLORMASK
+        sta SIDE
+        inc PLY
+.ifndef NOEVAL
+        jmp ckfast              ; flags==0: direct/discovered scan only
+.else
+        rts
+.endif
+
+; ---- slow path: en passant, double push, promotion, castle ----
+mkslow:
+        ; capture square: TO, or the pushed-past square for en passant
         and #FL_EP
         beq mknotep
         lda MVPIECE
@@ -623,8 +722,50 @@ unmake:
         tay
         lda UNDOFROM,x
         sta PIECESQ,y
-        ; castle: move the rook back
         lda UNDOFLAGS,x
+        bne umslow              ; castle rook / promo handling: rare
+; ---- fast path: flags == 0, no castle, no promo ----
+        ; restore any captured piece
+        lda UNDOCAP,x
+        beq umfnocap
+        ldy UNDOCAPSQ,x
+        sta a:BOARD,y
+        tay                     ; victim byte -> its slot
+        lda SLOTTAB,y
+        tay
+        lda UNDOCAPSQ,x
+        sta PIECESQ,y
+.ifndef NOEVAL
+        ; pawn victim: its file bit returns (pbtoggle is self-inverse)
+        lda UNDOCAP,x
+        and #TYPEMASK
+        cmp #PAWN
+        bne umfnocap
+        ldy UNDOCAPSQ,x
+        lda UNDOCAP,x
+        jsr pbtoggle
+        ldx PLY
+.endif
+umfnocap:
+.ifndef NOEVAL
+        ; pawn mover: FROM and TO file bits re-toggle (never a promo here)
+        lda UNDOPIECE,x
+        and #TYPEMASK
+        cmp #PAWN
+        bne umfdone
+        ldy UNDOFROM,x
+        lda UNDOPIECE,x
+        jsr pbtoggle
+        ldx PLY                 ; pbtoggle clobbered X
+        ldy UNDOTO,x
+        lda UNDOPIECE,x
+        jsr pbtoggle
+.endif
+umfdone:
+        rts
+
+; ---- slow path: castle / promo / ep flags set ----
+umslow:
         and #FL_CASTLE
         beq umnocastle
         jsr uncastlerook

@@ -667,79 +667,68 @@ ptdone: lda T0
         sta PSTRUCT+1
         rts
 
-; helpers: T0/T1 16-bit signed accumulator ---------------------------
-ptadda: clc                     ; A (unsigned small) added
-        adc T0
-        sta T0
-        bcc :+
-        inc T1
-:       rts
-ptsuba: sta MULCNT              ; NOT EVTMP: the king-shield loops keep
-        sec                     ;  the king file there across calls
-        lda T0
-        sbc MULCNT
-        sta T0
-        bcs :+
-        dec T1
-:       rts
 ; (doubled/isolated magnitudes — 12 and 7, Texel-tuned on the
 ; diversified corpus — are inlined in the PTFILE macro; DBLTAB gates
 ; the doubled hit.)
 
-; ptshieldw/b: A = king file; +8 per shielded file, -10 for an open
-; own file under the king. Clobbers Y, EVTMP.
+; ptshieldw/b: A = king file; +3 per file in {kf-1, kf, kf+1} holding
+; own pawns (any rank), -4 when the king's own file is open. Count-
+; then-lookup (deep optimization review r3): Y = count (1..3) when the
+; own file is shielded, or 4 + neighbor count (4..6) when it is open;
+; one signed SHLDW/SHLDB table add replaces the four jsr ptadda/ptsuba
+; round trips. Clobbers A,X,Y; T0/T1 accumulator as before.
 ptshieldw:
-        sta EVTMP
-        tay
-        lda PWBITS,y
-        beq :+
-        lda #3
-        jsr ptadda
-:       ldy EVTMP
+        tax                     ; X = king file
+        ldy #1                  ; assume own file shielded
+        lda PWBITS,x
+        bne :+
+        ldy #4                  ; open file under the king (count = 0)
+:       cpx #0
         beq :+                  ; file a: no left neighbor
-        lda PWBITS-1,y
+        lda PWBITS-1,x
         beq :+
-        lda #3
-        jsr ptadda
-:       ldy EVTMP
-        cpy #7
+        iny
+:       cpx #7
+        beq :+                  ; file h: no right neighbor
+        lda PWBITS+1,x
         beq :+
-        lda PWBITS+1,y
-        beq :+
-        lda #3
-        jsr ptadda
-:       ldy EVTMP
-        lda PWBITS,y
-        bne :+
-        lda #4                  ; open file under the king
-        jsr ptsuba
-:       rts
+        iny
+:       ldx #0                  ; X = high byte of the signed term
+        lda SHLDW,y
+shtail: bpl :+
+        dex                     ; negative: sign-extend
+:       clc
+        adc T0
+        sta T0
+        txa
+        adc T1
+        sta T1
+        rts
 ptshieldb:
-        sta EVTMP
-        tay
-        lda PBBITS,y
-        beq :+
-        lda #3
-        jsr ptsuba
-:       ldy EVTMP
-        beq :+
-        lda PBBITS-1,y
-        beq :+
-        lda #3
-        jsr ptsuba
-:       ldy EVTMP
-        cpy #7
-        beq :+
-        lda PBBITS+1,y
-        beq :+
-        lda #3
-        jsr ptsuba
-:       ldy EVTMP
-        lda PBBITS,y
+        tax
+        ldy #1
+        lda PBBITS,x
         bne :+
-        lda #4
-        jsr ptadda
-:       rts
+        ldy #4
+:       cpx #0
+        beq :+
+        lda PBBITS-1,x
+        beq :+
+        iny
+:       cpx #7
+        beq :+
+        lda PBBITS+1,x
+        beq :+
+        iny
+:       ldx #0
+        lda SHLDB,y             ; sets N for shtail's sign test
+        jmp shtail              ; (jmp preserves flags)
+
+; shield term by Y index: 1-3 = shielded count, 4-6 = 4 + neighbor
+; count with the own file open. value = 3*count - 4*open, white POV;
+; SHLDB is the black-POV negation.
+SHLDW:  .byte 0, 3, 6, 9, $FC, $FF, $02, 0
+SHLDB:  .byte 0, $FD, $FA, $F7, $04, $01, $FE, 0
 
 ; ---------------------------------------------------------------
 ; evalinit: recompute accumulators and the Zobrist hash from the board

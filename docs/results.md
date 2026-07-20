@@ -3,6 +3,49 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-20 — deep optimization review round 2, part 1: attacker-driven recapture generator (task #46)
+
+Profiling the shipped engine (recap2 era) showed RECAPONLY quiescence
+plies consuming 27–46% of ALL search cycles, with `generateq` alone at
+7.5–15.4% of total — because recapture-only nodes ran the FULL move
+generator and discarded every emission not landing on RECAPSQ.
+
+Replaced with `genrecap`: an attacker-driven generator that scans the
+16 piece slots in ascending order and asks "does this piece capture on
+RECAPSQ?" via the attacked()-style diff → ATTACKTAB → TYPEATK2 test
+plus a colinear-terminated slider ray walk. Promotion-recaptures emit
+N/B/R/Q via promoloop as before. The qemit filter and EMITJSR/EMITJMP
+macros are gone (non-recap QS emissions also shed the filter call).
+
+Verification (independent, two ways, re-run by the integrator):
+- Set/order equality: 20 positions × 64 squares = 1280 states, new
+  generator vs full-generator-filtered — 0 mismatches, order included.
+- Tree identity: old vs new binaries at fixed d5/d6 over 6 positions,
+  hashing (FROM,TO,MVFLAGS) at every make — all IDENTICAL.
+
+Measured: **−6.03% total search cycles suite-wide** (−0.0% quiet
+endgame → −9.5% tactical middlegame) at provably identical trees; the
+recapture-generation slice fell from 7.5–15.4% of total to 0.7–1.6%.
+Pure speedup → depth under the time budget; no SPRT required.
+Commit 1533f2c, engine.bin md5 23d17cc1347e6c4c4ff82a3a2877b7ef.
+
+Post-merge profile: remaining hot spots are the pawn-structure eval
+cluster (pt*, ~13–15%) and full-QS-mode generateq (11–16.7%).
+
+## 2026-07-20 — Sargon driver: promotion submission fixed (task #45)
+
+Root cause of the two gauntlet harness deaths: Sargon does not promote
+on the FROM-TO RETURN — it shows "ENTER PROMOTED PIECE" and blocks.
+The driver now types FROM-TO, waits for the prompt, and answers it
+(RETURN accepts the Queen default; N/R/B + RETURN under-promotes; the
+letter typed inside the FROM-TO field is rejected as INVALID MOVE).
+The prompt itself is the accept signal — post-promotion the $60-$7F
+piece list is Sargon's search scratch, so board-polling misfired (the
+"screen: CHECK" death). Decode of Sargon's own promotions ("/Q" etc.)
+was audited correct. Regression tests cover Q/N/R promotions both
+colors, promotion-with-check, and Sargon-side decode; full driver
+suite green. Commit f81d8e9.
+
 ## 2026-07-20 — FAIR Sargon III gauntlet: varied openings, Sargon at pondering-equivalent time (task #44 partial)
 
 The first *fair* Sargon III benchmark: 40 games (20 openings × both

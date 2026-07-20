@@ -605,10 +605,13 @@ snode:  jsr gennode             ; picks generate/generateq via QSKIND
 sloop:  ldy PLY
         lda CURSORLO,y
         cmp PLYENDLO,y
-        bne sfetch
+        bne sfetch              ; common: A = cursor lo, Y = PLY
         lda CURSORHI,y
         cmp PLYENDHI,y
-        bne sfetch
+        beq slpass              ; both bytes equal: end of list
+        lda CURSORLO,y          ; rare (move stack crossed a page): reload lo
+        jmp sfetch
+slpass:
         ; end of list: 0 (TT move) -> 1 (heavy captures: promotions and
         ; victims >= rook) -> 2 (light captures) -> 3 (killers) ->
         ; 4 (quiets) -> done; qs and futility nodes stop after pass 2
@@ -650,18 +653,15 @@ spassgo:
         lda PLYBASEHI,y
         sta CURSORHI,y
         jmp sloop
-sfetch: lda CURSORLO,y
-        sta CURPTR
-        lda CURSORHI,y
-        sta CURPTR+1
+sfetch: sta CURPTR              ; A = cursor lo (from sloop), Y = PLY
         ; advance cursor now, so skipping a move is just "jmp sloop"
-        lda CURSORLO,y
         clc
         adc #3
         sta CURSORLO,y
-        bcc :+
         lda CURSORHI,y
-        adc #0
+        sta CURPTR+1            ; pointer high = unadvanced cursor high
+        bcc :+
+        adc #0                  ; carry from adc #3: bump the stored high
         sta CURSORHI,y
 :       ldy #0
         lda (CURPTR),y

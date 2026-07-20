@@ -33,10 +33,10 @@ atslot0:lda PIECESQ,x           ; operand lo byte is SMC ($00/$10)
         ; reorder these three instructions.
         eor #$FF
         adc ATT78
-        sta DIFF
         tay
         lda ATTACKTAB,y
         beq atnext              ; no geometric relation (hot exit)
+        sty DIFF                ; defer: store only on a geometric hit
         sta ATBITS
 atslot1:lda PIECESQ,x           ; reload from-square (operand SMC too)
         sta ATTMP

@@ -8,37 +8,91 @@ TYPEATKTAB:
 ; ---------------------------------------------------------------
 ; attacked: is ATSQ attacked by any piece of side ATSIDE (0/$08)?
 ; Out: carry set if attacked. Clobbers A,X,Y, ATTMP/ATBITS/DIFF/
-; ATDELTA/ATT78. Self-modifying (RAM-resident, IRQs off): the side's
-; slot-half is patched into this routine's own PIECESQ operand low
-; bytes ($00/$10; PIECESQ is page-aligned and X <= $0F, so the abs,x
-; reads never cross a page). Scans slots high-to-low.
+; ATDELTA (ATT78 is no longer touched; genrecap still uses it).
+;
+; Deep-opt round 3: fully unrolled per-side bodies (no SMC, no dex/bpl
+; loop, no zp ATT78 reload) scanning slots high-to-low like the old
+; loop. X holds ATSQ+$77 for the whole scan and the per-slot filter is
+;
+;         txa                   ; A = ATSQ+$77
+;         sbc PIECESQ+n         ; diff = ATSQ-from+$77; carry doubles
+;         bcc next_tomb         ;  as the tombstone test: a live square
+;         tay                   ;  (<= $77 <= ATSQ+$77) never borrows,
+;         lda ATTACKTAB,y       ;  NOSQ ($FF > $EE >= ATSQ+$77) always
+;         beq next              ;  does
+;
+; The sbc needs carry SET on entry; every arithmetic path preserves it
+; (tay/lda/beq/jsr don't touch C), and the two paths that break it -
+; a tombstone's bcc and atgeo's carry-clear miss return - re-enter the
+; next slot at its next_tomb entry, which is a sec prefix. Geometric
+; relations (~2 per call) take a jsr to the shared atgeo tail, which
+; reconstructs the from-square as (ATSQ+$77)-diff instead of reloading
+; the piece list, and returns carry = "this slot attacks ATSQ".
 ; ---------------------------------------------------------------
-attacked:
-        lda ATSIDE
-        asl                     ; 0 or $10 = slot-half base
-        sta atslot0+1
-        sta atslot1+1
-        lda ATSQ
-        clc
-        adc #$78                ; $77 + 1: absorbed by the carry-clear
-        sta ATT78               ;  adc below (eor #$FF is $FF-from)
-        ldx #$0F
-atloop:
-atslot0:lda PIECESQ,x           ; operand lo byte is SMC ($00/$10)
-        cmp #NOSQ
-        beq atnext              ; tombstone
-        ; diff = ATSQ - from + $77, via complement + add. The cmp
-        ; above fell through, so A < $FF and carry is provably CLEAR
-        ; here - the +1 it doesn't add is baked into ATT78. Do NOT
-        ; reorder these three instructions.
-        eor #$FF
-        adc ATT78
+
+; One 16-slot body. prefix names the per-slot labels (atwNN/atbNN, with
+; NN_t the carry-repairing tombstone entries); base is the side's
+; PIECESQ half. Slot 0 ends the chain: its tombstone bcc lands on a
+; plain rts with carry already clear, its no-relation beq on clc/rts,
+; and after its jsr atgeo the carry IS the answer, so it just rts's.
+.macro ATBODY prefix, base
+        .local missclc, rtsonly
+.repeat 15, i
+.ident(.sprintf("%s%02d_t", prefix, 15-i)):
+        sec
+.ident(.sprintf("%s%02d", prefix, 15-i)):
+        txa
+        sbc base+15-i
+        bcc .ident(.sprintf("%s%02d_t", prefix, 14-i))
         tay
         lda ATTACKTAB,y
-        beq atnext              ; no geometric relation (hot exit)
-        sty DIFF                ; defer: store only on a geometric hit
+        beq .ident(.sprintf("%s%02d", prefix, 14-i))
+        jsr atgeo
+        bcc .ident(.sprintf("%s%02d_t", prefix, 14-i))
+        rts
+.endrepeat
+.ident(.sprintf("%s00_t", prefix)):
+        sec
+.ident(.sprintf("%s00", prefix)):
+        txa
+        sbc base
+        bcc rtsonly             ; tombstone: carry already clear
+        tay
+        lda ATTACKTAB,y
+        beq missclc
+        jsr atgeo               ; carry = answer
+rtsonly:
+        rts
+missclc:
+        clc
+        rts
+.endmacro
+
+attacked:
+        lda ATSIDE
+        beq atwentry
+        lda ATSQ
+        clc
+        adc #$77                ; never carries: ATSQ <= $77
+        tax
+        jmp atb15_t
+atwentry:
+        lda ATSQ
+        clc
+        adc #$77
+        tax
+        ; fall through into the white body's sec entry
+ATBODY "atw", PIECESQ
+ATBODY "atb", PIECESQ+16
+
+; atgeo: shared geometric tail. In: A = ATTACKTAB bits (nonzero),
+; Y = diff, X = ATSQ+$77 (preserved), carry SET. Out: carry set iff
+; this slot's piece attacks ATSQ. Clobbers A,Y, ATTMP/ATBITS/DIFF/
+; ATDELTA.
+atgeo:  sty DIFF
         sta ATBITS
-atslot1:lda PIECESQ,x           ; reload from-square (operand SMC too)
+        txa
+        sbc DIFF                ; carry set: A = from = ATSQ+$77-diff
         sta ATTMP
         tay
         lda a:BOARD,y
@@ -46,12 +100,12 @@ atslot1:lda PIECESQ,x           ; reload from-square (operand SMC too)
         tay
         lda TYPEATK2,y          ; piece's attack bit (pawns by color)
         and ATBITS
-        beq atnext              ; wrong piece for this diff, incl.
+        beq atgmiss             ; wrong piece for this diff, incl.
                                 ;  wrong-direction pawns
         cmp #ATK_DIAG
-        bcc athit               ; $01/$02: knight/king, no ray to walk
+        bcc atghit              ; $01/$02: knight/king, no ray to walk
         cmp #ATK_WPAWN
-        bcs athit               ; $10/$20: pawn, adjacent
+        bcs atghit              ; $10/$20: pawn, adjacent
         ; slider: walk the ray from attacker toward ATSQ
         ldy DIFF
         lda DELTATAB,y
@@ -60,21 +114,20 @@ atslot1:lda PIECESQ,x           ; reload from-square (operand SMC too)
 atwalk: clc
         adc ATDELTA
         cmp ATSQ
-        beq athit
+        beq atghit
         tay
         ; UNMASKED board read: safe only because this ray walks BETWEEN two
         ; on-board squares and exits at ATSQ before leaving the board (every
         ; square colinear between two on-board squares is on-board). See the
         ; off-board dead-space contract at BOARD in defs.inc.
         lda a:BOARD,y
-        bne atnext              ; blocked
+        bne atgmiss             ; blocked
         tya
         jmp atwalk
-atnext: dex
-        bpl atloop
+atgmiss:
         clc
         rts
-athit:  sec
+atghit: sec
         rts
 
 ; ---------------------------------------------------------------

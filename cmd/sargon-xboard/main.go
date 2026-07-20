@@ -472,12 +472,19 @@ func coordToSargon(coord string) (string, error) {
 		return "", fmt.Errorf("bad to %q", coord)
 	}
 	move := from + "-" + to
-	// Promotion: plain FROM-TO + RETURN auto-queens. We always queen (drop any
-	// promotion letter): this Sargon build rejects the manual's under-promotion
-	// suffix ("D7-D8B" -> INVALID MOVE), which would spuriously resign the game.
-	// A queen covers every rook/bishop move, so treating an under-promotion as a
-	// queen never makes a later move illegal (only a knight under-promotion —
-	// vanishingly rare — could diverge). This is a benchmark-robustness choice.
+	// Promotion: xboard coordinate carries a 5th char (q/r/b/n). Sargon does NOT
+	// promote on the FROM-TO RETURN alone; it then prompts "ENTER PROMOTED PIECE"
+	// and waits for the choice (RETURN = queen default, or N/R/B + RETURN to
+	// under-promote). enterMove answers that prompt, so pass the piece letter
+	// through by appending it (uppercased) to the FROM-TO text. Earlier attempts
+	// that typed the letter INSIDE the FROM-TO field ("D7-D8B") were rejected as
+	// INVALID MOVE — the letter must be sent only after the prompt appears.
+	if len(coord) >= 5 {
+		switch coord[4] {
+		case 'q', 'r', 'b', 'n':
+			move += strings.ToUpper(coord[4:5])
+		}
+	}
 	return move, nil
 }
 

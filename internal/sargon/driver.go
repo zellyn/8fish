@@ -286,6 +286,20 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 	if !ok {
 		return mid, "", fmt.Errorf("cannot parse move %q", move)
 	}
+	// A promotion carries a trailing piece letter after the 5-char FROM-TO
+	// (e.g. "C2-C1Q" or "C2-C1N"). Sargon does not promote on the FROM-TO
+	// RETURN; it prompts "ENTER PROMOTED PIECE" and waits for the choice. We
+	// type only the FROM-TO field, then answer the prompt (see completePromotion)
+	// — typing the letter inside the field is rejected as INVALID MOVE.
+	fromTo := move
+	promo := byte(0)
+	if len(move) >= 6 {
+		switch move[5] {
+		case 'Q', 'N', 'R', 'B':
+			promo = move[5]
+			fromTo = move[:5]
+		}
+	}
 
 	// Settle: after moving, Sargon redraws before returning to its keyboard
 	// loop; typing during that window drops characters.
@@ -311,8 +325,27 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 				return mid, "", err
 			}
 		}
-		if err := m.TypePaced(move+"\r", stepsPerKey); err != nil {
+		if err := m.TypePaced(fromTo+"\r", stepsPerKey); err != nil {
 			return mid, "", err
+		}
+		// Promotion: answer the "ENTER PROMOTED PIECE" prompt so the pawn
+		// actually reaches the last rank (without this the pawn stays put and
+		// Sargon never replies — it is blocked on the prompt). Seeing the prompt
+		// is itself proof the move was accepted (Sargon only prompts for a legal
+		// pawn-to-last-rank move); use that as the accept signal, because right
+		// after the promotion it is Sargon's turn and its search scribbles the
+		// $60-$7F piece list, so anyPieceAt(to) would read garbage.
+		if promo != 0 {
+			done, err := m.completePromotion(promo)
+			if err != nil {
+				return mid, "", err
+			}
+			if done {
+				accepted = true
+				break
+			}
+			// Prompt never appeared (dropped keys): fall through to retry.
+			continue
 		}
 		var s uint64
 		for s < 4_000_000 {
@@ -320,9 +353,8 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 				return mid, "", err
 			}
 			s += pollChunk
-			// Accept when any of our pieces has reached the destination. Using
-			// "any piece on `to`" (not the specific slot) handles promotions,
-			// where the pawn leaves its slot for the promoted-piece slot.
+			// Accept when any of our pieces has reached the destination.
+			// (Promotions are handled above via the prompt and never reach here.)
 			if m.anyPieceAt(to, oppBlack) {
 				accepted = true
 				break
@@ -334,6 +366,45 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 		return mid, "", fmt.Errorf("move %q not accepted after retries (screen: %q)", move, m.messageLine())
 	}
 	return m.ReadPieceList(), m.scrapeReplyText(), nil
+}
+
+// completePromotion answers Sargon's "ENTER PROMOTED PIECE" prompt, which
+// appears after a pawn's FROM-TO move to the last rank is entered. Sargon shows
+// the prompt with a default of Queen (".../Q" in the move list) and blocks until
+// a choice is confirmed:
+//
+//	Queen ('Q'):        just RETURN (accept the default)
+//	Under-promote:      the piece letter N/R/B, then RETURN
+//
+// It waits for the prompt (which lags the RETURN by ~1M cycles) before sending
+// the choice, and reports whether the prompt was seen and answered. A false
+// return means the prompt never appeared (e.g. dropped keystrokes) and the
+// caller should retry.
+func (m *Machine) completePromotion(promo byte) (bool, error) {
+	const stepsPerKey = 200_000
+	sawPrompt := false
+	var s uint64
+	for s < 6_000_000 {
+		if err := m.Run(pollChunk); err != nil {
+			return false, err
+		}
+		s += pollChunk
+		if m.ScreenContains("PROMOTED") {
+			sawPrompt = true
+			break
+		}
+	}
+	if !sawPrompt {
+		return false, nil
+	}
+	// Queen is the default; only under-promotions need the piece letter typed.
+	if promo != 'Q' {
+		if err := m.TypePaced(string(promo), stepsPerKey); err != nil {
+			return false, err
+		}
+	}
+	m.Key(0x0D) // RETURN confirms the shown promotion piece
+	return true, m.Run(1_500_000)
 }
 
 // waitReply polls up to maxThinkSteps CPU steps for a new SARGON move token to

@@ -179,6 +179,7 @@ iterate:
         sta MAXDEPTH
         lda #0
         sta PLY
+        sta HVALID              ; hash watermark: HASH = root position
         jsr curincheck          ; root in-check state (make propagates
         lda #0                  ; it for every deeper ply)
         rol

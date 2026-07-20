@@ -160,14 +160,8 @@ make:
         sta UNDOPHASE,x
         lda HALFMOVE
         sta UNDOHALF,x
-        lda HASH0
-        sta HASHSTK0,x
-        lda HASH1
-        sta HASHSTK1,x
-        lda HASH2
-        sta HASHSTK2,x
-        lda HASH3
-        sta HASHSTK3,x
+        ; (HASHSTK is no longer saved unconditionally here: each path
+        ;  below saves it exactly when it keeps the hash - see HVALID)
         lda PSTRUCT
         sta UNDOPSL,x
         lda PSTRUCT+1
@@ -184,6 +178,11 @@ make:
 ; ---- fast path: MVFLAGS == 0 (plain quiet move or plain capture).
 ; Implicitly: capture square is TO, no promotion, no castle, and the
 ; new ep square is NOSQ. This covers the overwhelming share of makes.
+; Hash elision (deep opt r3, see HVALID in defs.inc): a quiescence
+; child (PLY+1 >= MAXDEPTH) with 50-move clock < 4 and not in check
+; consumes no hash (no TT probe/store, no repetition scan), so those
+; makes skip HASHSTK save + all Zobrist xors; the gives-check case is
+; repaired by the deferred upgrade after ckdone.
 mkfast:
         lda TO
         sta UNDOCAPSQ,x
@@ -193,41 +192,104 @@ mkfast:
         beq mkfquiet
         ; capture: remove victim, clear square, tombstone list slot
         sta VICTIM
-.ifndef NOEVAL
-        jsr takepiece           ; A = victim, Y = capture square: fused
-.endif
+.ifdef NOEVAL
         ldy TO
         lda #0
         sta a:BOARD,y
-.ifndef NOEVAL
-        sta HALFMOVE            ; capture: 50-move clock resets
-.endif
         ldy VICTIM
         lda SLOTTAB,y
         tay
         lda #NOSQ
         sta PIECESQ,y
-        jmp mkfmove
+        jmp mkfmvoff
+.else
+        lda #0
+        sta HALFMOVE            ; capture: 50-move clock resets (child<4)
+        inx                     ; child ply = PLY+1: quiescence?
+        cpx MAXDEPTH
+        dex
+        bcs mkfcapoff           ; qs capture: hash provably unconsumed
+        ; hash-on capture: save the pre-move hash, advance the watermark
+        lda HASH0
+        sta HASHSTK0,x
+        lda HASH1
+        sta HASHSTK1,x
+        lda HASH2
+        sta HASHSTK2,x
+        lda HASH3
+        sta HASHSTK3,x
+        inx
+        stx HVALID
+        lda VICTIM              ; Y = TO (capture square) throughout
+        jsr takepiece           ; fused hash+phase+psqt
+        ldy TO
+        lda #0
+        sta a:BOARD,y
+        ldy VICTIM
+        lda SLOTTAB,y
+        tay
+        lda #NOSQ
+        sta PIECESQ,y
+        jmp mkfmvon
+mkfcapoff:
+        lda VICTIM              ; Y = TO (capture square)
+        jsr takepieceq          ; phase+psqt+pawn-bits only
+        ldy TO
+        lda #0
+        sta a:BOARD,y
+        ldy VICTIM
+        lda SLOTTAB,y
+        tay
+        lda #NOSQ
+        sta PIECESQ,y
+        jmp mkfmvoff
+.endif
 mkfquiet:
 .ifndef NOEVAL
         ; quiet: a pawn push resets the 50-move clock, else it ticks
         lda MVPIECE
         and #TYPEMASK
         cmp #PAWN
-        bne :+
+        bne mkfqnp
         lda #0
-        sta HALFMOVE
-        beq mkfmove             ; always
-:       inc HALFMOVE            ; bounded: root value + MAXPLY < 256
-.endif
-mkfmove:
+        sta HALFMOVE            ; pawn push: child clock = 0
+        inx
+        cpx MAXDEPTH
+        dex
+        bcc mkfqon              ; full-width child: hash on
+        jmp mkfmvoff            ; qs pawn push: hash off
+mkfqnp: inc HALFMOVE            ; bounded: root value + MAXPLY < 256
+        inx
+        cpx MAXDEPTH
+        dex
+        bcc mkfqon              ; full-width child: hash on
+        lda HALFMOVE
+        cmp #4
+        bcs :+
+        jmp mkfmvoff            ; qs, clock < 4: no repetition scan below
+:       ; qs quiet with clock >= 4: the child rep-scans; keep the hash
+        ; exact, catching up any stale suffix first (rare)
+        lda HVALID
+        cmp PLY
+        beq mkfqon
+        jsr hashcatchup
+        ldx PLY
+mkfqon: lda HASH0               ; save pre-move hash; watermark = child
+        sta HASHSTK0,x
+        lda HASH1
+        sta HASHSTK1,x
+        lda HASH2
+        sta HASHSTK2,x
+        lda HASH3
+        sta HASHSTK3,x
+        inx
+        stx HVALID
+mkfmvon:
         ; move the piece: clear FROM, fused hash+psqt, place on TO
         ldy FROM
         lda #0
         sta a:BOARD,y
-.ifndef NOEVAL
         jsr movepiece           ; contract: Y = FROM at entry
-.endif
         ldy TO
         lda MVPIECE
         sta a:BOARD,y
@@ -246,7 +308,6 @@ mkfmove:
         ldx PLY
         cmp CASTLE
         sta CASTLE
-.ifndef NOEVAL
         beq mkfnocch
         lda UNDOCASTLE,x
         jsr hashcastle          ; xor out the old rights (X preserved)
@@ -259,12 +320,39 @@ mkfnocch:
         beq mkfnoep
         jsr hashep
 mkfnoep:
-.endif
         lda #NOSQ
         sta EPSQ
-.ifndef NOEVAL
         jsr hashstm
+        lda SIDE
+        eor #COLORMASK
+        sta SIDE
+        inc PLY
+        jmp ckfast              ; flags==0: direct/discovered scan only
 .endif
+mkfmvoff:
+        ; hash-off mover: psqt/pawn-bits only, no rights/ep/stm hash
+        ldy FROM
+        lda #0
+        sta a:BOARD,y
+.ifndef NOEVAL
+        jsr movepieceq          ; contract: Y = FROM at entry
+.endif
+        ldy TO
+        lda MVPIECE
+        sta a:BOARD,y
+        tay
+        lda SLOTTAB,y
+        tay
+        lda TO
+        sta PIECESQ,y
+        ldy FROM
+        lda CASTLEMASK,y
+        ldy TO
+        and CASTLEMASK,y
+        and CASTLE
+        sta CASTLE
+        lda #NOSQ
+        sta EPSQ
         lda SIDE
         eor #COLORMASK
         sta SIDE
@@ -277,7 +365,30 @@ mkfnoep:
 
 ; ---- slow path: en passant, double push, promotion, castle ----
 mkslow:
+.ifndef NOEVAL
+        ; rare move kinds always keep the hash exact: catch up any stale
+        ; qs suffix, save the pre-move hash, advance the watermark. (The
+        ; upgrade tail and hashcatchup can then assume replayed plies
+        ; are always flag-free.)
+        lda HVALID
+        cmp PLY
+        beq :+
+        jsr hashcatchup
+:       ldx PLY
+        lda HASH0
+        sta HASHSTK0,x
+        lda HASH1
+        sta HASHSTK1,x
+        lda HASH2
+        sta HASHSTK2,x
+        lda HASH3
+        sta HASHSTK3,x
+        inx
+        stx HVALID
+        dex
+.endif
         ; capture square: TO, or the pushed-past square for en passant
+        lda MVFLAGS
         and #FL_EP
         beq mknotep
         lda MVPIECE
@@ -550,6 +661,18 @@ cknone: ldx PLY
         lda #0
         sta INCHK,x
 ckdone:
+        ; deferred hash upgrade (deep opt r3): a hash-elided make that
+        ; turns out to give check makes the child an EVASION node, which
+        ; ttstores (QSKIND=0) and may repetition-scan - so the hash must
+        ; be exact after all. hashcatchup replays the stale suffix
+        ; INCLUDING this move from the undo records (rare: checking
+        ; moves inside quiescence). Register contract: all three INCHK
+        ; writers above leave A = INCHK[PLY] and X = PLY.
+        beq :+                  ; no check: elision stands
+        cpx HVALID
+        beq :+                  ; hash already current for the child
+        jsr hashcatchup
+:
 .ifdef PTNOCACHE
         ; measurement baseline (task #47): disable the incremental
         ; pawn-structure cache. make never recomputes; eval recomputes
@@ -626,6 +749,92 @@ crgo:   sta GTO
         sta PIECESQ,y
         rts
 
+.ifndef NOEVAL
+; ---------------------------------------------------------------
+; hashcatchup: repair the elided-hash suffix (deep opt r3; see the
+; HVALID contract in defs.inc). Replays the moves recorded at plies
+; HVALID..PLY-1 into HASH0-3, rewriting each ply's HASHSTK entry, and
+; sets HVALID = PLY. Replayed plies are always flag-free moves (the
+; slow path never elides) except a possible null marker at the base
+; (inside a null subtree; makenull already applied stm/ep and saved
+; HASHSTK itself, so the marker just steps past). Consequences used:
+; no promotion/castle/ep-capture replays, and the ep square after
+; every replayed move is NOSQ (only a pre-existing ep file xors out).
+; Deliberately simple - this path is rare. Also correct when
+; HVALID > PLY (post-null transient): replays nothing, clamps.
+; Clobbers A,X,Y,T0,T1, ZPTR+1.
+; ---------------------------------------------------------------
+hashcatchup:
+        lda HVALID
+        sta T0
+hcloop: lda T0
+        cmp PLY
+        bcc hcstep
+        lda PLY
+        sta HVALID              ; done: current through position PLY
+        rts
+hcstep: tax
+        lda UNDOFROM,x
+        cmp #NOSQ
+        bne hcreal
+        inc T0                  ; null marker at the base (see above)
+        bne hcloop              ; always (T0 <= MAXPLY)
+hcreal:
+        lda HASH0               ; repair this ply's pre-move hash entry
+        sta HASHSTK0,x
+        lda HASH1
+        sta HASHSTK1,x
+        lda HASH2
+        sta HASHSTK2,x
+        lda HASH3
+        sta HASHSTK3,x
+        ; mover: xor key[kind][from] ^ key[kind][to]
+        lda UNDOPIECE,x
+        ldy UNDOFROM,x
+        jsr hashpiece           ; clobbers X; preserves Y
+        ldx T0
+        lda UNDOPIECE,x
+        ldy UNDOTO,x
+        jsr hashpiece
+        ldx T0
+        ; victim, if any
+        lda UNDOCAP,x
+        beq hcnocap
+        ldy UNDOCAPSQ,x
+        jsr hashpiece
+        ldx T0
+hcnocap:
+        jsr hashstm             ; side to move (A only)
+        ; ep: xor out the old file; flag-free moves never set a new one
+        lda UNDOEP,x
+        cmp #NOSQ
+        beq hcnoep
+        jsr hashep              ; clobbers A,Y; X preserved
+hcnoep:
+        ; castling rights: the next ply's saved copy holds this move's
+        ; resulting rights - except at PLY itself, where they are the
+        ; live CASTLE (the current make has already updated it when
+        ; called from the deferred upgrade, and not yet saved a record
+        ; at PLY... its prologue wrote UNDOCASTLE[PLY] = pre-move
+        ; rights, which is NOT this replay's result - hence the split)
+        inc T0
+        ldx T0
+        cpx PLY
+        bne hcnext
+        lda CASTLE
+        jmp hccmp
+hcnext: lda UNDOCASTLE,x
+hccmp:  dex
+        cmp UNDOCASTLE,x
+        beq hcgo                ; unchanged: the common case
+        sta T1                  ; changed: out with the old, in the new
+        lda UNDOCASTLE,x
+        jsr hashcastle          ; clobbers A,Y; X preserved
+        lda T1
+        jsr hashcastle
+hcgo:   jmp hcloop
+.endif
+
 ; ---------------------------------------------------------------
 ; uncastlerook: undo the rook move; UNDOTO,x (x=PLY) tells the corner.
 ; ---------------------------------------------------------------
@@ -695,6 +904,12 @@ unmake:
         sta PHASE
         lda UNDOHALF,x
         sta HALFMOVE
+        ; hash: restore only when this ply's HASHSTK entry is valid
+        ; (its make kept the hash, or hashcatchup repaired it); elided
+        ; plies never touched HASH, so there is nothing to undo. See
+        ; the HVALID contract in defs.inc.
+        cpx HVALID
+        bcs umnohash            ; PLY >= HVALID: hash was elided here
         lda HASHSTK0,x
         sta HASH0
         lda HASHSTK1,x
@@ -703,6 +918,8 @@ unmake:
         sta HASH2
         lda HASHSTK3,x
         sta HASH3
+        stx HVALID              ; clamp the watermark to this ply
+umnohash:
         lda UNDOPSL,x
         sta PSTRUCT
         lda UNDOPSH,x

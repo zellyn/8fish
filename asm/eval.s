@@ -240,6 +240,8 @@ mvpbody:
         ; psqt as a from/to delta straight into the accumulators.
         ; white: score += tbl[TO] - tbl[FROM]
         ; black: score += tbl[FROM^$70] - tbl[TO^$70]
+        ; (mvpsqt is also the tail of movepieceq: PSP0/PSP1 set, no X/Y)
+mvpsqt:
         lda MVPIECE
         and #COLORMASK
         beq mpwh
@@ -363,6 +365,9 @@ tkpbody:
         eor HASH2
         sta HASH2
         ; psqt: white victim: score -= tbl[sq]; black: += tbl[sq^$70]
+        ; (tkpsqt is also the tail of takepieceq: X = victim nibble,
+        ;  EVTMP = capture square)
+tkpsqt:
         lda TYPEPG0X,x
         sta PSP0+1
         lda TYPEPG1X,x
@@ -421,6 +426,88 @@ tpblack:
         adc (PSP1),y
         sta EGSCORE+1
         rts
+
+; ---------------------------------------------------------------
+; movepieceq / takepieceq: hash-elided variants for quiescence makes
+; whose child provably never consumes the hash (deep opt r3; see the
+; HVALID contract in defs.inc). Identical to movepiece/takepiece minus
+; the Zobrist xors: psqt, PHASE, PDIRTY and the pawn-file bitmask
+; maintenance still happen (they are position state, not hash state).
+; movepieceq contract: Y = FROM on entry (unused, kept for symmetry).
+; takepieceq: A = victim byte, Y = capture square, VICTIM set.
+; ---------------------------------------------------------------
+mvqpawn:
+        ora PDIRTY
+        sta PDIRTY
+        lda MVPIECE
+        and #COLORMASK
+        sta GTMP
+        ldy TO
+        tya
+        and #$07
+        ora GTMP
+        tax
+        lda RANKBIT,y
+        eor PWBITS,x
+        sta PWBITS,x
+        ldy FROM
+        tya
+        and #$07
+        ora GTMP
+        tax
+        lda RANKBIT,y
+        eor PWBITS,x
+        sta PWBITS,x
+        lda MVPIECE
+        and #$0F
+        tax
+        jmp mvqbody
+movepieceq:
+        lda MVPIECE
+        and #$0F
+        tax
+        lda DIRTYTAB,x
+        bmi mvqpawn
+        ora PDIRTY
+        sta PDIRTY
+mvqbody:
+        lda TYPEPG0X,x          ; PSQT pages for this type
+        sta PSP0+1
+        lda TYPEPG1X,x
+        sta PSP1+1
+        jmp mvpsqt              ; shared psqt delta tail
+
+tkqpawn:
+        ora PDIRTY
+        sta PDIRTY
+        lda VICTIM
+        and #COLORMASK
+        sta GTMP
+        tya
+        and #$07
+        ora GTMP
+        tax
+        lda RANKBIT,y
+        eor PWBITS,x
+        sta PWBITS,x
+        lda VICTIM
+        and #$0F
+        tax
+        jmp tkqbody
+takepieceq:
+        sty EVTMP               ; capture square
+        and #$0F
+        tax
+        lda DIRTYTAB,x
+        bmi tkqpawn
+        ora PDIRTY
+        sta PDIRTY
+tkqbody:
+        lda PHASE
+        sec
+        sbc PHASEV16,x          ; 0 for pawns: no-op by construction
+        sta PHASE
+        jmp tkpsqt              ; shared psqt removal tail
 
 ; ---------------------------------------------------------------
 ; pbtoggle: toggle the per-file rank bit for a pawn. A = pawn piece

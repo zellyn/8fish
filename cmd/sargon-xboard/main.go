@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/zellyn/chess6502/internal/refchess"
 	"github.com/zellyn/chess6502/internal/sargon"
 )
 
@@ -77,6 +78,16 @@ type engine struct {
 	pendingFEN string
 	setupOnce  *sync.Once
 	setupErr   error
+
+	// Referee history for verified draw-by-repetition handling. Every move
+	// (opponent usermoves and Sargon's own replies) is replayed through refchess
+	// so that, when Sargon declares a repetition draw with its move still
+	// pending, the adapter can play the actual drawing move and let cutechess
+	// end the game as a draw. Guarded by tmu. trackerInit gates one-time
+	// per-game initialization (from the setboard FEN or the standard start).
+	tmu         sync.Mutex
+	tracker     *repTracker
+	trackerInit bool
 }
 
 func (e *engine) run() {
@@ -138,6 +149,9 @@ func (e *engine) handle(line string) bool {
 		e.movesSeen, e.startedWhite = 0, false
 		e.pendingFEN, e.setupOnce, e.setupErr = "", &sync.Once{}, nil
 		e.smu.Unlock()
+		e.tmu.Lock()
+		e.tracker, e.trackerInit = nil, false
+		e.tmu.Unlock()
 	case "setboard":
 		// Varied-opening start position. Stored now; applied by ensureReady
 		// (after boot, before the first move) via SetupPosition. cutechess sends
@@ -241,6 +255,11 @@ func (e *engine) ensureReady() error {
 	e.smu.Lock()
 	fen, once := e.pendingFEN, e.setupOnce
 	e.smu.Unlock()
+	// Initialize the referee history once per game — from the setboard FEN if
+	// present, else the standard start. Done here (not in "new") because the
+	// setboard FEN only arrives after "new" and before the first move, and
+	// ensureReady runs at the top of every think goroutine.
+	e.initTrackerOnce(fen)
 	if fen == "" || once == nil {
 		return nil
 	}
@@ -253,6 +272,46 @@ func (e *engine) ensureReady() error {
 		log.Printf("SETBOARD ok: %s", fen)
 	})
 	return e.setupErr
+}
+
+// initTrackerOnce builds the referee history exactly once per game, from the
+// setboard FEN (if any) or the standard start. Safe to call from every think
+// goroutine; only the first call does work.
+func (e *engine) initTrackerOnce(fen string) {
+	e.tmu.Lock()
+	defer e.tmu.Unlock()
+	if e.trackerInit {
+		return
+	}
+	e.trackerInit = true
+	start := fen
+	if start == "" {
+		start = refchess.StartFEN
+	}
+	e.tracker = newRepTracker(start)
+	if e.tracker == nil || !e.tracker.valid {
+		log.Printf("TRACKER-INVALID init from FEN %q (draw-move verification disabled)", start)
+	}
+}
+
+// trackApply records a move (opponent's or Sargon's, UCI coordinate notation)
+// in the referee history. Any parse/apply failure disables verification (the
+// tracker marks itself invalid) so the adapter falls back to today's behavior;
+// it is logged but never fatal.
+func (e *engine) trackApply(coord string) {
+	e.tmu.Lock()
+	defer e.tmu.Unlock()
+	if err := e.tracker.apply(coord); err != nil {
+		log.Printf("TRACKER-INVALID %v (draw-move verification disabled)", err)
+	}
+}
+
+// findDrawingMove asks the referee history for a legal move (for the side to
+// move) that forces a draw cutechess will recognize. Returns "" if none.
+func (e *engine) findDrawingMove() (coord string, count int, reason string) {
+	e.tmu.Lock()
+	defer e.tmu.Unlock()
+	return e.tracker.findDrawingMove()
 }
 
 // doUserMove processes an opponent move. The actual thinking runs in a
@@ -283,6 +342,7 @@ func (e *engine) thinkFirstWhite() {
 		e.claimGameOver(res)
 		return
 	}
+	e.trackApply(reply)
 	e.send("move %s", reply)
 }
 
@@ -294,16 +354,34 @@ func (e *engine) thinkFirstWhite() {
 func (e *engine) claimGameOver(res sargon.MoveResult) {
 	msg := strings.ToUpper(res.Message)
 	if strings.Contains(msg, "DRAW") || strings.Contains(msg, "STALEMATE") {
-		// Sargon declares a draw (usually 3-fold repetition) one ply before
-		// cutechess counts it, so a "1/2-1/2" result claim is rejected and
-		// deadlocks the match. Resign instead so the game ends cleanly; log it
-		// distinctly (with material balance) so these games — which are really
-		// draws — can be reclassified when tallying the match.
+		// Sargon declares a draw (usually 3-fold repetition) with its own
+		// drawing move still pending — one ply before cutechess would count the
+		// threefold on ITS board — so a raw "1/2-1/2" result claim is rejected
+		// and deadlocks the match.
+		//
+		// If our independent referee (fed every move as it happened) can verify
+		// a specific Sargon move that forces a draw cutechess DOES recognize —
+		// completing a threefold, or tripping the fifty-move rule — play THAT
+		// move: cutechess then ends the game as a draw itself. Dump Sargon's
+		// screen first (as the resign path does) so every adapter-judgment
+		// ending is still auditable against Sargon's display.
+		//
+		// Only a VERIFIED move is ever played: if the referee finds none (a
+		// stalemate message, an invalid tracker, or a claim that doesn't check
+		// out) we keep today's behavior exactly — screen dump + resign — because
+		// a wrong move that fails to end the game would leave Sargon wedged (it
+		// believes the game is over) and corrupt the match.
+		if coord, count, reason := e.findDrawingMove(); coord != "" {
+			e.dumpScreen("draw move")
+			log.Printf("SARGON-DRAW-MOVE-PLAYED move=%s reps=%d reason=%s", coord, count, reason)
+			e.send("move %s", coord)
+			return
+		}
 		bal := res.Board.MaterialBalance()
 		if e.m != nil && !e.m.SargonWhite {
 			bal = -bal
 		}
-		log.Printf("SARGON-DECLARED-DRAW material=%+d (resigning to end game; reclassify as draw)", bal)
+		log.Printf("SARGON-DECLARED-DRAW material=%+d (no verified drawing move; resigning to end game; reclassify as draw)", bal)
 	}
 	e.resign()
 }
@@ -434,6 +512,11 @@ func (e *engine) think(coord string) {
 		e.resign()
 		return
 	}
+	// Sargon accepted our move (enterMove confirmed it registered). Record it in
+	// the referee history now, so that even if Sargon then declines to move and
+	// declares a draw, the tracker sits at Sargon's to-move position and can
+	// verify its drawing move. Sargon's reply (if any) is recorded below.
+	e.trackApply(coord)
 	reply := e.replyCoord(res)
 	if e.debug {
 		mv := res.SargonMove
@@ -448,6 +531,9 @@ func (e *engine) think(coord string) {
 		e.claimGameOver(res)
 		return
 	}
+	// Record Sargon's reply in the referee history before emitting it (force
+	// mode only delays emission; the board position is already updated).
+	e.trackApply(reply)
 
 	// Emit now unless we're in force mode, in which case hold the reply until
 	// "go" arrives (which will emit it, or clear force so we emit here).

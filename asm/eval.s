@@ -152,15 +152,31 @@ hashpiece:
 ; movepiece pawn prologue (deep optimization review r2): keep the
 ; per-file pawn bitmasks current so pawnterm never rescans the piece
 ; list. XOR toggles; unmake re-applies the same toggles (self-inverse).
+; r3: both toggles inlined (color half computed once, no jsr/rts) —
+; 106 -> 74 cycles. pbtoggle itself remains for the board.s callers
+; (promotion make, ep capture, unmake tail).
 mvppawn:
         ora PDIRTY
         sta PDIRTY
         lda MVPIECE
+        and #COLORMASK          ; color half of the PWBITS index
+        sta GTMP
         ldy FROM
-        jsr pbtoggle
-        lda MVPIECE
+        tya
+        and #$07
+        ora GTMP
+        tax
+        lda RANKBIT,y           ; toggle FROM file bit
+        eor PWBITS,x
+        sta PWBITS,x
         ldy TO
-        jsr pbtoggle
+        tya
+        and #$07
+        ora GTMP
+        tax
+        lda RANKBIT,y           ; toggle TO file bit
+        eor PWBITS,x
+        sta PWBITS,x
         lda MVPIECE             ; re-establish X for the psqt body
         and #$0F
         tax
@@ -284,13 +300,22 @@ mpgo:   ldy T1                  ; MG += mg[T1]
         rts
 
 ; takepiece pawn prologue: a pawn was captured — toggle its file bit.
-; Y still holds the capture square here; pbtoggle preserves it.
+; Y still holds the capture square here and is preserved (r3: toggle
+; inlined, 61 -> 46 cycles; the old ldy EVTMP reload was already
+; redundant since pbtoggle preserved Y).
 tkppawn:
         ora PDIRTY
         sta PDIRTY
         lda VICTIM
-        jsr pbtoggle
-        ldy EVTMP               ; re-establish Y (square) and X (nibble)
+        and #COLORMASK
+        sta GTMP
+        tya                     ; Y = capture square (still live)
+        and #$07
+        ora GTMP
+        tax
+        lda RANKBIT,y           ; toggle the victim's file bit
+        eor PWBITS,x
+        sta PWBITS,x
         lda VICTIM
         and #$0F
         tax

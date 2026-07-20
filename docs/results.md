@@ -3,6 +3,41 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-20 — deep optimization review round 2 COMPLETE: −14.7% total cycles at identical trees (tasks #46/#47/#48 + micro pass)
+
+The full round-2 batch, every change proven tree-identical (same best
+moves, scores, and make counts; only cycles drop):
+
+| change | measured (alone, vs its baseline) |
+|---|---|
+| attacker-driven recapture generator (#46) | −6.03% |
+| move-loop fetch + attack-scan micro pass | −1.28% |
+| incremental pawn bitmasks: ptscan eliminated (#48) | −8.07% |
+| **compounded batch (5573b65 → b5a3cfe)** | **≈ −14.7%** |
+
+#47 (pawn-structure cache) turned out to ALREADY exist since M5a; its
+deliverable became the PTNOCACHE oracle build + differential harness
+that now proves the whole pawn-eval caching stack (cache + maintained
+bitmasks) bit-identical and worth 15.5% vs fresh recomputation.
+
+#48 design: XOR reverse-delta toggles through one pbtoggle helper
+(39 cyc/toggle; self-inverse, so unmake re-applies the same toggles —
+no ordering hazards for pawn-takes-pawn or ep). Non-pawn nodes pay +2
+cyc in make, +21 in unmake. Pawn ENDGAMES improve most (−11.0%),
+fixing the one case #47 had measured as cache-negative. New persistent
+state: PWBITS/PBBITS at MAIN $0200–$020F (contract documented at
+PDIRTY in defs.inc).
+
+Combined binary verified end-to-end: TestMicroAB fingerprints,
+TestPStructParity (4045 pos), TestPTCacheRandomWalk (4060 pos),
+TestPTCacheIdenticalTree (9 FENs), TestRecapGenEquivalence (1280
+states), full short suite — all green. engine.bin md5
+b5a3cfeb2004376965e4c06aa69ff919.
+
+Post-batch profile: generateq full-QS mode 12–19%, pawnterm per-file
+residual ~8–9%, search move-loop/TT ~8%, make/unmake ~5%, attacked()
+~3–4%, eval taper ~3% → the round-3 per-routine sweep target list.
+
 ## 2026-07-20 — deep optimization review round 2, part 1: attacker-driven recapture generator (task #46)
 
 Profiling the shipped engine (recap2 era) showed RECAPONLY quiescence

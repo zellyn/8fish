@@ -4,12 +4,32 @@
 ; caller's make/in-check filter like every other move.
 
 ; ---------------------------------------------------------------
-; emitmove: A = flags; GFROM/GTO = squares. Advances MSP.
-; Emits 4 bytes: tier, from, to, flags. The tier byte classifies the
-; move for the search's pass scans at generation time (victim type
-; << 4 | class; see MOVESTACK in defs.inc); TIERTAB maps the victim
-; piece byte (its low 3 type bits) to that tier, with ep and promo
-; special-cased off the flags.
+; emitmove / emitmovef: emit one move (4 bytes: tier, from, to, flags)
+; and advance MSP. The tier byte classifies the move for the search's
+; pass scans at generation time (victimtype<<4 | class; see MOVESTACK
+; in defs.inc); TIERTAB maps the victim piece byte to that tier, with
+; ep and promo special-cased off the flags.
+;
+; Emit-interface fusion (deep optimization review, task #50). Every
+; emit call site in the unrolled body already holds the target square
+; in X and BOARD[target] (the victim byte, 0 = empty/quiet) in Y at the
+; instant it calls emit; the old routine re-derived both from GTO via a
+; board read. The convention now takes them as inputs:
+;
+;   emitmove   quiet moves and normal captures (flags == 0 implicitly).
+;              X = to, Y = victim byte. No flags argument: the fast path
+;              stores flags = 0 and reads the tier straight off Y.
+;   emitmovef  flagged moves (ep, promo, double push, castle).
+;              A = flags, X = to, Y = victim byte.
+;
+; Both store `to` via `txa`/`sta (MSP),y` (STX has no indirect-indexed
+; mode), so X is PRESERVED across the call (genrecap keeps its slot
+; index in X; promoloop and the pawn/double paths keep the target
+; square there). GFROM still supplies the from byte; GTO is no longer
+; consulted here (genrecap keeps its own copy for the promotion-rank
+; test only). emitmovef preserves flags across the tier lookup on the
+; stack.
+;
 ; CONTRACT: the quiescence generator (generateq below) must emit no
 ; quiet moves. That is enforced structurally: every quiet call site
 ; in movegenbody.inc sits inside .if QMODE = 0, and the QMODE = 1
@@ -19,23 +39,44 @@
 ; page-cross path: MSP+1 only reaches >MOVESTACKTOP via a carry out
 ; of the bump.
 ; ---------------------------------------------------------------
+; emitmove: X = to, Y = victim byte. flags == 0 (quiet/normal capture).
 emitmove:
-        ldy #3
-        sta (MSP),y             ; flags
+        lda TIERTAB,y           ; victim byte -> victimtype<<4 | class
+        ldy #0
+        sta (MSP),y             ; tier
+        lda GFROM
+        iny
+        sta (MSP),y             ; from
+        txa                     ; to (X preserved: txa only reads X)
+        iny
+        sta (MSP),y             ; to
+        lda #0
+        iny
+        sta (MSP),y             ; flags = 0
+        lda MSP
+        clc
+        adc #4
+        sta MSP
+        bcs empage
+        rts
+
+; emitmovef: A = flags (nonzero), X = to, Y = victim byte.
+emitmovef:
+        pha                     ; save flags across the tier lookup
         and #FL_EP|FL_PROMO
-        bne emsp                ; ep/promo: fixed tiers
-        ldy GTO                 ; (Y, not X: genrecap keeps its slot
-        lda a:BOARD,y           ;  index in X across this call)
-        tay                     ; victim piece byte (0 = quiet move)
-        lda TIERTAB,y           ; victimtype<<4 | class
+        bne emsp                ; ep/promo: fixed tiers (Y unused)
+        lda TIERTAB,y           ; double/castle: quiet tier off Y (=0)
 emtier: ldy #0
         sta (MSP),y             ; tier
-        iny
         lda GFROM
-        sta (MSP),y
         iny
-        lda GTO
-        sta (MSP),y
+        sta (MSP),y             ; from
+        txa                     ; to (X preserved: txa only reads X)
+        iny
+        sta (MSP),y             ; to
+        pla                     ; flags
+        iny
+        sta (MSP),y             ; flags
         lda MSP
         clc
         adc #4

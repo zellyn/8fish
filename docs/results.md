@@ -3,6 +3,48 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-20 — deep optimization review: emit-interface fusion, −1.92% total cycles at identical trees (task #50)
+
+The emit-interface fusions the round-3 movegen/search reviews designed
+but could not build (they did not own both sides of the emit boundary).
+Every emit call site in the unrolled generator already holds the target
+square in X and BOARD[target] (the victim byte) in Y at the instant it
+emits; the old emitmove re-derived both from GTO with a board read plus
+a `stx GTO` at each call site. New register convention:
+
+  emitmove   quiet + normal capture (flags == 0): X = to, Y = victim.
+             No flags arg; stores flags 0, reads tier straight off Y.
+  emitmovef  ep / promo / double / castle: A = flags, X = to, Y = victim.
+
+Both write `to` via `txa`/`sta (MSP),y` (STX has no indirect-indexed
+mode), which inherently PRESERVES X — genrecap keeps its slot index
+there, promoloop/pawn/double keep the target square there. GTO drops
+out of every hot path (genrecap keeps its own copy only for the
+promotion-rank test). Splitting off the flags == 0 fast path is what
+pays: it needs no flags save, so the hot quiet/capture emission fell
+from ~78 cyc (incl. call-site `stx GTO`/`lda #0`) to ~61 — −17 cyc/emit.
+emitmovef carries a stack save/restore of the flags across the tier
+lookup (+7 cyc) but only ep/promo/double/castle pay it. genrecap's rare
+emit points stash the slot in GSLOT (free there) and reload to/victim.
+
+Rejected: **change 3 (SMC absolute move-stack base).** `sta BASE,y`
+(5 cyc) vs `sta (MSP),y` (6) saves 4 cyc/emit on the four stores, but
+the base operand still needs the same 4-byte advance per emit, the
+abs,y stores take the page-cross penalty across the $0E00–$1FFF stack,
+and it puts self-modifying code in the hottest leaf — all for a residual
+~0.3–0.5% after the fast path already took the big cut. Not worth the
+risk; skipped per the "<0.3% + risk → drop" bar.
+
+MicroAB fixed-depth suite (18 cases, masks 1f/07/00): every search/make/
+eval/attacked/ttprobe/generate count, score, and best move byte-identical
+to baseline (49129bd); cycles 4,368,733,938 → 4,284,733,466 = **−1.92%**.
+Full non-short suite green: RecapGenEquivalence (1280) + RecapGenTree
+Identity, Perft, LegalityTorture, GiveCheckVerify, HashConsumptionExact
+(60,345 pts), HashConsistency/ElisionCoverage, PStructParity (4045),
+PTCache IdenticalTree + RandomWalk (4060), Attacked Diff/Distribution,
+WAC, TreeSize, Mates, IterativeDeepening, BankedBuild. engine.bin md5
+aee43fd592c321413f54df1a1241f1ea (256 bytes smaller).
+
 ## 2026-07-20 — round-2 speedup Elo conversion: +35 ± 32 (300 games)
 
 First measurement of cycles→Elo on the asm engine using the new

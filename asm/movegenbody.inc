@@ -33,9 +33,12 @@
 ; position, so this order IS the search tree shape: do not reorder.
 ;
 ; Register conventions inside the handlers: GFROM = current from
-; square; X = candidate target square (emitmove preserves X, which the
-; pawn/promo paths rely on, as genrecap already did); Y = board byte
-; scratch (emitmove clobbers Y).
+; square; X = candidate target square; Y = BOARD[target] (the board
+; byte / victim). Emit takes both directly (task #50 emit-interface
+; fusion): quiet moves and normal captures call emitmove (X=to,
+; Y=victim, flags implicitly 0); ep/promo/double/castle call emitmovef
+; (A=flags, X=to, Y=victim). Both preserve X (the pawn/promo/genrecap
+; paths rely on it) and clobber A and Y.
 
 .if .not .definedmacro(GSLIDEV)
 
@@ -62,9 +65,7 @@ walk:
         ldy BOARD,x
         bne occ
 .if ::QMODE = 0
-        stx GTO
-        lda #0
-        jsr emitmove            ; preserves X
+        jsr emitmove            ; X=to, Y=0 victim; preserves X
         txa
 .if (delta) & $80
         sec                     ; emitmove does not preserve carry
@@ -77,9 +78,7 @@ occ:    tya
         eor SIDE                ; enemy iff color bit differs
         and #COLORMASK
         beq next                ; own piece: stop
-        stx GTO
-        lda #0
-        jsr emitmove            ; capture: emit, then stop
+        jsr emitmove            ; X=to, Y=victim; capture, then stop
 next:
 .endmacro
 
@@ -105,9 +104,7 @@ walk:
         ldy BOARD,x
         bne occ
 .if ::QMODE = 0
-        stx GTO
-        lda #0
-        jsr emitmove
+        jsr emitmove            ; X=to, Y=0 victim; preserves X
 .if (delta) & $80
         sec
 .else
@@ -120,9 +117,7 @@ occ:    tya
         eor SIDE
         and #COLORMASK
         beq next
-        stx GTO
-        lda #0
-        jsr emitmove
+        jsr emitmove            ; X=to, Y=victim; capture, then stop
 next:
 .endmacro
 
@@ -138,9 +133,7 @@ next:
         ldy BOARD,x
         bne occ
 .if ::QMODE = 0
-        stx GTO
-        lda #0
-        jsr emitmove
+        jsr emitmove            ; X=to, Y=0 victim; preserves X
         jmp next
 .else
         beq next                ; A=0 from the mask: always taken
@@ -149,9 +142,7 @@ occ:    tya
         eor SIDE
         and #COLORMASK
         beq next                ; own piece
-        stx GTO
-        lda #0
-        jsr emitmove
+        jsr emitmove            ; X=to, Y=victim; capture, then stop
 next:
 .endmacro
 
@@ -172,19 +163,16 @@ next:
         tya
         and #COLORMASK
         beq next                ; own piece (white)
-        stx GTO
         cpx #$70
         bcs promo               ; capture onto rank 8
-        lda #0
-        jsr emitmove
+        jsr emitmove            ; X=to, Y=victim
         jmp next
-promo:  jsr promoloop
+promo:  jsr promoloop           ; X=to; Y unused (promo tier)
         jmp next
 empty:  cpx EPSQ
         bne next
-        stx GTO
         lda #FL_EP
-        jsr emitmove
+        jsr emitmovef           ; X=to, ep (Y unused)
 next:
 .endmacro
 
@@ -203,19 +191,16 @@ next:
         tya
         and #COLORMASK
         bne next                ; own piece (black)
-        stx GTO
         cpx #$08
         bcc promo               ; capture onto rank 1
-        lda #0
-        jsr emitmove
+        jsr emitmove            ; X=to, Y=victim
         jmp next
-promo:  jsr promoloop
+promo:  jsr promoloop           ; X=to; Y unused (promo tier)
         jmp next
 empty:  cpx EPSQ
         bne next
-        stx GTO
         lda #FL_EP
-        jsr emitmove
+        jsr emitmovef           ; X=to, ep (Y unused)
 next:
 .endmacro
 
@@ -289,13 +274,11 @@ genpawn:
         ldy BOARD,x             ; push square (always on board: no
                                 ;  white pawn sits on rank 8)
         bne gwcaps              ; blocked: no pushes
-        stx GTO
         lda GFROM
         and #$F0
         cmp #$60
         beq gwpromopush
-        lda #0
-        jsr emitmove
+        jsr emitmove            ; X=to(push sq), Y=0 victim
         ; double push from rank 2
         lda GFROM
         and #$F0
@@ -307,12 +290,11 @@ genpawn:
         tax
         ldy BOARD,x
         bne gwcaps
-        stx GTO
         lda #FL_DOUBLE
-        jsr emitmove
+        jsr emitmovef           ; X=to, Y=0 victim
         jmp gwcaps
 gwpromopush:
-        jsr promoloop
+        jsr promoloop           ; X=to(push sq); Y unused (promo tier)
 .else
         ; quiescence: the only push emission is a promotion push, so
         ; check the rank BEFORE touching the board
@@ -326,8 +308,7 @@ gwpromopush:
         tax
         ldy BOARD,x
         bne gwcaps              ; blocked
-        stx GTO
-        jsr promoloop
+        jsr promoloop           ; X=to(push sq); Y unused (promo tier)
 .endif
 gwcaps: WPAWNCAP $0F
         WPAWNCAP $11
@@ -341,13 +322,11 @@ genbpawn:
         tax
         ldy BOARD,x             ; no black pawn sits on rank 1
         bne gbcaps              ; blocked
-        stx GTO
         lda GFROM
         and #$F0
         cmp #$10
         beq gbpromopush
-        lda #0
-        jsr emitmove
+        jsr emitmove            ; X=to(push sq), Y=0 victim
         ; double push from rank 7
         lda GFROM
         and #$F0
@@ -359,12 +338,11 @@ genbpawn:
         tax
         ldy BOARD,x
         bne gbcaps
-        stx GTO
         lda #FL_DOUBLE
-        jsr emitmove
+        jsr emitmovef           ; X=to, Y=0 victim
         jmp gbcaps
 gbpromopush:
-        jsr promoloop
+        jsr promoloop           ; X=to(push sq); Y unused (promo tier)
 .else
         lda GFROM
         and #$F0
@@ -376,24 +354,24 @@ gbpromopush:
         tax
         ldy BOARD,x
         bne gbcaps
-        stx GTO
-        jsr promoloop
+        jsr promoloop           ; X=to(push sq); Y unused (promo tier)
 .endif
 gbcaps: BPAWNCAP $F1            ; -$0F
         BPAWNCAP $EF            ; -$11
         jmp gennext
 
-; promoloop: emit N/B/R/Q promotions for GFROM/GTO (flags = piece
-; type). Unrolled; preserves X (emitmove does); tail-jumps the last.
+; promoloop: emit N/B/R/Q promotions for GFROM, to = X (flags = piece
+; type -> promo tier, so Y/victim is unused). Unrolled; preserves X
+; (emitmovef does); tail-jumps the last.
 promoloop:
         lda #KNIGHT
-        jsr emitmove
+        jsr emitmovef
         lda #BISHOP
-        jsr emitmove
+        jsr emitmovef
         lda #ROOK
-        jsr emitmove
+        jsr emitmovef
         lda #QUEEN
-        jmp emitmove
+        jmp emitmovef
 
 ; ---- knights / kings: 8 unrolled steps in table order ----
 genknight:
@@ -473,10 +451,10 @@ gencastle:
         bcs gcwq
         lda #$04
         sta GFROM
-        lda #$06
-        sta GTO
+        ldx #$06                ; to = g1
+        ldy #0                  ; victim (empty) -> quiet tier
         lda #FL_CASTLE
-        jsr emitmove
+        jsr emitmovef
 gcwq:   ; white queenside: e1 d1 c1 b1
         lda CASTLE
         and #CR_WQ
@@ -496,10 +474,10 @@ gcwq:   ; white queenside: e1 d1 c1 b1
         bcs gcdone
         lda #$04
         sta GFROM
-        lda #$02
-        sta GTO
+        ldx #$02                ; to = c1
+        ldy #0                  ; victim (empty) -> quiet tier
         lda #FL_CASTLE
-        jsr emitmove
+        jsr emitmovef
 gcdone: jmp gennext
 
 gcblack:
@@ -519,10 +497,10 @@ gcblack:
         bcs gcbq
         lda #$74
         sta GFROM
-        lda #$76
-        sta GTO
+        ldx #$76                ; to = g8
+        ldy #0                  ; victim (empty) -> quiet tier
         lda #FL_CASTLE
-        jsr emitmove
+        jsr emitmovef
 gcbq:   ; black queenside: e8 d8 c8 b8
         lda CASTLE
         and #CR_BQ
@@ -542,10 +520,10 @@ gcbq:   ; black queenside: e8 d8 c8 b8
         bcs gcbdone
         lda #$74
         sta GFROM
-        lda #$72
-        sta GTO
+        ldx #$72                ; to = c8
+        ldy #0                  ; victim (empty) -> quiet tier
         lda #FL_CASTLE
-        jsr emitmove
+        jsr emitmovef
 gcbdone:
         jmp gennext
 
@@ -602,7 +580,8 @@ genrecap:
         sta grslot0+1
         sta grslot1+1
         lda RECAPSQ
-        sta GTO                 ; every emission lands on RECAPSQ
+        sta GTO                 ; kept only for the grpawn promo-rank test
+                                ;  (emit now takes to=RECAPSQ in X directly)
         clc
         adc #$78                ; $77 + 1: absorbed by the carry-clear
         sta ATT78               ;  adc below (eor #$FF is $FF-from)
@@ -656,8 +635,15 @@ grwalk: clc
         bne grnext              ; blocked
         tya
         jmp grwalk
-grhit:  lda #0                  ; GTO = RECAPSQ, set once at entry
-        jsr emitmove            ; preserves X
+        ; emit onto RECAPSQ. X holds the slot loop counter here, but
+        ; emit wants to=RECAPSQ in X and victim in Y, so stash the
+        ; counter in GSLOT (free: genrecap runs before the body sets
+        ; GSLOT) and reload it after (emit preserves X = RECAPSQ).
+grhit:  stx GSLOT
+        ldx RECAPSQ             ; X = to
+        ldy BOARD,x             ; Y = victim byte (RECAPSQ is on-board, occupied)
+        jsr emitmove            ; X=to, Y=victim; preserves X
+        ldx GSLOT               ; restore slot loop counter
 grnext: inx
         cpx #$10                ; X < $10 on the loop path -> C=0 for
         bne grloop              ;  the diff adc above
@@ -673,10 +659,11 @@ grpawn: ; pawn capture onto RECAPSQ; promotes if that is its last rank
 grbp:   lda GTO                 ; black pawn: promotes on rank 1 ($0x)
         and #$F0
         beq grpromo
-grflat: lda #0
-        jsr emitmove
-        jmp grnext
+grflat: jmp grhit              ; shares the slot-stash + emit
 grpromo:
-        jsr promoloop           ; N,B,R,Q - as the full generator
+        stx GSLOT               ; stash slot counter (see grhit)
+        ldx RECAPSQ             ; X = to for promoloop
+        jsr promoloop           ; N,B,R,Q - as the full generator (Y unused)
+        ldx GSLOT               ; restore slot loop counter
         jmp grnext
 .endif

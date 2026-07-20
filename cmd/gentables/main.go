@@ -320,7 +320,14 @@ func emitZobrist(b *strings.Builder) {
 		return fmt.Sprintf(">ZKEYS+%d", kind*2)
 	})
 	pieceIdx("DIRTYTAB", func(typ, kind int) string {
-		if typ == 1 || typ == 6 { // pawn or king: invalidate PSTRUCT
+		// Any nonzero entry invalidates PSTRUCT. Bit 7 additionally
+		// marks pawns so movepiece/takepiece can bmi to the pawn-file
+		// bitmask maintenance (PWBITS/PBBITS toggles) at no cost to
+		// the non-pawn fast path.
+		switch typ {
+		case 1: // pawn
+			return "$81"
+		case 6: // king
 			return "1"
 		}
 		return "0"

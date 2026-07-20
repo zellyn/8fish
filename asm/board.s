@@ -200,6 +200,9 @@ mkhmdone:
         jsr hashpiece
         lda MVPIECE
         jsr rempiece            ; hashpiece preserved Y = FROM
+        lda MVPIECE             ; promotion: the pawn leaves FROM and no
+        ldy FROM                ;  pawn appears — toggle only its FROM bit
+        jsr pbtoggle
         lda CRTMP
         ldy TO
         jsr hashpiece
@@ -584,4 +587,41 @@ umnocastle:
         lda UNDOCAPSQ,x
         sta PIECESQ,y
 umnocap:
+.ifndef NOEVAL
+        ; pawn-file bitmask maintenance: re-apply the same pbtoggle XOR
+        ; toggles make applied (self-inverse), reconstructed from the
+        ; undo record. Null moves never come through unmake, so
+        ; UNDOPIECE,x here is always a real piece byte.
+        lda UNDOPIECE,x
+        and #$0F
+        tay
+        lda DIRTYTAB,y          ; bit 7: pawn (either color)
+        bmi umpmover
+umpvictim:
+        lda UNDOCAP,x
+        beq umpdone
+        and #$0F
+        tay
+        lda DIRTYTAB,y
+        bpl umpdone
+        ldy UNDOCAPSQ,x         ; pawn victim: its bit returns
+        lda UNDOCAP,x
+        jsr pbtoggle
+umpdone:
+.endif
         rts
+.ifndef NOEVAL
+umpmover:
+        ldy UNDOFROM,x          ; pawn mover: FROM bit returns
+        lda UNDOPIECE,x
+        jsr pbtoggle
+        ldx PLY                 ; pbtoggle clobbered X
+        lda UNDOFLAGS,x
+        and #FL_PROMO           ; promotion: the pawn never occupied TO
+        bne umpvictim
+        ldy UNDOTO,x
+        lda UNDOPIECE,x
+        jsr pbtoggle
+        ldx PLY
+        jmp umpvictim
+.endif

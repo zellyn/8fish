@@ -149,13 +149,32 @@ hashpiece:
 ; ZPTR+1, PSP0+1/PSP1+1, T0/T1. Requires the ZPTR/PSP0/PSP1 lo == 0
 ; evalinit invariant.
 ; ---------------------------------------------------------------
+; movepiece pawn prologue (deep optimization review r2): keep the
+; per-file pawn bitmasks current so pawnterm never rescans the piece
+; list. XOR toggles; unmake re-applies the same toggles (self-inverse).
+mvppawn:
+        ora PDIRTY
+        sta PDIRTY
+        lda MVPIECE
+        ldy FROM
+        jsr pbtoggle
+        lda MVPIECE
+        ldy TO
+        jsr pbtoggle
+        lda MVPIECE             ; re-establish X for the psqt body
+        and #$0F
+        tax
+        jmp mvpbody
+
 movepiece:
         lda MVPIECE
         and #$0F
         tax
-        lda DIRTYTAB,x          ; 1 for pawn/king (both colors), else 0
+        lda DIRTYTAB,x          ; $81 pawn, 1 king (both colors), else 0
+        bmi mvppawn             ; pawn: maintain the file bitmasks
         ora PDIRTY
         sta PDIRTY
+mvpbody:
         lda TYPEPG0X,x          ; PSQT pages for this type
         sta PSP0+1
         lda TYPEPG1X,x
@@ -264,18 +283,35 @@ mpgo:   ldy T1                  ; MG += mg[T1]
         sta EGSCORE+1
         rts
 
+; takepiece pawn prologue: a pawn was captured — toggle its file bit.
+; Y still holds the capture square here; pbtoggle preserves it.
+tkppawn:
+        ora PDIRTY
+        sta PDIRTY
+        lda VICTIM
+        jsr pbtoggle
+        ldy EVTMP               ; re-establish Y (square) and X (nibble)
+        lda VICTIM
+        and #$0F
+        tax
+        jmp tkpbody
+
 ; ---------------------------------------------------------------
 ; takepiece: fused hash + phase + psqt removal of a captured piece.
 ; A = victim piece byte, Y = capture square. Clobbers A,X,Y, ZPTR+1,
-; PSP0+1/PSP1+1, EVTMP. Same invariants as movepiece.
+; PSP0+1/PSP1+1, EVTMP. Same invariants as movepiece. Additionally
+; requires VICTIM = the victim piece byte (make sets it just before
+; the call) for the pawn-bitmask maintenance.
 ; ---------------------------------------------------------------
 takepiece:
         sty EVTMP               ; capture square
         and #$0F
         tax
         lda DIRTYTAB,x
+        bmi tkppawn             ; pawn victim: maintain the file bitmasks
         ora PDIRTY
         sta PDIRTY
+tkpbody:
         lda PHASE
         sec
         sbc PHASEV16,x          ; 0 for pawns: no-op by construction
@@ -362,6 +398,26 @@ tpblack:
         sta EGSCORE+1
         rts
 
+; ---------------------------------------------------------------
+; pbtoggle: toggle the per-file rank bit for a pawn. A = pawn piece
+; byte (either color), Y = its 0x88 square. The color bit
+; (COLORMASK = $08) equals PBBITS-PWBITS, so file|color indexes the
+; joint 16-byte array directly. Clobbers A,X,GTMP; preserves Y.
+; GTMP is movegen/castlerook scratch, dead at every pbtoggle call
+; site (all inside make/unmake, after any castlerook use).
+; ---------------------------------------------------------------
+pbtoggle:
+        and #COLORMASK
+        sta GTMP
+        tya
+        and #$07
+        ora GTMP
+        tax
+        lda RANKBIT,y           ; 1 << rank
+        eor PWBITS,x
+        sta PWBITS,x
+        rts
+
 ; hashcastle: xor CASTKEYS[A] into HASH0-3. Clobbers A,X,Y.
 hashcastle:
         asl
@@ -399,7 +455,15 @@ heloop: lda EPKEYS,y
 ; ---------------------------------------------------------------
 ; pawnterm: recompute PSTRUCT (white POV): doubled/isolated/passed
 ; pawns and a minimal king shield. Called by make when PDIRTY is set
-; (a pawn or king changed) and by evalinit. Uses $0200-$020F scratch.
+; (a pawn or king changed) and by evalinit.
+;
+; PWBITS/PBBITS at $0200-$020F are PERSISTENT state, not scratch:
+; ptbuild fills them at evalinit and make/unmake keep them current
+; via pbtoggle XOR toggles on every pawn placement change (mover in
+; movepiece/the promotion path, victim in takepiece, all re-applied
+; symmetrically by the unmake tail — XOR is self-inverse). pawnterm
+; therefore reads them directly with no per-call scan. Nothing else
+; may write $0200-$020F.
 ;
 ; Per file, one byte of rank-occupancy bits per side; the derived
 ; per-file terms come from gentables lookups on that byte (RANKBIT/
@@ -413,11 +477,13 @@ heloop: lda EPKEYS,y
 PWBITS = $0200          ; white pawn rank-occupancy bits per file (8)
 PBBITS = $0208          ; black pawn rank-occupancy bits per file (8)
 
-pawnterm:
+; ptbuild: rebuild PWBITS/PBBITS from the piece lists. Called once by
+; evalinit; after that make/unmake keep the masks current via pbtoggle
+; (deep optimization review r2), so pawnterm itself no longer scans.
+; The PTNOCACHE oracle build still rebuilds here on every pawnterm so
+; its PSTRUCT is independent of the maintained state.
+ptbuild:
         lda #0
-        sta PDIRTY
-        sta T0                  ; T0/T1: signed accumulator
-        sta T1
         ldx #7
 ptclr:  sta PWBITS,x
         sta PBBITS,x
@@ -450,7 +516,16 @@ ptblack:
         sta PBBITS,y
 ptnext: dex
         bpl ptscan
+        rts
 
+pawnterm:
+        lda #0
+        sta PDIRTY
+        sta T0                  ; T0/T1: signed accumulator
+        sta T1
+.ifdef PTNOCACHE
+        jsr ptbuild             ; oracle: fresh masks, ignore maintenance
+.endif
         ; per-file terms (helpers preserve X and Y)
         ldx #7
 ptfile: lda PWBITS,x
@@ -689,7 +764,8 @@ evinext:
         cmp #NOSQ
         beq :+
         jsr hashep
-:       jmp pawnterm            ; initial PSTRUCT (clears PDIRTY)
+:       jsr ptbuild             ; initial pawn-file bitmasks; make/unmake
+        jmp pawnterm            ;  maintain them from here on (clears PDIRTY)
 
 ; ---------------------------------------------------------------
 ; eval: SCORE = tapered eval from the side to move's point of view,

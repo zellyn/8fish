@@ -37,6 +37,7 @@ var ptcacheFENs = []struct {
 	{"passed-endgame", "8/pp3ppp/8/2ppP3/3P4/2P5/PP4PP/8 w - - 0 1", 8},
 	{"kingside-storm", "r1bq1rk1/pp3ppp/2n1pn2/2bp4/3P4/2N1PN2/PPQ1BPPP/R1B2RK1 w - - 0 1", 5},
 	{"heavy-pawns", "2r3k1/1p2ppbp/p1qp1np1/8/2PNP3/1P2BP2/P3Q1PP/3R2K1 w - - 0 1", 5},
+	{"capture-promo", "rnb1k3/1P6/8/8/8/8/1p6/RNB1K3 w - - 0 1", 6},
 }
 
 func buildNoCache(t *testing.T) []byte {

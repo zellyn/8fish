@@ -116,6 +116,12 @@ MUL2      = $D1
 PSP0      = $D2         ; 16-bit: PSQT mg table pointer
 PSP1      = $D4         ; 16-bit: PSQT eg table pointer
 PDIRTY    = $D6         ; nonzero: a pawn or king moved; PSTRUCT is stale
+                        ; (bit 7 set by DIRTYTAB for pawns specifically).
+                        ; MAIN $0200-$020F (PWBITS/PBBITS, eval.s) is
+                        ; PERSISTENT pawn-file bitmask state: built by
+                        ; evalinit (ptbuild), kept current by pbtoggle
+                        ; XOR toggles in make/unmake. Nothing else may
+                        ; write it. (AUX $0200+ is the TT; unrelated.)
 EVTMP     = $D7         ; eval scratch
 PSQSQ     = $D8         ; psqt: square (possibly rank-flipped)
 PSQPIECE  = $D9         ; psqt: piece byte

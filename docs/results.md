@@ -3,6 +3,40 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — mirror-vs-asm divergence at 0x1f: TWO STALE MIRROR DEFAULTS, fixed; parity gates added
+
+Follow-up to the LMP investigation: the mirror's default config did
+NOT model the shipped asm. Two independent mirror-side root causes,
+both stale defaults (no asm bug, no Zobrist/TT involvement):
+
+1. **DefaultWeights held pre-Texel pawn-structure values** (doubled 12
+   /iso 12/old passer table) vs the asm's shipped hybrid (12/7, tuned
+   passer table, shield 3−4·open). Logic was correct; constants
+   drifted.
+2. **Default QS was UNLIMITED** — NewEngine left QSParams zero, whose
+   comment falsely claimed it matched the asm; the asm hardcodes
+   recap2. This searched QS trees up to ~10× the asm's and was the
+   dominant divergence (score flips ≤34cp, occasional best-move flips
+   at 0x10).
+
+With both pinned to the asm's shipped behavior, the mirror reproduces
+the asm's fixed-depth search essentially byte-for-byte: new gates
+TestSearchMirrorParity (masks 0x00/0x07/0x08/0x1f × 5 FENs: 20/20
+best move + score, make counts exact except one off-by-1 legality
+probe at a fail-hard boundary, tolerance ≤1) and
+TestPStructMirrorParity (600/600). `mirror match` -aqs/-bqs now
+default to "0,2" (recap2); "0,0" is the explicit unlimited-QS
+experiment. Full mirror suite green post-fix.
+
+Consequence: node-budget screens using default config now model the
+real engine. Screens that predate this fix and relied on defaults
+carry unknown baseline bias (recent screens set QS explicitly; the
+0x7f-ordering caveat from the LMP entry below still applies
+separately). Design question deferred to a human decision: the asm's
+pawn weights are a hybrid (Texel passer/iso, older doubled/shield/
+open-file) — finishing the TunedWeights port into the asm would
+change asm behavior and needs its own screen + SPRT.
+
 ## 2026-07-21 — late move pruning (LMP / movecount pruning) — DO NOT PORT: +39 on mirror ordering, −85 on asm ordering (task #44)
 
 Added **late-move (movecount) pruning** to the mirror's scored search

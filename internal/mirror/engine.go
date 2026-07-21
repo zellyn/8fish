@@ -45,7 +45,8 @@ type Engine struct {
 	// LMR/PVS tuning knobs, defaulting to the asm's current rules.
 	LMR LMRParams
 
-	// QS-shape knobs (zero values = the asm's current unlimited QS).
+	// QS-shape knobs. The asm's actual shape is DefaultQS (recap2); the
+	// zero value is UNLIMITED QS (the experiment baseline), NOT the asm.
 	QS           QSParams
 	QSNodes      uint64 // nodes entered at ply >= MaxDepth (evasion included)
 	QSCheckNodes uint64 // quiet checking moves searched from QS nodes (task #37)
@@ -213,10 +214,19 @@ type QSParams struct {
 	SafeChecks bool
 }
 
-// NewEngine returns an engine with all features on and the asm's
-// current pstruct weights and LMR rules.
+// DefaultQS is the asm's current quiescence shape: recap-gated at qs ply
+// >= 2 (asm gennode hardcodes RecapAfter=2), no ply cap, no quiet checks.
+// The zero value QSParams{} is UNLIMITED QS and does NOT model the asm —
+// it is the "no shaping" baseline for the QS-shape experiments only. Bare
+// NewEngine (and any asm-parity comparison) must use this, exactly as it
+// uses DefaultLMR/DefaultFutility rather than the zero values. Getting this
+// wrong searches a QS tree up to ~10x the asm's and shifts tactical scores.
+var DefaultQS = QSParams{RecapAfter: 2}
+
+// NewEngine returns an engine with all features on and the asm's current
+// pstruct weights, LMR rules, and QS shape (recap2).
 func NewEngine() *Engine {
-	e := &Engine{Features: FtAll, Weights: DefaultWeights, LMR: DefaultLMR, Fut: DefaultFutility, Costs: DefaultCycleCosts}
+	e := &Engine{Features: FtAll, Weights: DefaultWeights, LMR: DefaultLMR, Fut: DefaultFutility, QS: DefaultQS, Costs: DefaultCycleCosts}
 	for i := range e.moves {
 		e.moves[i] = make([]Move, 0, 128)
 	}

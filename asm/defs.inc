@@ -205,6 +205,18 @@ FT_ROOKX  = $20         ; experimental rook/blockade eval terms (task #51):
                         ;  blockade pass); zero cost when the bit is clear
                         ;  (arm A == the current engine byte-for-byte).
                         ;  A/B via sprt -a 0x3F -b 0x1F.
+FT_ASP    = $40         ; aspiration windows at the iterative-deepening
+                        ;  root (budget mode only): after iteration d
+                        ;  completes with score s (not a mate, d >= 1),
+                        ;  open iteration d+1 with (s-ASPDELTA, s+ASPDELTA)
+                        ;  and re-search on a fail-low/high, opening ONLY
+                        ;  the failing bound (asymmetric) until the score
+                        ;  lands inside the window, a mate appears, or the
+                        ;  third fail forces the full window. Root-only
+                        ;  cold code (aspiterate, engine.s); zero cost when
+                        ;  the bit is clear. Mirrors mirror.aspIterate with
+                        ;  AspirationParams{Delta:25, Policy:AspAsym}.
+                        ;  (bit was reserved for the canceled LMP port.)
 FT_CKVERIFY = $80       ; debug: verify make's gives-check against a
                         ; full scan at every node (exit 101 on mismatch)
 
@@ -216,6 +228,7 @@ TT_EXACT = 3
 INF       = 32000
 MATE      = 30000
 TEMPO     = 10          ; side-to-move eval bonus, centipawns
+ASPDELTA  = 25          ; FT_ASP initial aspiration half-window (centipawns)
 
 ; ---- Absolute data ----
 PIECESQ    = $0800      ; 32 bytes: slots 0-15 white (0=king), 16-31 black
@@ -286,6 +299,16 @@ XSTRUCT    = $0220      ; 16-bit signed, white POV
 ITSTART0   = $0230      ; 24-bit CLOCK snapshot at iteration start
 ITSTART1   = $0231      ;  (predictive gate: est next = 2x last cost)
 ITSTART2   = $0232
+
+; FT_ASP aspiration state (budget-mode ID root; aspiterate in engine.s).
+; Cold once-per-(re)search code, so plain RAM: the live root window bounds
+; (ALPHA[0]/BETA[0] get clobbered as alpha is raised during the search, so
+; the window is held here across re-searches) and a fail counter.
+ASPAL      = $0233      ; 16-bit window alpha (score space)
+ASPAH      = $0234
+ASPBL      = $0235      ; 16-bit window beta
+ASPBH      = $0236
+ASPFAIL    = $0237      ; fails this iteration (0..3; 3 forces full window)
 
 MOVESTACK  = $0E00      ; 4 bytes/move (tier,from,to,flags); through $1FFF
                         ;  (1151-move capacity; emitmove traps overflow with

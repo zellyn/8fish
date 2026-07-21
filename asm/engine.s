@@ -80,7 +80,7 @@ idloop: lda CLOCK_TRAP          ; iteration start time (latched 24-bit)
         sta ITSTART1
         lda CLOCK_TRAP+2
         sta ITSTART2
-        jsr iterate
+        jsr aspiterate          ; iterate CURDEPTH, aspiration window (FT_ASP)
         lda ABORT
         beq idok
         ; aborted mid-iteration: a partial iteration's "best" is just the
@@ -161,7 +161,9 @@ idloopj:
         jmp idloop
 
 ; iterate: run one full-window search at CURDEPTH, saving the previous
-; iteration's best move first.
+; iteration's best move first. Fixed-depth mode uses this directly; the
+; budget-mode ID driver goes through aspiterate (below), which reuses the
+; same per-iteration setup via itsearch.
 iterate:
         lda BESTFROM
         sta PREVFROM
@@ -257,3 +259,204 @@ nonetxt:
         .include "board.s"
         .include "movegen.s"
         .include "tables.s"
+
+        ; Aspiration code lives in CODE (not the TABLES segment tables.s
+        ; leaves active): appended at CODE's end it shifts the page-aligned
+        ; TABLES/LCCODE only by whole pages, so no hot-path instruction's
+        ; low byte — and no page-crossing cycle count — changes. Placing it
+        ; in TABLES instead grows that segment by a non-page amount and
+        ; perturbs the LC-install loop's cost (FT_ASP-off cycles must be
+        ; bit-identical to the pre-aspiration engine).
+        .segment "CODE"
+
+; aspiterate: budget-mode ID wrapper that applies aspiration windows
+; (FT_ASP) around iteration CURDEPTH. It first saves the previous
+; completed iteration's result (BEST* -> PREV*, SCORE -> PREVSC) — the
+; abort-recovery snapshot AND the aspiration seed — then runs the
+; iteration. With FT_ASP off, CURDEPTH == 1, or the seed in a mate zone
+; it is a plain full-window iteration (identical tree to iterate).
+; Otherwise it opens (prev-ASPDELTA, prev+ASPDELTA) and re-searches on a
+; fail-low/high, opening ONLY the failing bound (asymmetric) until the
+; score lands inside the window, a mate appears, or the third fail forces
+; the full window. On a budget abort mid-(re)search ABORT stays set and
+; control returns to idloop, which discards the whole iteration (restores
+; PREV*), exactly as for iterate. Mirrors mirror.aspIterate with
+; AspirationParams{Delta:25, Policy:AspAsym}, including its fail-low/high
+; definitions (s <= alpha with alpha > -INF, s >= beta with beta < INF)
+; and widening order.
+aspiterate:
+        lda BESTFROM            ; save previous completed iteration (once)
+        sta PREVFROM
+        lda BESTTO
+        sta PREVTO
+        lda BESTFLAGS
+        sta PREVFLAGS
+        lda SCORE               ; PREVSC = seed for the aspiration window
+        sta PREVSC0
+        lda SCORE+1
+        sta PREVSC1
+        lda FEATURES            ; aspiration disabled? -> full window
+        and #FT_ASP
+        beq aspfull
+        lda CURDEPTH            ; iteration 1 -> full window
+        cmp #2
+        bcc aspfull
+        lda PREVSC1             ; seed in a mate zone? -> full window
+        bpl aspspos             ; hi $00-$7F: test winning-mate zone
+        cmp #NMATEZONEHI        ; hi $80-$8B (< $8C): losing mate
+        bcc aspfull
+        bcs aspnarrow           ; hi $8C-$FF: negative, not a mate
+aspspos:
+        cmp #MATEZONEHI         ; hi $74-$7F: winning mate
+        bcs aspfull
+        bcc aspnarrow           ; not a mate seed: use a narrow window
+aspfull:
+        lda #<(-INF)            ; full-window single iteration
+        sta ASPAL
+        lda #>(-INF)
+        sta ASPAH
+        lda #<INF
+        sta ASPBL
+        lda #>INF
+        sta ASPBH
+        jmp itsearch            ; tail: search's rts returns to idloop
+aspnarrow:
+        ; window = (prev - ASPDELTA, prev + ASPDELTA). A non-mate seed is
+        ; well inside +/-INF, so prev+/-ASPDELTA never needs clamping.
+        sec
+        lda PREVSC0
+        sbc #ASPDELTA
+        sta ASPAL
+        lda PREVSC1
+        sbc #0
+        sta ASPAH
+        clc
+        lda PREVSC0
+        adc #ASPDELTA
+        sta ASPBL
+        lda PREVSC1
+        adc #0
+        sta ASPBH
+        lda #0
+        sta ASPFAIL
+asploop:
+        jsr itsearch            ; run CURDEPTH with the [ASPA,ASPB] window
+        lda ABORT
+        beq :+
+        rts                     ; budget hit mid-(re)search: discard iteration
+:       ; fail-low? SCORE <= ASPA and ASPA > -INF.
+        lda ASPAH               ; ASPA == -INF ($8300)? then no fail-low
+        cmp #>(-INF)
+        bne aspchklo
+        lda ASPAL
+        cmp #<(-INF)
+        beq aspchkhi            ; ASPA == -INF: skip the fail-low test
+aspchklo:
+        sec                     ; ASPA - SCORE; result >= 0 => SCORE <= ASPA
+        lda ASPAL
+        sbc SCORE
+        lda ASPAH
+        sbc SCORE+1
+        bvc :+
+        eor #$80
+:       bmi aspchkhi            ; ASPA < SCORE: not a fail-low
+        jsr aspbump             ; fail-low; C=1 if mate/3rd fail forces full
+        bcs aspwidefull
+        lda #<(-INF)            ; asymmetric: open only alpha
+        sta ASPAL
+        lda #>(-INF)
+        sta ASPAH
+        jmp asploop
+aspchkhi:
+        ; fail-high? SCORE >= ASPB and ASPB < INF.
+        lda ASPBH               ; ASPB == INF ($7D00)? then no fail-high
+        cmp #>INF
+        bne aspchkhi2
+        lda ASPBL
+        cmp #<INF
+        beq aspacc              ; ASPB == INF: score inside window -> accept
+aspchkhi2:
+        sec                     ; SCORE - ASPB; result >= 0 => SCORE >= ASPB
+        lda SCORE
+        sbc ASPBL
+        lda SCORE+1
+        sbc ASPBH
+        bvc :+
+        eor #$80
+:       bpl aspfh               ; SCORE >= ASPB: fail-high
+aspacc:
+        rts                     ; score inside window: accept the iteration
+aspfh:
+        jsr aspbump             ; fail-high
+        bcs aspwidefull
+        lda #<INF               ; asymmetric: open only beta
+        sta ASPBL
+        lda #>INF
+        sta ASPBH
+        jmp asploop
+aspwidefull:
+        lda #<(-INF)            ; mate/3rd fail: full window, guaranteed
+        sta ASPAL               ;  terminal (no clip, no further fail)
+        lda #>(-INF)
+        sta ASPAH
+        lda #<INF
+        sta ASPBL
+        lda #>INF
+        sta ASPBH
+        jmp asploop
+
+; aspbump: register a fail. Increments ASPFAIL and returns C=1 when the
+; full window must be forced now — the failing score (in SCORE) is itself
+; in a mate zone (a narrow window must never clip a mate) or this is the
+; third fail — else C=0 (open only the failing bound).
+aspbump:
+        inc ASPFAIL
+        lda SCORE+1             ; inMateZone(SCORE)?
+        bpl aspbpos
+        cmp #NMATEZONEHI
+        bcc aspbforce           ; losing-mate score
+        bcs aspbcnt             ; negative, not a mate
+aspbpos:
+        cmp #MATEZONEHI
+        bcs aspbforce           ; winning-mate score
+aspbcnt:
+        lda ASPFAIL
+        cmp #3                  ; the third fail forces the full window
+        bcs aspbforce
+        clc                     ; widen the failing bound only
+        rts
+aspbforce:
+        sec
+        rts
+
+; itsearch: run one search at CURDEPTH with the root window held in
+; ASPAL/H (alpha) and ASPBL/H (beta). Resets the per-iteration root state
+; exactly like iterate (best move, ply, hash watermark, in-check flag,
+; move-stack pointer), then enters search (whose rts returns to
+; itsearch's caller). aspiterate re-runs this per aspiration re-search.
+itsearch:
+        lda #NOSQ
+        sta BESTFROM
+        lda CURDEPTH
+        sta MAXDEPTH
+        lda #0
+        sta PLY
+        sta HVALID
+        jsr curincheck
+        lda #0
+        rol
+        sta INCHK
+        lda #<MOVESTACK
+        sta MSP
+        lda #>MOVESTACK
+        sta MSP+1
+        lda ASPAL
+        sta ALPHALO
+        lda ASPAH
+        sta ALPHAHI
+        lda ASPBL
+        sta BETALO
+        lda ASPBH
+        sta BETAHI
+        jmp search              ; rts returns to itsearch's caller
+

@@ -50,6 +50,52 @@ func TestBudgetDeterminism(t *testing.T) {
 	}
 }
 
+// TestLMPSound: late-move pruning stays a pure function of the inputs
+// (bit-identical replays) and never turns a node with legal moves into a
+// false mate/stalemate (pruning only fires after >= Base legal moves).
+func TestLMPSound(t *testing.T) {
+	fens := []string{
+		"r1b1k2r/ppp2ppp/2nqpn2/3p4/3P4/P1P1BN2/2P1PPPP/2RQKB1R w Kkq - 2 8",
+		"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+		"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+		"8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+	}
+	lmps := []LMPParams{
+		{Dmax: 2, Base: 3, Mult: 2},
+		{Dmax: 3, Base: 3, Quad: 1},
+		{Dmax: 2, Base: 3, Mult: 2, ExemptKillers: true},
+		{Dmax: 2, Base: 3, Mult: 2, KeepChecks: true},
+	}
+	for _, lmp := range lmps {
+		for _, fen := range fens {
+			pos, err := ParseFEN(fen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := func() (Move, int, uint64) {
+				e := NewEngine()
+				e.Features = FtAll | FtSEE | FtHistory
+				e.QS = QSParams{RecapAfter: 2}
+				e.Ord = OrderParams{HistMalus: true}
+				e.LMP = lmp
+				e.SetPosition(pos)
+				e.Seed = 0
+				m, s := e.SearchBudget(20000, MaxPly-1)
+				return m, s, e.Nodes
+			}
+			m1, s1, n1 := run()
+			m2, s2, n2 := run()
+			if m1 != m2 || s1 != s2 || n1 != n2 {
+				t.Errorf("LMP %+v %s non-deterministic: (%v,%d,%d) vs (%v,%d,%d)",
+					lmp, fen, m1, s1, n1, m2, s2, n2)
+			}
+			if m1.From == NoSq {
+				t.Errorf("LMP %+v %s: false mate (no move) at a node with legal moves", lmp, fen)
+			}
+		}
+	}
+}
+
 // TestBudgetReachesDepth: a bigger node budget must reach at least as
 // deep as a smaller one (more nodes => more completed iterations), and
 // node savings turn into depth — the whole premise of the mode.

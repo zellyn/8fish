@@ -50,6 +50,10 @@ type Engine struct {
 	QSNodes      uint64 // nodes entered at ply >= MaxDepth (evasion included)
 	QSCheckNodes uint64 // quiet checking moves searched from QS nodes (task #37)
 
+	// LMP configures late-move (movecount) pruning in the scored move
+	// loop (zero value = off).
+	LMP LMPParams
+
 	// Ord configures the scored move ordering used when FtSEE/FtHistory
 	// are enabled (task #35).
 	Ord OrderParams
@@ -154,6 +158,38 @@ var DefaultFutility = FutilityParams{
 	RFP:          [8]int{0, 120, 500},
 	MaxRem:       2,
 	Fut:          120,
+}
+
+// LMPParams configure late-move / movecount pruning (LMP) in the scored
+// ordered move loop. At a shallow, non-PV, not-in-check node whose alpha
+// is outside the mate zone, once the count of already-searched legal
+// moves reaches threshold(d) = Base + Mult*d + Quad*d*d (d = remaining
+// depth), the remaining QUIET moves are skipped without being searched.
+// Captures, promotions and the TT move are always searched. This is a
+// pure per-move counter compare — no tables, no per-node allocation — so
+// it is cheap enough for a 6502 port (the count already lives in the
+// asm's LEGALCNT).
+//
+// Zero value (Dmax == 0) disables LMP entirely.
+type LMPParams struct {
+	// Dmax bounds how deep LMP applies: active only when remaining depth
+	// d satisfies 1 <= d <= Dmax. 0 disables LMP.
+	Dmax int
+	// threshold(d) = Base + Mult*d + Quad*d*d. Standard schemes:
+	// Base=3,Mult=2,Quad=0 gives 3+2d; Base=3,Mult=0,Quad=1 gives 3+d*d.
+	Base, Mult, Quad int
+	// ExemptKillers keeps killer-class quiets searched even past the
+	// threshold (they are the highest-scoring quiets and cheap to spare).
+	ExemptKillers bool
+	// KeepChecks keeps quiet moves that give check searched (requires the
+	// move to be made to know it gives check, so it only saves the child
+	// search, not the make/unmake — less 6502-portable than the default).
+	KeepChecks bool
+}
+
+// lmpThreshold returns Base + Mult*d + Quad*d*d for remaining depth d.
+func (p *LMPParams) lmpThreshold(d int) int {
+	return p.Base + p.Mult*d + p.Quad*d*d
 }
 
 // QSParams shape the quiescence search. QS ply = PLY - MAXDEPTH.

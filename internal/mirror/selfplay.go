@@ -19,6 +19,7 @@ type PlayerCfg struct {
 	Fut         *FutilityParams
 	KB          *KBTables
 	Ord         OrderParams
+	LMP         LMPParams
 
 	// Extra enables the experimental cheap eval terms (task #18/#51) for
 	// this side. Zero = off (the asm's current eval). Pair it with
@@ -64,6 +65,7 @@ func (c *PlayerCfg) engine() *Engine {
 	if c.EvalTermsCost != 0 {
 		e.Costs.EvalTerm = c.EvalTermsCost
 	}
+	e.LMP = c.LMP
 	return e
 }
 

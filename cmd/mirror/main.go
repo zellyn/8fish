@@ -165,16 +165,18 @@ func match(args []string) {
 	bFut := fs.String("bfut", "", "B futility params")
 	aOrd := fs.String("aord", "", "A ordering knobs: losinglast,histmalus (e.g. 1,1)")
 	bOrd := fs.String("bord", "", "B ordering knobs")
+	aLMP := fs.String("almp", "", "A LMP params: dmax,base,mult,quad,exemptkillers,keepchecks (empty = off)")
+	bLMP := fs.String("blmp", "", "B LMP params")
 	fs.Parse(args)
 
 	lines, err := mirror.GenOpenings(sprt.Openings, *pairs, *seed)
 	check(err)
 	a := mirror.PlayerCfg{Features: byte(*aMask), Weights: parseWeights(*aw), Depth: *depth,
 		FixFutility: *aFix, LMR: parseLMR(*aLMR), QS: parseQS(*aQS), KB: loadKB(*aKB), Fut: parseFut(*aFut), Ord: parseOrd(*aOrd),
-		NodeBudget: *budget, MaxIters: *maxiters}
+		LMP: parseLMP(*aLMP), NodeBudget: *budget, MaxIters: *maxiters}
 	b := mirror.PlayerCfg{Features: byte(*bMask), Weights: parseWeights(*bw), Depth: *depth,
 		FixFutility: *bFix, LMR: parseLMR(*bLMR), QS: parseQS(*bQS), KB: loadKB(*bKB), Fut: parseFut(*bFut), Ord: parseOrd(*bOrd),
-		NodeBudget: *budget, MaxIters: *maxiters}
+		LMP: parseLMP(*bLMP), NodeBudget: *budget, MaxIters: *maxiters}
 	start := time.Now()
 	res, err := mirror.Match(a, b, lines, *pairs, *workers, *seed)
 	check(err)
@@ -182,8 +184,8 @@ func match(args []string) {
 	if *budget > 0 {
 		mode = fmt.Sprintf("budget %d nodes/move (maxiters %d)", *budget, *maxiters)
 	}
-	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q) %s: %s (%v)\n",
-		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd,
+	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q) %s: %s (%v)\n",
+		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP,
 		mode, res, time.Since(start).Round(time.Second))
 }
 
@@ -325,6 +327,22 @@ func parseOrd(s string) mirror.OrderParams {
 		os.Exit(2)
 	}
 	return mirror.OrderParams{LosingLast: ll != 0, HistMalus: hm != 0}
+}
+
+// parseLMP parses "dmax,base,mult,quad,exemptkillers,keepchecks" into an
+// LMPParams; empty means off (zero value).
+func parseLMP(s string) mirror.LMPParams {
+	if s == "" {
+		return mirror.LMPParams{}
+	}
+	var dmax, base, mult, quad, ek, kc int
+	n, err := fmt.Sscanf(s, "%d,%d,%d,%d,%d,%d", &dmax, &base, &mult, &quad, &ek, &kc)
+	if err != nil || n != 6 {
+		fmt.Fprintf(os.Stderr, "bad LMP params %q (want dmax,base,mult,quad,exemptkillers,keepchecks)\n", s)
+		os.Exit(2)
+	}
+	return mirror.LMPParams{Dmax: dmax, Base: base, Mult: mult, Quad: quad,
+		ExemptKillers: ek != 0, KeepChecks: kc != 0}
 }
 
 // parseQS parses "plycap,recapafter[,checks[,safechecks]]". The last two

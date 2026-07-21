@@ -3,6 +3,92 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — late move pruning (LMP / movecount pruning) — ADOPT 3+2d Dmax3 (task #44)
+
+Added **late-move (movecount) pruning** to the mirror's scored search
+(`internal/mirror/ordering.go` `orderedMoveLoop`, gated by `LMPParams`,
+plumbed through `PlayerCfg` and `cmd/mirror match -almp/-blmp`). At a
+shallow (remaining `d <= Dmax`), **non-PV** (zero-window), not-in-check
+node whose alpha is outside the mate zone, once the count of
+already-searched legal moves reaches `threshold(d) = Base + Mult*d +
+Quad*d*d`, the remaining **quiet** moves are skipped. Captures,
+promotions, and the TT move are always searched. It is a pure per-move
+`LEGALCNT`-vs-constant compare — no tables, no per-node lookup — so it is
+6502-portable in spirit. Killers are **not** exempt and checking quiets
+**are** pruned (both measured better/neutral; see below).
+
+All matches: **30 000 nodes/move**, vs the adopted baseline (mask **0x7f**
+= SEE+history, recap2 QS, history malus, corrected-guard RFP 120/500),
+LMP-on vs the identical config LMP-off. `d` = remaining depth. Fixed-depth
+node reductions are depth-6 on the same adopted config (`TestLMPSweepNodes`).
+
+**Field screen (500 games, ±26 Elo):**
+
+| variant            | params (dmax,base,mult,quad) | fixed-d6 nodes | node-budget Elo |
+|--------------------|------------------------------|----------------|-----------------|
+| 3+2d  Dmax3        | 3,3,2,0                      | **−35.6%**     | **+58 ± 26**    |
+| 3+2d  Dmax2 keepC  | 2,3,2,0 keepchecks           | −36.5%         | +52 ± 25        |
+| 3+2d  Dmax2        | 2,3,2,0                      | −35.7%         | +51 ± 26        |
+| 3+d·d Dmax3        | 3,3,0,1                      | −36.9%         | +45 ± 26        |
+| 4+2d  Dmax2 (cons) | 2,4,2,0                      | −34.0%         | +35 ± 26        |
+| 3+2d  Dmax2 exK    | 2,3,2,0 exemptkillers        | −34.0%         | +35 ± 26        |
+| 3+d·d Dmax2        | 2,3,0,1                      | **−41.9%**     | +27 ± 26        |
+| 3+2d  Dmax4        | 4,3,2,0                      | —              | +21 ± 26        |
+| 2+d   Dmax3 (aggr) | 3,2,1,0                      | −31.5%         | **−72 ± 27**    |
+
+Reads: linear `3+2d` beats quadratic `3+d·d` (quadratic keeps too many
+quiets at higher `d`, pruning less where the budget could convert it);
+**exempting killers costs ~16 Elo** (+35 vs +51 — do NOT exempt, prune
+them like any quiet); **KeepChecks is noise** (+52 vs +51 — use the cheap
+pre-make variant, never make a move just to learn it gives check);
+extending to **Dmax4 gives gains back** (+21) and the aggressive
+low-threshold variant **over-prunes catastrophically** (−72). The most
+node-savings (`3+d·d Dmax2`, −41.9%) is NOT the most Elo — past a point
+the pruned quiets were carrying real information.
+
+**Promotions to 2000 games (±13 Elo):**
+
+| variant     | +W =D −L        | score | node-budget Elo |
+|-------------|-----------------|-------|-----------------|
+| 3+2d Dmax3  | +821 =582 −597  | 55.6% | **+39 ± 13**    |
+| 3+2d Dmax2  | +789 =571 −640  | 53.7% | +26 ± 13        |
+
+Both clear their bar (>2σ). The point estimate regresses from the 500g
+screen (+58/+51 → +39/+26) but stays solidly positive; **Dmax3 > Dmax2**.
+
+**Fixed-depth sanity (depth 6, 400 games):** LMP `3+2d Dmax3` vs off =
+**−100 ± 28** while the tree is **−35.6%** smaller. This is the task-#42
+conversion in miniature: fixed depth *penalizes* a node-saver (same
+depth, fewer moves searched = pure accuracy loss), and the budget flips
+it to +39. Not catastrophic, and exactly the expected sign — fixed depth
+is a floor, not the verdict, for this feature class.
+
+**Futility interaction (does LMP pay on top of RFP/futility, or is it
+subsumed?):** they overlap at `d <= 2` (adopted RFP is MaxRem 2).
+
+| test                                          | Elo (500g) | reading                                  |
+|-----------------------------------------------|------------|------------------------------------------|
+| LMP on top of adopted futility (main screen)  | +39 ± 13   | LMP **pays on top of** futility          |
+| (no-futil + LMP) vs adopted (futil, no LMP)   | −17 ± 26   | LMP does **not replace** futility        |
+| (no-futil + LMP) vs (no-futil, no LMP)        | +48 ± 27   | LMP standalone ≈ same size as with futil |
+
+**Verdict: complementary, NOT subsumed.** LMP is a *count*-based prune;
+RFP/futility is a *value*-based prune — they cut different nodes. LMP
+still delivers +39 on top of the adopted futility config, dropping
+futility loses ~65 Elo that LMP only partly (+48) recovers, so keep
+**both**. This is the honest opposite of the checks-in-QS subsumption
+outcome: here the new feature is additive.
+
+**Port recommendation (candidate for a TIME-budgeted SPRT):** carry
+**LMP `3+2d`, Dmax3** — `threshold(d)=3+2d` (d1=5, d2=7, d3=9), killers
+NOT exempt, checks pruned — applied at non-PV (zero-window) nodes only.
+Expected **≈ +39 Elo** under a node budget; the asm equivalent is a
+`LEGALCNT >= 5/7/9` compare on the scout/zero-window path, skipping the
+remaining quiet passes. Keep RFP/futility unchanged (complementary).
+Skip: quadratic thresholds, Dmax≥4, killer exemption, and any base below
+3 (all measured worse). `KeepChecks` is optional/neutral — omit it (the
+6502 would pay a make/undo to evaluate it for no Elo).
+
 ## 2026-07-21 — mirror gains a calibrated CYCLE-budget mode (screens now taxed by cost)
 
 The fix for the flat-tax blind spot the rook rejection exposed: the

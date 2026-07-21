@@ -123,6 +123,60 @@ func TestLMRSweepNodes(t *testing.T) {
 	}
 }
 
+// TestLMPSweepNodes: depth-6 node counts across late-move-pruning
+// variants, measured on top of the ADOPTED screen config (mask 0x7f =
+// SEE+history, recap2 QS, history malus, corrected-guard RFP 120/500).
+// Confirms the tree shrinks and by how much; strength is judged under a
+// node budget by the self-play screen, not here.
+func TestLMPSweepNodes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow")
+	}
+	// adopt configures an engine with the adopted screen baseline.
+	adopt := func(lmp LMPParams) *Engine {
+		e := NewEngine()
+		e.Features = FtAll | FtSEE | FtHistory
+		e.QS = QSParams{RecapAfter: 2}
+		e.Ord = OrderParams{HistMalus: true}
+		e.LMP = lmp
+		return e
+	}
+	variants := []struct {
+		name string
+		lmp  LMPParams
+	}{
+		{"off (baseline)", LMPParams{}},
+		{"3+2d  Dmax2", LMPParams{Dmax: 2, Base: 3, Mult: 2}},
+		{"3+2d  Dmax3", LMPParams{Dmax: 3, Base: 3, Mult: 2}},
+		{"3+d*d Dmax2", LMPParams{Dmax: 2, Base: 3, Quad: 1}},
+		{"3+d*d Dmax3", LMPParams{Dmax: 3, Base: 3, Quad: 1}},
+		{"3+2d  Dmax2 exK", LMPParams{Dmax: 2, Base: 3, Mult: 2, ExemptKillers: true}},
+		{"3+2d  Dmax2 keepC", LMPParams{Dmax: 2, Base: 3, Mult: 2, KeepChecks: true}},
+		{"aggr 2+d  Dmax3", LMPParams{Dmax: 3, Base: 2, Mult: 1}},
+		{"cons 4+2d Dmax2", LMPParams{Dmax: 2, Base: 4, Mult: 2}},
+	}
+	fens := benchFENs(t)
+	var baseTotal uint64
+	for vi, v := range variants {
+		var total uint64
+		for _, fen := range fens {
+			pos, err := ParseFEN(fen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eng := adopt(v.lmp)
+			eng.SetPosition(pos)
+			eng.SearchFixed(6)
+			total += eng.Nodes
+		}
+		if vi == 0 {
+			baseTotal = total
+		}
+		t.Logf("%-20s total %9d nodes (%+.1f%% vs baseline)",
+			v.name, total, 100*(float64(total)/float64(baseTotal)-1))
+	}
+}
+
 // TestQSShapeNodes: depth-6 total and QS node counts across QS-shape
 // variants (phase A; the interesting frontier is 30-50% cheaper QS at
 // small fixed-depth Elo cost).

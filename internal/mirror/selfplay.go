@@ -19,6 +19,7 @@ type PlayerCfg struct {
 	Fut         *FutilityParams
 	KB          *KBTables
 	Ord         OrderParams
+	LMP         LMPParams
 
 	// NodeBudget selects the node-budgeted iterative-deepening mode: when
 	// > 0, each move runs SearchBudget(NodeBudget, MaxIters) instead of
@@ -42,6 +43,7 @@ func (c *PlayerCfg) engine() *Engine {
 	}
 	e.KB = c.KB
 	e.Ord = c.Ord
+	e.LMP = c.LMP
 	return e
 }
 

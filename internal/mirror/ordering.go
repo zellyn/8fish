@@ -301,6 +301,11 @@ func (e *Engine) orderedMoveLoop() int {
 	// Quiet moves tried before a cutoff, for the history malus.
 	var triedQuiets []Move
 
+	// LMP is armed once for the node: whether this node qualifies (shallow,
+	// non-PV, not in check, alpha outside the mate zone) is independent of
+	// the move, so the per-move test collapses to a counter compare.
+	lmpOn := e.lmpNodeOK(ply, rem)
+
 	for _, sm := range moves {
 		m := sm.m
 		// Leaf futility: quiets are pruned (captures/promotions and the
@@ -309,9 +314,24 @@ func (e *Engine) orderedMoveLoop() int {
 			continue
 		}
 
+		// Late-move (movecount) pruning: once threshold(d) legal moves have
+		// been searched, skip the remaining quiets. Pre-make when possible
+		// (a pure counter compare); with KeepChecks the move must be made
+		// first to learn whether it gives check.
+		lmpCand := lmpOn && e.lmpQuietOK(sm)
+		if lmpCand && !e.LMP.KeepChecks {
+			continue
+		}
+
 		e.make(m)
 		moverKing := p.PieceSq[int(p.Side^ColorMask)<<1]
 		if e.attacked(moverKing, p.Side) {
+			e.unmake()
+			continue
+		}
+		if lmpCand && !e.inChk[ply+1] {
+			// KeepChecks path: legal, quiet, past the count, and not a
+			// checking move — prune it (undo the probing make, don't count).
 			e.unmake()
 			continue
 		}
@@ -394,6 +414,40 @@ func (e *Engine) orderedMoveLoop() int {
 	}
 
 	return e.done()
+}
+
+// lmpNodeOK reports whether this node qualifies for late-move pruning:
+// LMP on, shallow (1 <= rem <= Dmax), not the root, not in check, a
+// non-PV (zero-width) window, and alpha outside the mate zone. These
+// depend only on the node, not the move, so they are tested once.
+func (e *Engine) lmpNodeOK(ply, rem int) bool {
+	if e.LMP.Dmax == 0 || rem < 1 || rem > e.LMP.Dmax {
+		return false
+	}
+	if ply == 0 || e.inChk[ply] {
+		return false
+	}
+	if e.beta[ply]-e.alpha[ply] >= 2 {
+		return false // PV node: never movecount-prune
+	}
+	// Mate-zone guard: don't prune quiets while proving/avoiding a mate.
+	return e.alpha[ply] > nmateZoneHi && e.alpha[ply] < mateZoneLo
+}
+
+// lmpQuietOK reports whether move sm is a pruning candidate given the
+// node already qualified: it is a quiet non-TT move, optionally not a
+// killer, and enough legal moves have already been searched. The count
+// (e.legal[ply]) is post-increment, so it holds the number of moves
+// already searched at the moment of this test (pre-make).
+func (e *Engine) lmpQuietOK(sm scoredMove) bool {
+	if !sm.quiet || sm.score == scoreTT {
+		return false
+	}
+	if e.LMP.ExemptKillers && sm.score == scoreKiller {
+		return false
+	}
+	rem := e.MaxDepth - e.Pos.Ply
+	return e.legal[e.Pos.Ply] >= e.LMP.lmpThreshold(rem)
 }
 
 // histBump rewards the quiet move that caused a fail-high and (with

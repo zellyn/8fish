@@ -216,7 +216,17 @@ ckvdone:
         lda #NOSQ
         sta TTFROMA,y
         sta TTBF,y
-        ; full-width node: probe the transposition table
+        ; improving heuristic (FT2_IMPROV): mark this ply's eval unrecorded for
+        ; this visit (improving.go resets evalValid[ply] at node entry). A
+        ; natural eval (null/RFP) or the full-signal force re-sets it. Gated so
+        ; the OFF path never touches EVALVALID. Only full-width nodes reach
+        ; here; qs plies are never read by improving().
+        lda FEATURES2
+        and #FT2_IMPROV
+        beq :+
+        lda #0
+        sta EVALVALID,y
+:       ; full-width node: probe the transposition table
         jsr ttprobe
         bcc snodej
         ldy PLY
@@ -360,7 +370,8 @@ qsnodelta:
 sprep:  ldy PLY
         lda INCHK,y             ; propagated by make (root: the driver)
         beq :+
-        jmp snode               ; in check: no null, no RFP, no futility
+        jmp sprepj              ; in check: no null, no RFP, no futility
+                                ;  (still needs the full-signal forced eval)
 :       ; ---- null move: FT_NULL, not at the root, not right after a
         ; null, remaining >= 2, phase >= 3, beta below the +mate zone
         lda FEATURES
@@ -390,6 +401,14 @@ sprep:  ldy PLY
 :       ; only worth trying when the static eval already meets beta:
         ; failed nulls are pure cost
         jsr eval
+        ; improving (FT2_IMPROV): capture the null-gate static eval as this
+        ; ply's recorded eval (full-signal reuses natural evals; improving.go
+        ; records it via eval()). Kept out of eval() to leave the qs path free.
+        lda FEATURES2
+        and #FT2_IMPROV
+        beq nonrec1
+        jsr everec
+nonrec1:
         ldy PLY
         sec
         lda SCORE
@@ -498,6 +517,13 @@ rfpbok:
         cmp #3
         bcs gskip
         jsr eval
+        ; improving (FT2_IMPROV): capture the RFP static eval as this ply's
+        ; recorded eval (same reuse as the null gate).
+        lda FEATURES2
+        and #FT2_IMPROV
+        beq nonrec2
+        jsr everec
+nonrec2:
         ldy PLY
         ; margin: 120 @ rem1, 500 @ rem2 (16-bit; 500 = $01F4). rem2 at
         ; the tight 250 over-pruned negative windows (mirror task #34).
@@ -556,7 +582,22 @@ srfpno: ; futility (depth 1): eval + margin <= alpha -> quiets can't help
 :       bmi sprepj              ; alpha < eval+margin: quiets may matter
         lda #1
         sta FUTILE,y
-sprepj: jmp snode
+sprepj: ; full-signal improving (FT2_IMPROV): guarantee a static eval at this
+        ; full-width node so the ply-2 comparison is available for this node's
+        ; LMR and for descendants (improving.go forces one when no natural
+        ; eval ran). Reached by every full-width node headed for the move loop
+        ; — the not-in-check paths fall through here, the in-check path jumps
+        ; here (it skips null/RFP). Skip when a natural eval already recorded
+        ; (EVALVALID set) so that eval is never charged twice.
+        lda FEATURES2
+        and #FT2_IMPROV
+        beq snodeg
+        ldy PLY
+        lda EVALVALID,y
+        bne snodeg
+        jsr eval                ; forced full-signal eval (no natural one ran)
+        jsr everec              ; record it as this ply's static eval
+snodeg: jmp snode
 
 ; makenull / unmakenull: pass the move. Only ep, the hash, the halfmove
 ; clock, and the side flip change; accumulators are untouched.
@@ -1092,11 +1133,41 @@ slegal: ldy PLY                 ; PLY = child here
         bcc smset               ; too shallow to reduce
         ldx #2                  ; reduce by 1
         cmp #5
-        bcc smset
+        bcc smimp
         lda LEGALCNT,y
         cmp #7
-        bcc smset               ; very late (>= 6 searched) and deep:
+        bcc smimp               ; very late (>= 6 searched) and deep:
         ldx #3                  ;  reduce by 2
+smimp:  ; improving heuristic (FT2_IMPROV): a late quiet at a NOT-improving
+        ; node reduces one extra ply (improving.go: mode += lmrExtra). Reached
+        ; only on the reduced path, so X = 2 or 3 here; the full/scout moves
+        ; (X < 2) branch straight to smset and execute nothing new. Y = this
+        ; node's ply (>= 1; the root already branched to smset above).
+        ; "improving" = EVALSTK[ply] > EVALSTK[ply-2] (full-signal guarantees
+        ; both are recorded at full-width nodes).
+        lda FEATURES2
+        and #FT2_IMPROV
+        beq smset
+        cpy #2
+        bcc smset               ; ply < 2: permissive default (assume improving)
+        stx T2                  ; save reduction mode (T2 dead until ssearch)
+        tya
+        sec
+        sbc #2
+        tax                     ; X = ply-2 (EVALSTK index; Y stays = ply)
+        sec                     ; signed compare EVALSTK[ply-2] - EVALSTK[ply]
+        lda EVALSTKL,x
+        sbc EVALSTKL,y
+        lda EVALSTKH,x
+        sbc EVALSTKH,y
+        bvc :+
+        eor #$80
+:       bmi smimpok             ; < 0: EVALSTK[ply-2] < EVALSTK[ply] => improving
+        ldx T2                  ; NOT improving: restore mode, add one ply
+        inx
+        bne smset               ; always (X = 3 or 4, nonzero)
+smimpok:
+        ldx T2                  ; improving: restore mode unchanged
 smset:  txa
         sta SMODE,y
         iny

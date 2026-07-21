@@ -25,6 +25,8 @@ func main() {
 		defsBfile = flag.String("defsB", "", "side-B memory-layout defs (required with -binB)")
 		aBits    = flag.String("a", "0x07", "feature bits for side A")
 		bBits    = flag.String("b", "0x00", "feature bits for side B")
+		aBits2   = flag.String("a2", "0x00", "second feature byte (FT2_*) for side A")
+		bBits2   = flag.String("b2", "0x00", "second feature byte (FT2_*) for side B")
 		budgetMs = flag.Uint64("budget", 5000, "emulated ms per move")
 		pairs    = flag.Int("pairs", 50, "opening pairs (games = 2x)")
 		parallel = flag.Int("parallel", runtime.NumCPU()-2, "concurrent games")
@@ -51,6 +53,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	a2, err := strconv.ParseUint(*aBits2, 0, 8)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	b2, err := strconv.ParseUint(*bBits2, 0, 8)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	var binB []byte
 	var defsB chesstest.Defs
@@ -72,6 +84,8 @@ func main() {
 		DefsB:        defsB,
 		FeaturesA:    byte(a),
 		FeaturesB:    byte(b),
+		FeaturesA2:   byte(a2),
+		FeaturesB2:   byte(b2),
 		BudgetCycles: *budgetMs * chesstest.CyclesPerMs,
 		Pairs:        *pairs,
 		Parallel:     *parallel,

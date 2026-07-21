@@ -3,6 +3,29 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — deep optimization review round 4 UNION: −7.67% masks / −8.12% adopted config
+
+All four clusters merged (board 6f97dac, search 214152f, eval e88bcb8,
+movegen f65f972 → union b31eb40): MicroAB 4,294,459,755 →
+3,964,939,714 (−7.67%); adopted gameplay config (0x1F + FT2_IMPROV)
+1,905,559,028 → 1,750,861,350 (**−8.12%**, slightly better than naive
+compounding) — every fingerprint identical at both configs. Integration
+resolved one ZP collision (EVALVALID $30→$32; ATP2 keeps $30/$31), one
+duplicate test name, and removed the now-dead everec.
+
+The eval cluster (no separate entry; from its report): −1.26% adopted —
+pawnterm king-only fast path (17.5% of calls, ~55–130 vs ~850 cyc),
+eval() fast-path fusion, PDIRTY encoding unified via DIRTYTAB; the
+documented per-ply eval accumulator idea measured DEAD (structurally
+exclusive eval sites; 1.0% cross-visit cache-hit rate).
+
+Cross-file proposals consolidated for the integration pass: per-file
+pawn-term cache with dirty-file mask (est −2 to −3%), lazy pawnterm
+(~0.5–1%), emit-side class-presence byte for empty-pass skipping
+(≥−0.5%), color-specialized PSQT pages (~0.3–0.4%, +3KB — check MAIN
+headroom after movegen's +2KB), MG/(MG−EG) accumulator pair (~0.3%),
+gennode→genrecap direct entry (~0.05%).
+
 ## 2026-07-21 — deep optimization review round 4, movegen cluster: batched quiet emission, −2.56% total cycles at identical trees
 
 The movegen cluster (generate/generateq/genrecap + the emit interface)

@@ -120,6 +120,17 @@ RECAPONLY = $0D         ; recap2 qs gate: nonzero -> generateq emits only
                         ;  captures landing on RECAPSQ (prev move's TO)
 TTF0      = $0E         ; search pass 0: TT-move from (TTFROMA[PLY] mirror)
 TTT0      = $0F         ; search pass 0: TT-move to (TTTOA[PLY] mirror)
+EVALVALID = $32         ; improving (FT2_IMPROV): nonzero = a static eval was
+                        ;  recorded for the CURRENT node's visit (deep opt r4:
+                        ;  was a 32-byte per-ply array at $0278; single ZP byte
+                        ;  suffices because it is only written at node entry /
+                        ;  eval-record and read at sprepj, all strictly before
+                        ;  any recursion from that node — the one write-...-
+                        ;  recurse-...-read path, the failed null move, now
+                        ;  jumps straight to the move loop and never reads it).
+                        ;  Reset unconditionally at full-width node init (the
+                        ;  write is feature-blind; nothing reads it when
+                        ;  FT2_IMPROV is clear, so the tree is unchanged).
 
 BOARD     = $40         ; 128-byte 0x88 board, $40..$BF. The 64 off-board
                         ;  bytes (files 8-F of each rank: $48-4F,58-5F,68-6F,
@@ -283,7 +294,8 @@ UNDOEGHI   = $0AC0
 UNDOPHASE  = $0AE0
 UNDOHALF   = $0B00
 LEGALCNT   = $0B20      ; legal moves found at this ply
-PASSNO     = $0B40      ; move-loop pass: 0 captures/promos, 1 quiets
+PASSNO     = $0B40      ; move-loop pass: 0 TT move, 1 heavy captures/
+                        ;  promos, 2 light captures, 3 killers, 4 quiets
 QSKIND     = $0B60      ; 0 = full-width (or evasion) node, 1 = qs captures-only
 HASHSTK0   = $0B80      ; hash of the position at each ply (saved by make;
 HASHSTK1   = $0BA0      ;  doubles as the unmake restore source and the
@@ -300,8 +312,17 @@ KILLER2F   = $0CE0
 KILLER2T   = $0D00
 INCHK      = $0D20      ; nonzero: side to move in check at this ply
 FUTILE     = $0D40      ; nonzero: prune quiets at this ply (futility)
-DELTATL    = $0D60      ; qs delta-pruning threshold (16-bit): a capture
-DELTATH    = $0D80      ;  is searched only if its victim value >= this
+THRT       = $0D60      ; qs delta-pruning threshold as a TIER byte
+                        ;  (deep opt r4: was the 16-bit DELTATL/DELTATH
+                        ;  pair): minvictimtype<<4, where minvictimtype is
+                        ;  the smallest victim type whose value clears the
+                        ;  16-bit alpha-standpat-margin threshold. The move
+                        ;  loop's delta filter is then a single unsigned
+                        ;  compare of the move's tier byte against THRT
+                        ;  (tier = victimtype<<4|class, class <= 2 here).
+                        ;  $00 = everything passes (full-width nodes, low
+                        ;  phase, raised stand pat); $70 = nothing passes.
+                        ;  ($0D80 FREE: the old DELTATH slot.)
 UNDOPSL    = $0DA0      ; PSTRUCT saved by make, restored by unmake
 UNDOPSH    = $0DC0
 SMODE      = $0DE0      ; child window mode for the move being searched:
@@ -341,8 +362,8 @@ ASPFAIL    = $0237      ; fails this iteration (0..3; 3 forces full window)
 ; OFF path never touches these, so the search tree is unchanged.
 EVALSTKL   = $0238      ; 32 bytes: static eval low byte, indexed by ply
 EVALSTKH   = $0258      ; 32 bytes: static eval high byte, indexed by ply
-EVALVALID  = $0278      ; 32 bytes: nonzero = eval recorded at this ply
-                        ;  this visit (gates the full-signal forced eval)
+                        ; ($0278-$0297 FREE: the old EVALVALID per-ply array
+                        ;  moved to a single ZP byte, deep opt r4 — see $30.)
 
 MOVESTACK  = $0E00      ; 4 bytes/move (tier,from,to,flags); through $1FFF
                         ;  (1151-move capacity; emitmove traps overflow with

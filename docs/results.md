@@ -3,6 +3,84 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — deep optimization review round 4, search cluster: −2.1/−2.3% total cycles at identical trees
+
+Round-4 pass over asm/search.s (the five-pass move loop, node init/
+teardown, TT-probe glue, killers, QS entry/delta filter, and the
+first-ever optimization pass on the improving-heuristic code shipped
+days ago). Every change proven tree-identical per search: MicroAB
+fingerprints (counts + score + move) byte-identical at masks
+1f/07/00 AND — via the new TestMicroABImproving gate — on the ADOPTED
+gameplay config (FEATURES 0x1F + FT2_IMPROV), with cycles dropping for
+every one of the 24 fingerprinted searches (−1.6% to −3.4%).
+
+Structural changes:
+- **Killer consumption (TT-move style):** pass 3 zeroes a searched
+  killer's tier byte, so pass 4 needs NO by-value killer compares and
+  no killer ZP mirrors — the FT_KILLER-off pass-4 copy became THE
+  pass-4 loop (old duplicate deleted), and sloopret's pass-4 re-entry
+  no longer refreshes the four killer mirror bytes.
+- **THRT tier-byte delta filter:** the QS delta threshold is
+  classified ONCE per node into minvictimtype<<4 (6-way ladder on
+  alpha−standpat−200, exact wrap semantics preserved), so the per-
+  capture filter in passes 1/2 is one unsigned tier compare instead of
+  a 16-bit signed victim-value subtract; VV16L/VV16H tables retired
+  (−224 table bytes), DELTATL/H arrays replaced by one THRT array.
+- **Scout fail-low fast path:** spostsr tests ALPHA+rawSCORE on the
+  un-negated child score; a failed-low scout (the common outcome)
+  skips the 16-bit negate AND the provably-dead beta-cutoff/alpha-
+  raise tests. A zero-window scout fail-high jumps straight to the
+  beta-cutoff body (the beta test is a proven cutoff there).
+- **EVALVALID → ZP:** the improving heuristic's per-ply "eval
+  recorded" array collapsed to one ZP byte ($30) — safe because the
+  only write→recurse→read path (failed null) now jumps directly to
+  the move loop (its RFP/futility gate walk was a proven no-op at
+  remaining ≥ 4); reset is now a blind 3-cycle ZP store (no FEATURES2
+  gate), everec inlined at its three sites, and the smimp ply-2 read
+  uses the assembled EVALSTK*-2,y base (no X save/restore).
+- **Node-kind splits:** gennode/snode split into snodeq/snode +
+  gennodeq/gennodef (no QSKIND tests); qs nodes preset SMODE=0 once at
+  entry so slegal's per-move LMR chain is skipped entirely for qs
+  moves; empty qs capture lists (common) skip both no-op pass scans.
+- Micros: PVS scout child alpha via one's complement (−ALPHA−1 = ~ALPHA,
+  no carry chain or T0/T1 staging); TT depth cutoff compares rem<<2
+  against the packed depth<<2|bound byte (no scratch); NODECNT is a
+  countdown divider (dec+bne vs inc/inc/bne); dead second `lda PLY`
+  at entry; LMR depth test uses the child PLY directly (remaining−1);
+  sret/sretqs drop redundant ldy.
+
+Rejected on measurement: sentinel end-of-list markers for the scan
+loops (lists average ~4 scanned moves/pass; sentinel maintenance in
+sloopret/gennd2 eats the per-iteration win — net ≈ 0) and fusing the
+king-move legality test into the alignment diff (helps middlegames
+~−0.1% but regresses king-heavy endgames +0.1%: violates the
+per-search cycles-only-drop bar; REVERTED).
+
+MicroAB grand totals (fixed-depth suite, 6 FENs):
+| config | before | after | delta |
+|---|---|---|---|
+| mask 0x00 | 886,254,010 | 870,915,474 | −1.73% |
+| mask 0x07 | 1,350,864,262 | 1,322,030,349 | −2.13% |
+| mask 0x1f | 2,057,341,483 | 2,011,853,841 | −2.21% |
+| masks total | 4,294,459,755 | 4,204,799,664 | −2.09% |
+| **0x1f + FT2_IMPROV (adopted)** | 1,905,559,028 | 1,861,907,969 | **−2.29%** |
+
+search.s cluster share (30M-cyc budget profile, adopted config, 2
+FENs): 22.83/23.60% → 21.40/21.92% of all cycles (−8.3/−9.2% of the
+cluster's own cycles). Memory/contract changes: EVALVALID moved to ZP
+$30 (old $0278-$0297 array FREE), DELTATL→THRT at $0D60 ($0D80-$0D9F
+FREE), everec in eval.s now dead code (left in place — eval.s not
+touched), NODECNT is a countdown rearmed to 128 by checkclock (driver
+init 0 still valid: first poll after 256 nodes). Full battery green;
+engine.bin md5 c04ff93825c96a1cc557ffadf901a1f8.
+
+Biggest residual (cross-file, for the movegen cluster): an emit-side
+"class presence" byte (OR each emitted tier's low nibble into a ZP
+flag, ~+6 cyc/emit) would let p0done/p1done SKIP entire empty passes —
+pass-1 scans (~3.6% of all cycles) run over lists with no heavy
+capture at most quiet-position nodes, pass-2 (~2.5%) likewise for
+light captures; est. net ≥ −0.5%.
+
 ## 2026-07-21 — deep optimization review round 4, board cluster: −2.46% total cycles at identical trees
 
 Board cluster (board.s make/unmake/attacked + tt.s), measured share

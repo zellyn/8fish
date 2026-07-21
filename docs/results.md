@@ -3,6 +3,42 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — FT_ROOKX post-mortem audit: NO BUG; verdict stands, cost restated 4.5–6%
+
+A pure eval-shape feature should transfer mirror→asm nearly 1:1 at
+equal nodes, so the ~41-Elo shortfall (+22 expected, −19 measured)
+justified an adversarial deep-audit of the whole chain. Result: **no
+defect anywhere it could hide.**
+
+- **Harness live**: the sprt mask plumbing was traced end-to-end
+  (fresh machine per move, FEATURES poked after image load, SMC
+  re-patched per run) and exercised directly at the real 30000ms
+  budget: 0x3F vs 0x1F produce different moves/scores with plausible
+  rook-term deltas on rook-heavy FENs. The SPRT was not
+  engine-vs-itself.
+- **Coverage gaps closed with new oracle tests** (worktree
+  internal/chesstest/rookx_audit_test.go): QS hash-elided fast paths
+  maintain RKBITS/WPASSM; castling all four wings, rook promotions +
+  captures of promoted rooks (300K+ makes), ep×passer-mask interplay,
+  null move — all node-count/score identical to fresh-recompute
+  oracles. Scratch audit: no eval call site holds T2/T3 across eval
+  (clobber comment updated).
+- **Off side verified cross-binary for the first time**: the task52b
+  binary at masks 0x1F/0x07/0x00 is fingerprint-identical to main's
+  binary; side B was exactly main's engine (+1.19% cycles, paid by
+  both sides).
+- **Real cost restated**: 4.4–4.6% midgame, **4.5–6% in rook-heavy
+  endgames** (the 3.97% figure omitted SMC save/restore and
+  position-dependence) — cost concentrates in exactly the positions
+  where the terms fire. Expected value drops from +22 to ≈ +18–20.
+
+Residual gap ≈ 2σ combined: the documented mirror-NB→asm compression
+pattern plus noise. Loose ends recorded, not pursued: the mirror-side
++30±18 measurement config wasn't re-verified, and 300 games can't
+distinguish "true ≈ 0" from "true ≈ −19" — moot unless a Texel retune
+of the four (hand-guessed, never-tuned) weights raises the mirror
+number substantially, which is the only revisit path worth taking.
+
 ## 2026-07-20 — FT_ROOKX verdict: REJECTED at −19 ± 33 (the process working as intended)
 
 The rook-file/blockade eval set got the full escalation ladder before

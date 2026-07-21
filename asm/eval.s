@@ -1098,7 +1098,8 @@ evinext:
 ; ---------------------------------------------------------------
 ; eval: SCORE = tapered eval from the side to move's point of view,
 ; including tempo. score_w = EG + ((MG-EG) * w) >> 5, w = PHASEWX[phase].
-; Clobbers A,X,Y, T0-T1, MUL0-1, EVTMP, PSQSQ, MULCNT, PSQPIECE.
+; Clobbers A,X,Y, T0-T1, MUL0-1, EVTMP, PSQSQ, MULCNT, PSQPIECE;
+; with FT_ROOKX set, extraterm additionally clobbers T2-T3.
 ; ---------------------------------------------------------------
 eval:
 .ifdef PTNOCACHE

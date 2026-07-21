@@ -38,7 +38,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer f.Close()
-	for i, line := range sprt.GenOpenings(bin, defs, *n) {
+	for i, line := range sprt.GenOpenings(bin, defs, *n, 0) {
 		ref, err := refchess.ParseFEN(refchess.StartFEN)
 		if err != nil {
 			log.Fatal(err)

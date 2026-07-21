@@ -54,8 +54,9 @@ type Config struct {
 	FeaturesA2   byte // second feature byte (FT2_*) for side A (0 = none)
 	FeaturesB2   byte // second feature byte (FT2_*) for side B (0 = none)
 	BudgetCycles uint64
-	Pairs        int // games = 2*Pairs (each opening pair, colors swapped)
+	Pairs        int    // games = 2*Pairs (each opening pair, colors swapped)
 	Parallel     int
+	OpenSeed     uint64 // opening-generation seed; 0 = the historical default (42)
 }
 
 // Result tallies from A's perspective.
@@ -124,8 +125,11 @@ func (r *Result) LLR(elo0, elo1 float64) float64 {
 // balanced (|eval| <= 60cp at depth 2). Deterministic engines replay
 // identical games from identical starts, so opening variety is what
 // makes each game pair carry information.
-func GenOpenings(bin []byte, defs chesstest.Defs, n int) [][]string {
-	rnd := rand.New(rand.NewPCG(0x09e41145, 42))
+func GenOpenings(bin []byte, defs chesstest.Defs, n int, seed uint64) [][]string {
+	if seed == 0 {
+		seed = 42 // historical default: reproduces every pre-flag opening set
+	}
+	rnd := rand.New(rand.NewPCG(0x09e41145, seed))
 	out := make([][]string, 0, n)
 	seen := map[string]bool{}
 	for len(out) < n {
@@ -187,8 +191,8 @@ func Run(cfg Config) *Result {
 		cfg.Parallel = 1
 	}
 	openings := Openings
-	if cfg.Pairs > len(openings) {
-		openings = GenOpenings(cfg.Bin, cfg.Defs, cfg.Pairs)
+	if cfg.Pairs > len(openings) || cfg.OpenSeed != 0 {
+		openings = GenOpenings(cfg.Bin, cfg.Defs, cfg.Pairs, cfg.OpenSeed)
 	}
 	res := &Result{}
 	var mu sync.Mutex

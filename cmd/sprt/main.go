@@ -30,6 +30,7 @@ func main() {
 		budgetMs = flag.Uint64("budget", 5000, "emulated ms per move")
 		pairs    = flag.Int("pairs", 50, "opening pairs (games = 2x)")
 		parallel = flag.Int("parallel", runtime.NumCPU()-2, "concurrent games")
+		openseed = flag.Uint64("openseed", 0, "opening-generation seed (0 = historical default 42)")
 	)
 	flag.Parse()
 
@@ -89,6 +90,7 @@ func main() {
 		BudgetCycles: *budgetMs * chesstest.CyclesPerMs,
 		Pairs:        *pairs,
 		Parallel:     *parallel,
+		OpenSeed:     *openseed,
 	})
 	for _, e := range res.Errors {
 		fmt.Fprintf(os.Stderr, "ERROR: %s\n", e)

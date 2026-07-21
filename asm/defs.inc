@@ -178,6 +178,9 @@ TTENTRY   = $F2         ; 8-byte staging copy of a TT entry:
                         ;  +0..2 verify (HASH1-3), +3 from, +4 to,
                         ;  +5/6 score LE, +7 depth<<2 | bound
 FEATURES  = $FA         ; search feature bits (poked by the rig)
+FEATURES2 = $DC         ; second search feature byte (FT2_* bits; poked by
+                        ;  the rig, default 0). $DC was the free ZP slot
+                        ;  (ex-GENCAPS); nothing else reads or writes it.
 REMDEPTH  = $FB         ; scratch: remaining depth at this node
 FUTMARG   = $FC         ; scratch: futility margin low byte
 FUTMARGH  = T3          ; futility margin high byte (rem2 margin 500 needs
@@ -219,6 +222,19 @@ FT_ASP    = $40         ; aspiration windows at the iterative-deepening
                         ;  (bit was reserved for the canceled LMP port.)
 FT_CKVERIFY = $80       ; debug: verify make's gives-check against a
                         ; full scan at every node (exit 101 on mismatch)
+
+; ---- Second feature byte (FEATURES2) ----
+FT2_IMPROV = $01        ; improving heuristic, full-signal LMR application
+                        ;  (mirror ImprovingParams{Mode:full, LMR:true,
+                        ;  LMRExtra:1}). "improving" = the side to move's
+                        ;  static eval at this ply exceeds its static eval
+                        ;  two plies ago. When NOT improving, late-quiet LMR
+                        ;  reductions get +1 extra ply. Full-signal: a static
+                        ;  eval is guaranteed at every full-width node (forced
+                        ;  only where null/RFP computed none) so the ply-2
+                        ;  comparison is always available. RFP application NOT
+                        ;  ported (measured neutral). Zero tree effect when
+                        ;  clear; only the LMR reduction depth changes when set.
 
 ; TT bound codes (in entry byte 7, low 2 bits; 0 = empty entry)
 TT_UPPER = 1
@@ -309,6 +325,17 @@ ASPAH      = $0234
 ASPBL      = $0235      ; 16-bit window beta
 ASPBH      = $0236
 ASPFAIL    = $0237      ; fails this iteration (0..3; 3 forces full window)
+
+; FT2_IMPROV improving-heuristic per-ply eval stack (improving.go's
+; evalStack/evalValid). 16-bit static eval per ply, plus a per-ply
+; "recorded this visit" flag. Extends the driver-scratch block above
+; ($0238-$0297, 96 bytes, MAIN RAM below PIECESQ at $0800 — free, and
+; contiguous with ITSTART/ASP). Written only when FT2_IMPROV is set; the
+; OFF path never touches these, so the search tree is unchanged.
+EVALSTKL   = $0238      ; 32 bytes: static eval low byte, indexed by ply
+EVALSTKH   = $0258      ; 32 bytes: static eval high byte, indexed by ply
+EVALVALID  = $0278      ; 32 bytes: nonzero = eval recorded at this ply
+                        ;  this visit (gates the full-signal forced eval)
 
 MOVESTACK  = $0E00      ; 4 bytes/move (tier,from,to,flags); through $1FFF
                         ;  (1151-move capacity; emitmove traps overflow with

@@ -51,6 +51,8 @@ type Config struct {
 	DefsB        chesstest.Defs // nil: side B uses Defs
 	FeaturesA    byte
 	FeaturesB    byte
+	FeaturesA2   byte // second feature byte (FT2_*) for side A (0 = none)
+	FeaturesB2   byte // second feature byte (FT2_*) for side B (0 = none)
 	BudgetCycles uint64
 	Pairs        int // games = 2*Pairs (each opening pair, colors swapped)
 	Parallel     int
@@ -258,9 +260,11 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 			return 1, nil
 		}
 		features := cfg.FeaturesA
+		features2 := cfg.FeaturesA2
 		bin, defs := cfg.Bin, cfg.Defs
 		if !aTurn {
 			features = cfg.FeaturesB
+			features2 = cfg.FeaturesB2
 			if cfg.BinB != nil {
 				bin, defs = cfg.BinB, cfg.DefsB
 			}
@@ -274,6 +278,7 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 			return 0, err
 		}
 		chesstest.SetFeatures(m, defs, features)
+		chesstest.SetFeatures2(m, defs, features2)
 		chesstest.SetBudget(m, defs, cfg.BudgetCycles, 24)
 		m.Mem.Main[defs["HALFMOVE"]] = byte(min(ref.HalfmoveClock(), 255))
 		if aux := auxes[aTurn]; aux != nil {

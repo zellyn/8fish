@@ -185,7 +185,8 @@ func NewMachine(bin []byte, defs Defs, pos *Position, depth byte, cout io.Writer
 	m.Mem.Main[defs["EPSQ"]] = pos.EpSq
 	m.Mem.Main[defs["CASTLE"]] = pos.Castle
 	m.Mem.Main[defs["ROOTDEPTH"]] = depth
-	m.Mem.Main[defs["FEATURES"]] = 0x1F // all search+eval features on
+	m.Mem.Main[defs["FEATURES"]] = 0x1F  // all search+eval features on
+	m.Mem.Main[defs["FEATURES2"]] = 0x00 // second feature byte off by default
 	return m, nil
 }
 
@@ -193,6 +194,13 @@ func NewMachine(bin []byte, defs Defs, pos *Position, depth byte, cout io.Writer
 // defs.inc) — the A/B lever for feature gating.
 func SetFeatures(m *harness.Machine, defs Defs, bits byte) {
 	m.Mem.Main[defs["FEATURES"]] = bits
+}
+
+// SetFeatures2 overrides the engine's second feature byte (FT2_* in
+// defs.inc, e.g. FT2_IMPROV) — the A/B lever for features that outgrew
+// the original 8-bit FEATURES byte.
+func SetFeatures2(m *harness.Machine, defs Defs, bits byte) {
+	m.Mem.Main[defs["FEATURES2"]] = bits
 }
 
 // SetBudget pokes the engine's soft time budget (in cycles, converted

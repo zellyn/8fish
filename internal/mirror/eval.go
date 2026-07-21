@@ -12,13 +12,22 @@ type Weights struct {
 	OpenFile int    // penalty for an open own file under a home-rank king
 }
 
-// DefaultWeights are the asm's current (untuned) values.
+// DefaultWeights are the asm's current baked-in pawnterm values, and the
+// mirror MUST hold them to reproduce the asm's search: the passed-pawn
+// bonuses come from cmd/gentables (passedBonus {0,15,0,21,50,52,20,0},
+// Texel-tuned on the diversified corpus); doubled 12 / isolated 7 are the
+// eval.s PTFILE immediates; shield 3 / open 4 are encoded in SHLDW/SHLDB
+// (value = 3*count - 4*open). This set matches refPStruct (the asm-verified
+// spec in internal/chesstest) exactly. (Historically these were the
+// pre-tuning values, which silently drifted from the asm when its passed/
+// isolated immediates were retuned but this table was not — the bug that
+// made every default-weights screen evaluate pawns unlike the shipped asm.)
 var DefaultWeights = Weights{
 	Doubled:  12,
-	Isolated: 12,
-	Passed:   [8]int{0, 8, 12, 18, 28, 45, 70, 0},
-	Shield:   8,
-	OpenFile: 10,
+	Isolated: 7,
+	Passed:   [8]int{0, 15, 0, 21, 50, 52, 20, 0},
+	Shield:   3,
+	OpenFile: 4,
 }
 
 // TunedWeights is the Texel-tuned set on the DIVERSIFIED corpus:

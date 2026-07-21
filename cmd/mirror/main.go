@@ -157,8 +157,11 @@ func match(args []string) {
 	bFix := fs.Bool("bfix", false, "B uses the fixed futility mate-zone guard")
 	aLMR := fs.String("almr", "", "A LMR params late1,late2,rem1,rem2,killers,evasion (empty = asm current)")
 	bLMR := fs.String("blmr", "", "B LMR params")
-	aQS := fs.String("aqs", "0,0", "A QS shape: plycap,recapafter (0 = off)")
-	bQS := fs.String("bqs", "0,0", "B QS shape")
+	// Default recap2 = the asm's shipped QS shape (gennode RecapAfter=2), so
+	// a bare `mirror match` models the asm. Pass "0,0" for the unlimited-QS
+	// experiment baseline.
+	aQS := fs.String("aqs", "0,2", "A QS shape: plycap,recapafter (0,0 = unlimited)")
+	bQS := fs.String("bqs", "0,2", "B QS shape")
 	aKB := fs.String("akb", "", "A king-bucket table file (empty = off)")
 	bKB := fs.String("bkb", "", "B king-bucket table file")
 	aFut := fs.String("afut", "", "A futility params: guard,rfp1,rfp2,rfp3,rfp4,fut,maxrem (empty = shipped)")

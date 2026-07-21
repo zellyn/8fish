@@ -3,6 +3,27 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — improving heuristic ADOPTED: first feature shipped through the corrected pipeline
+
+The deciding evidence stack for the improving-LMR port (FT2_IMPROV):
+- cycle-budget mirror screen: **+13 ± 9** (4000 asm-matched games)
+- asm SPRT #1 (stock openings): −2 ± 31 (300 games)
+- asm SPRT #2 (fresh openings via new sprt -openseed): +9 ± 32 (300)
+- **combined SPRT: +193 =220 −187 = 50.5% ≈ +3.5 ± 22 (600 games)**
+
+The SPRTs are individually underpowered for a ~+10 effect but agree
+with the screen (unlike aspiration, where the honest screen predicted
+the SPRT sign). Per the pre-declared rule (combined ≥ 0 given the
+screen prior): **ADOPTED** — the gameplay bridge now sets FEATURES2 =
+FT2_IMPROV; test harness defaults keep FEATURES2 = 0 so every stored
+fingerprint stays baseline-exact. Future screens against the adopted
+config should enable improving on both sides (-aimp/-bimp "2,0,1").
+
+This is the first strength feature shipped since futility, and the
+first through the full corrected pipeline: faithful mirror →
+asm-matched config → cycle-budget screen → port with exact parity →
+asm SPRT.
+
 ## 2026-07-21 — re-screens under the honest instrument: checks-in-QS CONFIRMED DEAD, bishop pair flips sign but lands neutral
 
 Both pre-fidelity-fix verdicts re-tested at asm-matched 0x1f on the

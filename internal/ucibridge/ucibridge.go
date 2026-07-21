@@ -189,6 +189,10 @@ func (b *Bridge) think(args []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Adopted gameplay config: FEATURES stays the NewMachine 0x1F default;
+	// FT2_IMPROV (improving-LMR, SPRT 2026-07-21) plays ON. Tests keep the
+	// FEATURES2=0 default so stored fingerprints remain baseline-exact.
+	chesstest.SetFeatures2(m, b.Defs, 0x01)
 	depth := byte(maxDepthCap)
 	budget := b.budgetCycles(args)
 	if d, ok := goDepth(args); ok {

@@ -3,6 +3,93 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — countermove heuristic — DO NOT PORT: neutral (+4 ± 9) at asm-matched 0x1f over 4000 games
+
+Added the **countermove heuristic** to the five-pass `moveLoop` (the
+asm-matched ordering path — TT move, two-tier MVV captures, killers, quiets
+in generation order; NO SEE, NO history). On a **quiet beta cutoff** the
+cutting move is stored as the "counter" to the move made at the PREVIOUS
+ply; a later node reached by that same previous move promotes the stored
+counter ahead of the other quiets, in its own ordering pass adjacent to the
+killer pass. Unlike butterfly history (rejected for the asm: table too
+coarse/costly) it needs **no aging and tiny state**. Wired into the
+five-pass loop, not `orderedMoveLoop` — the exact trap the LMP work hit
+(`internal/mirror/countermove.go` + `search.go`, gated by
+`CountermoveParams`, plumbed through `PlayerCfg`/`CMCost` and `cmd/mirror
+match -acm/-bcm/-cbudget/-acmcost`). Update stores only quiet cutters and
+never after a null move; clearing is per-root-move like the killers
+(`CM.Persist` keeps it).
+
+Two table shapes and two ordering slots were swept, all under the
+**asm-matched config** (mask **0x1f**, recap2 QS, shipped weights,
+corrected-guard RFP 120/500, **30 000 nodes/move**, CM-on A vs CM-off B):
+indexing **(a)** `[prev-to-square]` (128 slots, 256 B) vs **(b)**
+`[prev-piece-type][prev-to]` (8×128, 2 KB); countermove promoted **after**
+vs **before** the killer pass.
+
+**Fixed-depth node counts** (depth 6, asm-matched, `TestCountermoveSweepNodes`,
+7-FEN bench): a-after **+2.9%**, a-before **−3.9%**, b-after **−2.0%**,
+b-before **+9.1%** (vs baseline). Small and mixed — reordering only quiets
+after the captures/killers barely moves the tree; not a node-saver.
+
+**Field screen (500 games, seed 6502, ±25 Elo):**
+
+| variant  | indexing / slot        | +W =D −L       | node-budget Elo |
+|----------|------------------------|----------------|-----------------|
+| a-before | [to] / before killers  | +210 =126 −164 | **+32 ± 26**    |
+| b-after  | [pc][to] / after killers | +188 =158 −154 | +24 ± 25      |
+| b-before | [pc][to] / before killers | +181 =163 −156 | +17 ± 25     |
+| a-after  | [to] / after killers   | +178 =153 −169 | +6 ± 25         |
+
+**Promotions to 2000 games (2×1000, seeds 11111+22222, ±13):**
+
+| variant  | +W =D −L        | score | node-budget Elo |
+|----------|-----------------|-------|-----------------|
+| a-before | +747 =573 −680  | 51.7% | +12 ± 13        |
+| b-after  | +725 =572 −703  | 50.5% | +4 ± 13         |
+
+`a-before` (the field-screen leader) sat right at the bar (lower bound ≈ 0),
+so it was **extended to 4000 games** (adding seeds 33333: −7, 44444: −1):
+
+| a-before, 4000 games | +1438 =1169 −1393 | 50.6% | **+4 ± 9** |
+|----------------------|-------------------|-------|------------|
+
+**The +32 field estimate and the +23 first-seed batch were upward flukes.**
+At 4000 games the best variant is **+4 ± 9, error bar spanning zero** —
+neutral. The story mirrors LMP: a technique that helps engines with rich
+ordering delivers nothing under the asm's coarse ordering, where the two
+killers already capture most of the local quiet-refutation signal, leaving
+little for a countermove to add.
+
+**Cost accounting (cycle-budget screen, the standing rule).** Per-node
+probe = one indexed load + 2-byte compare (~20–40 cyc when it fires),
+update = a 2-byte store on a quiet cutoff (~20 cyc), wired via a new
+`Costs.Countermove` hook (`PlayerCfg.CMCost`, charged only in CycleBudget
+mode). At a matched **143 M cycles/move** budget (≈ the 30k-node tree),
+CM fires ~3–6 k probes + ~150–1000 stores per move, so at a pessimistic
+**40 cyc each** the tax is **~0.1% of the budget**. Taxed a-before over
+2000 games (seeds 11111+22222): +732 =595 −673, **+10 ± 13** — essentially
+unchanged from the untaxed +12, confirming the feature is genuinely cheap.
+But there is no real Elo for the tax to eat: the 4000-game verdict is
+neutral either way.
+
+**Port recommendation: DO NOT PORT.** The countermove heuristic is cheap
+(256 B for indexing-a, ~0.1% cycle cost) but delivers **no measurable
+strength** (+4 ± 9) under the asm's own TT+MVV+killer ordering. Best-case
+shape, should it ever be revisited (e.g. after an ordering change that adds
+history/SEE): **indexing (a) `[prev-to-square]`, promoted before the
+killers** — the leader in every cut, and the smallest table. Recorded as a
+negative result; the code stays behind the off-by-default toggle.
+
+Toggle: `CountermoveParams{Indexing, BeforeKillers, Persist}`; off
+(Indexing==0) is a **byte-identical no-op** — the parity gates
+(`TestSearchMirrorParity`/`TestPStructMirrorParity`) run with it off and
+stay green. Soundness: `TestCountermoveOffIsNoop` (Indexing==0 identical
+move/score/nodes to the pre-countermove path), `TestCountermoveDeterminism`
+(same seed → identical replay across all variants), `TestCountermoveMateSound`
+(exact fixed-depth mate score, every variant — reordering quiets never
+changes a mate verdict), `TestCountermoveSweepNodes` (the node-count sweep).
+
 ## 2026-07-21 — aspiration windows — PORT: +19 to +23 Elo at asm-matched 0x1f, cheap re-search cost
 
 Added **aspiration windows** at the iterative-deepening root of the

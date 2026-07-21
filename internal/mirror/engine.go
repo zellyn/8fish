@@ -68,6 +68,14 @@ type Engine struct {
 	// byte-identical no-op).
 	Asp AspirationParams
 
+	// Improving configures the improving heuristic (zero value = off: a
+	// byte-identical no-op). See improving.go. evalStack holds the static
+	// eval recorded at each ply (by eval() when the heuristic is active);
+	// evalValid marks which plies have a recorded eval this search path.
+	Improving ImprovingParams
+	evalStack [MaxPly]int
+	evalValid [MaxPly]bool
+
 	// Aspiration accounting, cumulative over the engine's lifetime (never
 	// reset by newMove, so per-game totals survive to the caller).
 	// AspWindows counts iterations that opened a narrow aspiration window;

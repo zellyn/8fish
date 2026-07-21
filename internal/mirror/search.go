@@ -277,6 +277,13 @@ func (e *Engine) search() int {
 	e.deltaT[ply] = -32768
 	e.ttFrom[ply] = NoSq
 	e.ttBF[ply] = NoSq
+	if e.Improving.on() {
+		// Invalidate this ply's recorded eval; it is re-set only if an eval
+		// is actually computed at this node (naturally or, in full-signal,
+		// forced before moveLoop). An ancestor at ply-2 that computed no
+		// eval must read as "missing", not stale.
+		e.evalValid[ply] = false
+	}
 
 	if ply >= e.MaxDepth {
 		// Quiescence entry; in check it becomes a full evasion node
@@ -369,15 +376,38 @@ func (e *Engine) search() int {
 		if e.Features&FtFutil != 0 && guardOK {
 			remaining := e.MaxDepth - ply
 			if remaining >= 1 && remaining <= e.Fut.MaxRem {
-				ev := e.eval()
-				if m := e.Fut.RFP[remaining]; m > 0 && ev-m >= e.beta[ply] {
+				ev := e.eval() // records evalStack[ply] when the heuristic is on
+				rfpM, futM := e.Fut.RFP[remaining], e.Fut.Fut
+				// Improving-conditional RFP/futility: not improving => tighter
+				// margins (prune harder). improving() sees this node's freshly
+				// recorded eval; the ply-2 side is present only when it too
+				// computed an eval (always in full-signal, sparsely in free).
+				if e.Improving.on() && e.Improving.RFP && !e.improving(ply) {
+					if m := e.Improving.RFPNI[remaining]; m > 0 {
+						rfpM = m
+					}
+					if e.Improving.FutNI > 0 {
+						futM = e.Improving.FutNI
+					}
+				}
+				if rfpM > 0 && ev-rfpM >= e.beta[ply] {
 					return e.beta[ply] // reverse futility: fail high
 				}
-				if remaining == 1 && e.Fut.Fut > 0 && ev+e.Fut.Fut <= e.alpha[ply] {
+				if remaining == 1 && futM > 0 && ev+futM <= e.alpha[ply] {
 					e.futile[ply] = true
 				}
 			}
 		}
+	}
+
+	// Full-signal improving: guarantee a static eval at this full-width node
+	// so the ply-2 comparison is always available (for this node's LMR and
+	// for any descendant that reads it). Skip when a natural eval already ran
+	// (null-move/RFP) so that eval is never charged twice; the ADDED eval
+	// here pays its real ~872-cyc cost via chargeEval — the honest
+	// full-signal tax under a cycle budget.
+	if e.Improving.Mode == improvingFull && !e.evalValid[ply] {
+		e.eval()
 	}
 
 	return e.moveLoop()
@@ -410,6 +440,12 @@ func (e *Engine) moveLoop() int {
 	// (rem <= 0 there, so lmpNodeOK already returns false).
 	rem := e.MaxDepth - ply
 	lmpOn := !qs && e.lmpNodeOK(ply, rem)
+
+	// Improving-conditional LMR: computed once per node (the signal is a
+	// property of the node, not the move). notImp is true only when the LMR
+	// application is on and this node is NOT improving; then late quiets get
+	// e.Improving.lmrExtra() extra reduction plies below.
+	notImp := !qs && e.Improving.on() && e.Improving.LMR && !e.improving(ply)
 
 	// Countermove probe cost: one indexed table load per full-width node
 	// that reaches the quiet passes (charged pessimistically for every
@@ -557,6 +593,13 @@ func (e *Engine) moveLoop() int {
 					mode = 2
 					if rem >= e.LMR.MinRemR2 && e.legal[ply] >= e.LMR.LateR2 {
 						mode = 3
+					}
+					// Improving: reduce late quiets one (LMRExtra) ply deeper
+					// when NOT improving. improving() reads this node's eval
+					// (present at every full-width node in full-signal; only
+					// when a natural eval ran in free-signal, else permissive).
+					if notImp {
+						mode += e.Improving.lmrExtra()
 					}
 				}
 			}

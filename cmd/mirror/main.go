@@ -177,17 +177,19 @@ func match(args []string) {
 	cbudget := fs.Uint64("cbudget", 0, "per-move CYCLE budget (>0 selects cycle-budgeted mode, both sides; overrides -budget)")
 	aCMCost := fs.Float64("acmcost", 0, "A per-node countermove cycle cost (cycle mode only)")
 	bCMCost := fs.Float64("bcmcost", 0, "B per-node countermove cycle cost (cycle mode only)")
+	aImp := fs.String("aimp", "", "A improving params: mode,rfp,lmr[,rni1,rni2,futni,lmrextra] mode=1(free)|2(full) (empty = off)")
+	bImp := fs.String("bimp", "", "B improving params")
 	fs.Parse(args)
 
 	lines, err := mirror.GenOpenings(sprt.Openings, *pairs, *seed)
 	check(err)
 	a := mirror.PlayerCfg{Features: byte(*aMask), Weights: parseWeights(*aw), Depth: *depth,
 		FixFutility: *aFix, LMR: parseLMR(*aLMR), QS: parseQS(*aQS), KB: loadKB(*aKB), Fut: parseFut(*aFut), Ord: parseOrd(*aOrd),
-		LMP: parseLMP(*aLMP), Asp: parseAsp(*aAsp), CM: parseCM(*aCM), CMCost: *aCMCost,
+		LMP: parseLMP(*aLMP), Asp: parseAsp(*aAsp), CM: parseCM(*aCM), CMCost: *aCMCost, Improving: parseImp(*aImp),
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	b := mirror.PlayerCfg{Features: byte(*bMask), Weights: parseWeights(*bw), Depth: *depth,
 		FixFutility: *bFix, LMR: parseLMR(*bLMR), QS: parseQS(*bQS), KB: loadKB(*bKB), Fut: parseFut(*bFut), Ord: parseOrd(*bOrd),
-		LMP: parseLMP(*bLMP), Asp: parseAsp(*bAsp), CM: parseCM(*bCM), CMCost: *bCMCost,
+		LMP: parseLMP(*bLMP), Asp: parseAsp(*bAsp), CM: parseCM(*bCM), CMCost: *bCMCost, Improving: parseImp(*bImp),
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	start := time.Now()
 	res, err := mirror.Match(a, b, lines, *pairs, *workers, *seed)
@@ -199,8 +201,8 @@ func match(args []string) {
 	if *cbudget > 0 {
 		mode = fmt.Sprintf("budget %d cycles/move (maxiters %d)", *cbudget, *maxiters)
 	}
-	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q) %s: %s (%v)\n",
-		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM,
+	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q) %s: %s (%v)\n",
+		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aImp, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bImp,
 		mode, res, time.Since(start).Round(time.Second))
 }
 
@@ -374,6 +376,36 @@ func parseCM(s string) mirror.CountermoveParams {
 		os.Exit(2)
 	}
 	return mirror.CountermoveParams{Indexing: indexing, BeforeKillers: bk != 0, Persist: persist != 0}
+}
+
+// parseImp parses the improving heuristic params:
+//
+//	mode,rfp,lmr[,rni1,rni2,futni,lmrextra]
+//
+// mode = 1 (free-signal) | 2 (full-signal); rfp/lmr are 0/1 flags selecting
+// the RFP/futility and LMR applications. The optional tail sets the
+// not-improving RFP margins (rni1 @ remaining 1, rni2 @ remaining 2), the
+// not-improving leaf-futility margin (futni), and the extra LMR reduction
+// plies (lmrextra, default 1). Empty means off (zero value).
+func parseImp(s string) mirror.ImprovingParams {
+	if s == "" {
+		return mirror.ImprovingParams{}
+	}
+	var mode, rfp, lmr, rni1, rni2, futni, lmrextra int
+	n, err := fmt.Sscanf(s, "%d,%d,%d,%d,%d,%d,%d",
+		&mode, &rfp, &lmr, &rni1, &rni2, &futni, &lmrextra)
+	if err != nil && n < 3 {
+		fmt.Fprintf(os.Stderr, "bad improving params %q (want mode,rfp,lmr[,rni1,rni2,futni,lmrextra])\n", s)
+		os.Exit(2)
+	}
+	return mirror.ImprovingParams{
+		Mode:     mode,
+		RFP:      rfp != 0,
+		RFPNI:    [8]int{0, rni1, rni2},
+		FutNI:    futni,
+		LMR:      lmr != 0,
+		LMRExtra: lmrextra,
+	}
 }
 
 // parseAsp parses "delta[,policy]" into an AspirationParams; empty means

@@ -170,16 +170,18 @@ func match(args []string) {
 	bOrd := fs.String("bord", "", "B ordering knobs")
 	aLMP := fs.String("almp", "", "A LMP params: dmax,base,mult,quad,exemptkillers,keepchecks (empty = off)")
 	bLMP := fs.String("blmp", "", "B LMP params")
+	aAsp := fs.String("aasp", "", "A aspiration params: delta[,policy] policy=full|prog|asym (empty = off)")
+	bAsp := fs.String("basp", "", "B aspiration params")
 	fs.Parse(args)
 
 	lines, err := mirror.GenOpenings(sprt.Openings, *pairs, *seed)
 	check(err)
 	a := mirror.PlayerCfg{Features: byte(*aMask), Weights: parseWeights(*aw), Depth: *depth,
 		FixFutility: *aFix, LMR: parseLMR(*aLMR), QS: parseQS(*aQS), KB: loadKB(*aKB), Fut: parseFut(*aFut), Ord: parseOrd(*aOrd),
-		LMP: parseLMP(*aLMP), NodeBudget: *budget, MaxIters: *maxiters}
+		LMP: parseLMP(*aLMP), Asp: parseAsp(*aAsp), NodeBudget: *budget, MaxIters: *maxiters}
 	b := mirror.PlayerCfg{Features: byte(*bMask), Weights: parseWeights(*bw), Depth: *depth,
 		FixFutility: *bFix, LMR: parseLMR(*bLMR), QS: parseQS(*bQS), KB: loadKB(*bKB), Fut: parseFut(*bFut), Ord: parseOrd(*bOrd),
-		LMP: parseLMP(*bLMP), NodeBudget: *budget, MaxIters: *maxiters}
+		LMP: parseLMP(*bLMP), Asp: parseAsp(*bAsp), NodeBudget: *budget, MaxIters: *maxiters}
 	start := time.Now()
 	res, err := mirror.Match(a, b, lines, *pairs, *workers, *seed)
 	check(err)
@@ -187,8 +189,8 @@ func match(args []string) {
 	if *budget > 0 {
 		mode = fmt.Sprintf("budget %d nodes/move (maxiters %d)", *budget, *maxiters)
 	}
-	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q) %s: %s (%v)\n",
-		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP,
+	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q) %s: %s (%v)\n",
+		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp,
 		mode, res, time.Since(start).Round(time.Second))
 }
 
@@ -346,6 +348,34 @@ func parseLMP(s string) mirror.LMPParams {
 	}
 	return mirror.LMPParams{Dmax: dmax, Base: base, Mult: mult, Quad: quad,
 		ExemptKillers: ek != 0, KeepChecks: kc != 0}
+}
+
+// parseAsp parses "delta[,policy]" into an AspirationParams; empty means
+// off (zero value). policy is full (default), prog, or asym.
+func parseAsp(s string) mirror.AspirationParams {
+	if s == "" {
+		return mirror.AspirationParams{}
+	}
+	var delta int
+	var pol string
+	n, err := fmt.Sscanf(s, "%d,%s", &delta, &pol)
+	if err != nil && n < 1 {
+		fmt.Fprintf(os.Stderr, "bad aspiration params %q (want delta[,policy])\n", s)
+		os.Exit(2)
+	}
+	policy := mirror.AspFull
+	switch pol {
+	case "", "full":
+		policy = mirror.AspFull
+	case "prog":
+		policy = mirror.AspProgressive
+	case "asym":
+		policy = mirror.AspAsym
+	default:
+		fmt.Fprintf(os.Stderr, "bad aspiration policy %q (want full|prog|asym)\n", pol)
+		os.Exit(2)
+	}
+	return mirror.AspirationParams{Delta: delta, Policy: policy}
 }
 
 // parseQS parses "plycap,recapafter[,checks[,safechecks]]". The last two

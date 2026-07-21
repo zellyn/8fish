@@ -55,6 +55,21 @@ type Engine struct {
 	// loop (zero value = off).
 	LMP LMPParams
 
+	// Asp configures aspiration windows at the iterative-deepening root
+	// (zero value = off: every ID iteration searches the full window, a
+	// byte-identical no-op).
+	Asp AspirationParams
+
+	// Aspiration accounting, cumulative over the engine's lifetime (never
+	// reset by newMove, so per-game totals survive to the caller).
+	// AspWindows counts iterations that opened a narrow aspiration window;
+	// AspFailLow/AspFailHigh count the fails that forced a re-search.
+	AspWindows, AspFailLow, AspFailHigh uint64
+	// CompletedDepth is the depth of the last COMPLETED ID iteration in the
+	// most recent SearchBudget/SearchCycleBudget call (the effective depth
+	// the budget bought). 0 if only depth 1 ran.
+	CompletedDepth int
+
 	// Ord configures the scored move ordering used when FtSEE/FtHistory
 	// are enabled (task #35).
 	Ord OrderParams
@@ -192,6 +207,52 @@ type LMPParams struct {
 func (p *LMPParams) lmpThreshold(d int) int {
 	return p.Base + p.Mult*d + p.Quad*d*d
 }
+
+// AspPolicy selects how an aspiration-window fail-low/high is widened for
+// the re-search.
+type AspPolicy byte
+
+const (
+	// AspFull widens BOTH bounds to the full (-Inf, Inf) window on the
+	// first fail — a single guaranteed-terminal re-search.
+	AspFull AspPolicy = iota
+	// AspProgressive doubles Delta and re-centers the window on the failing
+	// bound each fail, dropping to the full window on the third fail.
+	AspProgressive
+	// AspAsym widens ONLY the failing bound to full, keeping the other bound
+	// at its aspiration value (so a subsequent fail on the other side can
+	// still occur and is handled the same way).
+	AspAsym
+)
+
+// AspirationParams configures aspiration windows at the iterative-deepening
+// root. After ID iteration d completes with score s, iteration d+1 opens a
+// window (s-Delta, s+Delta) instead of (-Inf, +Inf); on a fail-low/high the
+// iteration is re-searched with a widened window per Policy.
+//
+// The first iteration and any iteration whose seeding score s is in the mate
+// zone always use the full window, and any fail that returns a mate-zone
+// score immediately re-searches full — a narrow window must never clip a mate
+// score. All arithmetic is 16-bit adds/compares plus a shift-doubling of
+// Delta: no floats, no tables beyond the constant Delta, so it ports to the
+// 6502.
+//
+// Zero value (Delta == 0) disables aspiration entirely: every iteration uses
+// the full window, a byte-identical no-op versus the pre-aspiration search.
+type AspirationParams struct {
+	// Delta is the initial half-window width in centipawns. 0 disables
+	// aspiration.
+	Delta int
+	// Policy selects the fail-widening scheme (see AspPolicy).
+	Policy AspPolicy
+}
+
+// on reports whether aspiration windows are enabled.
+func (a *AspirationParams) on() bool { return a.Delta > 0 }
+
+// inMateZone reports whether score s sits in either mate zone (a narrow
+// window must never be opened around, nor clip, such a score).
+func inMateZone(s int) bool { return s >= mateZoneLo || s <= nmateZoneHi }
 
 // QSParams shape the quiescence search. QS ply = PLY - MAXDEPTH.
 type QSParams struct {

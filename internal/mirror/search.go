@@ -33,6 +33,7 @@ func (e *Engine) SearchBudget(budget uint64, maxDepth int) (Move, int) {
 	e.resetCycles()
 	e.newMove()
 	best, bestScore := NoMove, 0
+	e.CompletedDepth = 0
 	for d := 1; d <= maxDepth; d++ {
 		if d > 1 {
 			// Soft start gate: skip a new iteration past the halfway mark.
@@ -43,11 +44,12 @@ func (e *Engine) SearchBudget(budget uint64, maxDepth int) (Move, int) {
 		} else {
 			e.NodeBudget = 0 // depth 1 always completes
 		}
-		e.iterate(d)
+		e.aspIterate(d, bestScore) // window seeded by the last completed score
 		if e.aborted {
 			break // incomplete iteration: keep the last completed result
 		}
 		best, bestScore = e.Best, e.RootScore
+		e.CompletedDepth = d
 		if best.From == NoSq {
 			break // no legal moves (mate/stalemate): deeper won't help
 		}
@@ -75,6 +77,7 @@ func (e *Engine) SearchCycleBudget(budget uint64, maxDepth int) (Move, int) {
 	e.resetCycles() // cyc=true (budget!=0); zero Est and the counters
 	e.newMove()
 	best, bestScore := NoMove, 0
+	e.CompletedDepth = 0
 	for d := 1; d <= maxDepth; d++ {
 		if d > 1 {
 			// Soft start gate: skip a new iteration past the halfway mark.
@@ -85,11 +88,12 @@ func (e *Engine) SearchCycleBudget(budget uint64, maxDepth int) (Move, int) {
 		} else {
 			e.CycleBudget = 0 // depth 1 always completes (cyc stays on)
 		}
-		e.iterate(d)
+		e.aspIterate(d, bestScore) // window seeded by the last completed score
 		if e.aborted {
 			break // incomplete iteration: keep the last completed result
 		}
 		best, bestScore = e.Best, e.RootScore
+		e.CompletedDepth = d
 		if best.From == NoSq {
 			break // no legal moves (mate/stalemate): deeper won't help
 		}
@@ -121,14 +125,92 @@ func (e *Engine) newMove() {
 
 // iterate runs one full-window search to the given depth.
 func (e *Engine) iterate(depth int) {
+	e.iterateWindow(depth, -Inf, Inf)
+}
+
+// iterateWindow runs one search to the given depth with an explicit root
+// window [alpha, beta]. iterate is the full-window special case; the
+// aspiration driver (aspIterate) calls this with narrow windows.
+func (e *Engine) iterateWindow(depth, alpha, beta int) {
 	e.MaxDepth = depth
 	e.Pos.Ply = 0
 	e.Best = NoMove
 	e.aborted = false
 	e.inChk[0] = e.curInCheck()
-	e.alpha[0] = -Inf
-	e.beta[0] = Inf
+	e.alpha[0] = alpha
+	e.beta[0] = beta
 	e.RootScore = e.search()
+}
+
+// aspIterate runs ID iteration d at the root, using an aspiration window
+// around prev (the previous completed iteration's score). With aspiration
+// off, d == 1, or prev in the mate zone it is exactly a full-window
+// iterate(d). Otherwise it opens (prev-Delta, prev+Delta) and re-searches
+// on a fail-low/high per Asp.Policy, widening to the full window before the
+// search can return a fail-soft/garbage move.
+//
+// On a budget abort mid-(re)search e.aborted is left set and e.Best is not
+// trustworthy; the caller discards the whole iteration (keeps the last
+// completed result), exactly as for a plain iterate. Because every widening
+// path ends at the full window, a completed (non-aborted) aspIterate always
+// leaves e.Best/e.RootScore holding a real, non-failing search result.
+func (e *Engine) aspIterate(d, prev int) {
+	if !e.Asp.on() || d == 1 || inMateZone(prev) {
+		e.iterate(d)
+		return
+	}
+	alpha, beta := prev-e.Asp.Delta, prev+e.Asp.Delta
+	if alpha < -Inf {
+		alpha = -Inf
+	}
+	if beta > Inf {
+		beta = Inf
+	}
+	delta := e.Asp.Delta
+	fails := 0
+	e.AspWindows++
+	for {
+		e.iterateWindow(d, alpha, beta)
+		if e.aborted {
+			return // budget hit: iteration discarded by the caller
+		}
+		s := e.RootScore
+		failLow := s <= alpha && alpha > -Inf
+		failHigh := s >= beta && beta < Inf
+		if !failLow && !failHigh {
+			return // score inside the window: accept this iteration
+		}
+		if failLow {
+			e.AspFailLow++
+		} else {
+			e.AspFailHigh++
+		}
+		// A mate discovered through a narrow window, or the third fail,
+		// forces the full window (no mate-score clipping, guaranteed
+		// terminal). Otherwise widen per policy.
+		fails++
+		switch {
+		case inMateZone(s) || fails >= 3:
+			alpha, beta = -Inf, Inf
+		case e.Asp.Policy == AspProgressive:
+			delta *= 2 // shift-doubling; portable
+			alpha, beta = s-delta, s+delta
+			if alpha < -Inf {
+				alpha = -Inf
+			}
+			if beta > Inf {
+				beta = Inf
+			}
+		case e.Asp.Policy == AspAsym:
+			if failLow {
+				alpha = -Inf // only the failing bound opens
+			} else {
+				beta = Inf
+			}
+		default: // AspFull: both bounds open on the first fail
+			alpha, beta = -Inf, Inf
+		}
+	}
 }
 
 // search mirrors asm search.s node for node. Fail-hard negamax with

@@ -192,17 +192,27 @@ MUL1      = $D0
 MUL2      = $D1
 PSP0      = $D2         ; 16-bit: PSQT mg table pointer
 PSP1      = $D4         ; 16-bit: PSQT eg table pointer
-PDIRTY    = $D6         ; nonzero: a pawn or king moved; PSTRUCT is stale.
-                        ; Deep opt r4: EVERY writer (movepiece/takepiece
-                        ; prologues AND addpiece/rempiece) now ORs in the
-                        ; DIRTYTAB encoding — $81 pawn, $01 king — so
-                        ; PDIRTY==1 means exactly "a king moved, no pawn
-                        ; placement changed" (promotions mark bit 7 via
-                        ; the pawn's rempiece). pawnterm's king-only fast
-                        ; path keys on that; it also reads FROM/TO/
-                        ; MVPIECE, valid at make's tail where pawnterm is
-                        ; called (evalinit and the PTNOCACHE oracle enter
-                        ; at pawntermfull, which skips the dispatch).
+PDIRTY    = $D6         ; nonzero: PSTRUCT is stale for the current
+                        ; position. EVERY writer (movepiece/takepiece
+                        ; prologues AND addpiece/rempiece) ORs in the
+                        ; DIRTYTAB encoding — $81 pawn, $03 king — whose
+                        ; bit 0 is a per-make transient "THIS move
+                        ; dirtied" flag: make's tail tests it with one
+                        ; lsr and strips it (r4 integration). King-only
+                        ; fresh dirt (post-lsr == 1) takes the eager
+                        ; ptkonly shield delta (reads FROM/TO/MVPIECE,
+                        ; valid at make's tail); everything else DEFERS —
+                        ; PDIRTY becomes the stale marker $40 (a bit
+                        ; DIRTYTAB never sets, so make's tail recovers
+                        ; the exact pre-make value for UNDOPD) riding
+                        ; through the subtree until an eval's
+                        ; FT_PSTRUCT path consumes it via pawntermfull
+                        ; (lazy pawnterm: makes whose subtree never evals
+                        ; — TT cutoffs, illegal moves — skip the
+                        ; recompute entirely). Unmake restores the marker
+                        ; from UNDOPD on exactly the paths that restore
+                        ; PSTRUCT. Invariant: PDIRTY == 0 => PSTRUCT is
+                        ; correct for the current position.
                         ; MAIN $0200-$020F (PWBITS/PBBITS, eval.s) is
                         ; PERSISTENT pawn-file bitmask state: built by
                         ; evalinit (ptbuild), kept current by pbtoggle
@@ -409,6 +419,14 @@ ASPFAIL    = $0237      ; fails this iteration (0..3; 3 forces full window)
 ; OFF path never touches these, so the search tree is unchanged.
 EVALSTKL   = $0238      ; 32 bytes: static eval low byte, indexed by ply
 EVALSTKH   = $0258      ; 32 bytes: static eval high byte, indexed by ply
+UNDOPD     = $0298      ; 32 bytes ($0298-$02B7, page-2 tail — free RAM
+                        ;  like the rest of the repurposed input-buffer
+                        ;  page): per-ply PDIRTY restore value for the
+                        ;  lazy-pawnterm deferral (r4 integration).
+                        ;  Written by make's dirty tail (0 on the eager
+                        ;  ptkonly/feature-off paths, else the deferred
+                        ;  stale marker); restored by unmake on exactly
+                        ;  the paths that restore PSTRUCT.
 CLSPRES    = $0278      ; 32 bytes: per-ply move-list class presence (CLSP
                         ;  latched by gennd2; was the old EVALVALID array
                         ;  slot): the move loop skips the pass 1/2 scans

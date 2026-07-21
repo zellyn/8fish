@@ -21,10 +21,11 @@ psqcom: sta PSQPIECE
         sty PSQSQ
         stx EVTMP               ; 0 = add piece, 1 = remove piece
         ; phase contribution. PDIRTY takes the DIRTYTAB encoding ($81
-        ; pawn, 1 king, 0 otherwise — type-indexed low half of the
-        ; nibble table) so that a promotion's rempiece marks bit 7 and
-        ; PDIRTY==1 means EXACTLY "king moved, no pawn placement
-        ; changed" (the pawnterm king-only fast path keys on it).
+        ; pawn, $03 king, 0 otherwise — type-indexed low half of the
+        ; nibble table): bit 7 = pawn placement changed, bit 0 = the
+        ; per-make transient "THIS move dirtied" flag that make's tail
+        ; tests and strips; PDIRTY&$FE == 2 means EXACTLY "king moved,
+        ; no pawn placement changed" (the ptkonly dispatch key).
         and #TYPEMASK
         tax
         lda DIRTYTAB,x
@@ -188,7 +189,7 @@ movepiece:
         lda MVPIECE
         and #$0F
         tax
-        lda DIRTYTAB,x          ; $81 pawn, 1 king (both colors), else 0
+        lda DIRTYTAB,x          ; $81 pawn, $03 king (both colors), else 0
         bmi mvppawn             ; pawn: maintain the file bitmasks
         ora PDIRTY
         sta PDIRTY
@@ -804,20 +805,21 @@ done:
 
 ; ---------------------------------------------------------------
 ; ptkonly: king-only fast path (deep optimization review r4).
-; PDIRTY==1 means exactly one thing under the DIRTYTAB encoding (see
-; psqcom): THIS make moved a king (mover, incl. castling) and changed
-; no pawn placement — promotions and pawn victims all set bit 7. The
-; pawn masks, every per-file term, and the NON-moving side's shield
-; are therefore unchanged, so
+; Make's tail dispatches here when this make's dirt is EXACTLY the
+; king pattern (post-lsr PDIRTY == 1, i.e. $03: king mover incl.
+; castling, no pawn placement change — promotions and pawn victims
+; all set bit 7) AND nothing deferred was inherited (a stale base
+; takes the deferred pawntermfull path instead). The pawn masks,
+; every per-file term, and the NON-moving side's shield are therefore
+; unchanged, so
 ;   PSTRUCT' = PSTRUCT - shield_side(FROM) + shield_side(TO),
 ; each term gated by the same home-rank test as ptkings and negated
 ; via the existing SHLDB/SHLDW mirror tables (exact negations of each
 ; other). Reads FROM/TO/MVPIECE, still live at make's tail (search
 ; writes them pre-make; make never overwrites; castlerook uses
-; GTMP/GTO). Sound because make's tail invariant guarantees PSTRUCT
-; was current at make entry (PDIRTY==0 there). ~55-130 cycles vs
-; ~850 for the full recompute; king-only makes are ~17% of pawnterm
-; calls at the adopted config.
+; GTMP/GTO). Sound because the dispatch guarantees PSTRUCT was
+; current at make entry (PDIRTY==0 there). ~55-130 cycles vs the
+; full recompute.
 ; ---------------------------------------------------------------
 ptkonly:
         lda #0
@@ -1314,7 +1316,10 @@ eval:
         lda FEATURES
         and #FT_PSTRUCT
         beq evmgraw
-        clc
+        lda PDIRTY              ; lazy pawnterm (r4): consume a deferred
+        beq :+                  ;  recompute before reading PSTRUCT
+        jsr pawntermfull
+:       clc
         lda MGSCORE
         adc PSTRUCT
         sta SCORE
@@ -1335,7 +1340,10 @@ evnotmg:
         lda FEATURES
         and #FT_PSTRUCT
         beq evegraw
-        clc
+        lda PDIRTY              ; lazy pawnterm: consume before reading
+        beq :+
+        jsr pawntermfull
+:       clc
         lda EGSCORE
         adc PSTRUCT
         sta SCORE
@@ -1459,13 +1467,18 @@ evnosgn:
         lda EGSCORE+1
         adc MUL1
         sta SCORE+1
-        ; pawn-structure/king-shield term (white POV, kept current by
-        ; make via PDIRTY) — taper path only; the w=32/w=0 fast paths
-        ; fused it into their accumulator copy above
+        ; pawn-structure/king-shield term (white POV) — taper path
+        ; only; the w=32/w=0 fast paths fused it into their accumulator
+        ; copy above. Lazy pawnterm: a deferred recompute is consumed
+        ; here first (pawntermfull clobbers T0-T3/EVTMP/MULCNT/PSQ*,
+        ; all dead at this point; SCORE/MUL are untouched).
         lda FEATURES
         and #FT_PSTRUCT
         beq evrookx
-        clc
+        lda PDIRTY
+        beq :+
+        jsr pawntermfull
+:       clc
         lda SCORE
         adc PSTRUCT
         sta SCORE

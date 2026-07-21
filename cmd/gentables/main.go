@@ -381,12 +381,18 @@ func emitZobrist(b *strings.Builder) {
 		// Any nonzero entry invalidates PSTRUCT. Bit 7 additionally
 		// marks pawns so movepiece/takepiece can bmi to the pawn-file
 		// bitmask maintenance (PWBITS/PBBITS toggles) at no cost to
-		// the non-pawn fast path.
+		// the non-pawn fast path. Bit 0 (set by BOTH kinds) is the
+		// per-make transient "THIS move dirtied" bit: make's tail
+		// tests it with one lsr and strips it (lazy pawnterm, deep
+		// opt r4 integration), so a deferred stale marker riding in
+		// PDIRTY across makes is distinguishable from fresh dirt.
+		// After the lsr, exactly the king-only pattern ($03) gives 1,
+		// the ptkonly dispatch key.
 		switch typ {
 		case 1: // pawn
 			return "$81"
 		case 6: // king
-			return "1"
+			return "3"
 		}
 		return "0"
 	})

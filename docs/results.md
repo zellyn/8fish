@@ -3,6 +3,113 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — improving heuristic — PORT (full-signal LMR only): +13 ± 9 at asm-matched 0x1f over 4000 games, +0.19% eval tax
+
+Added the **improving heuristic** to the shared search pruning block and the
+five-pass `moveLoop` (the asm-matched path — TT + two-tier MVV + killers, NO
+SEE/history). "improving" = the side to move's static eval at THIS ply beats
+its eval at the same side's previous turn (ply-2). When NOT improving, prune/
+reduce harder. Static evals are recorded per-ply into `evalStack` by `eval()`
+itself (only when the heuristic is active, so OFF is a byte-identical no-op).
+Two applications were swept, each under **two signal designs**:
+
+- **(a) RFP/futility**: when not improving, replace the shipped RFP 120/500
+  and leaf-futility 120 with a tighter set (screened 60/300, futni 60).
+- **(b) LMR**: when not improving, add **+1** reduction ply to late quiets.
+
+- **free-signal** (`Mode=1`): improving read only from evals that already
+  exist (QS stand-pat, null-move, RFP); missing ply ⇒ **assume improving**
+  (permissive, prune nothing extra). Zero added cost.
+- **full-signal** (`Mode=2`): force an eval at every full-width node lacking
+  one, so the ply-2 comparison is always available; each **added** eval is
+  charged its real ~872-cyc cost via `chargeEval` (a natural null/RFP eval is
+  reused, never double-charged).
+
+Code: `internal/mirror/improving.go` + `search.go`/`eval.go`/`engine.go`,
+gated by `ImprovingParams`, plumbed through `PlayerCfg` and `cmd/mirror match
+-aimp/-bimp`. Wired into the **five-pass** `moveLoop`, not `orderedMoveLoop`
+(the LMP/countermove trap).
+
+**Fixed-depth d6 tree effect** (asm-matched, `TestImprovingSweepNodes`,
+7-FEN bench, vs baseline):
+
+| variant   | signal | node effect |
+|-----------|--------|-------------|
+| free-rfp  | free   | −4.24%      |
+| free-lmr  | free   | **0.00%** (byte-identical) |
+| full-rfp  | full   | −6.28%      |
+| full-lmr  | full   | **−21.87%** |
+| full-both | full   | −25.73%     |
+
+**free-signal LMR is inert**: LMR reductions fire at deeper full-width nodes
+(remaining ≥ 3) where the asm computes NO natural eval, so the ply-2 signal
+is essentially never present and the permissive default reduces nothing —
+the tree is byte-identical to baseline. Only the **full-signal** (forced
+eval) can feed LMR.
+
+**Cost accounting — full-signal eval tax** (`TestImprovingFullSignalEvalCost`,
+Mode=2 with no applications = same tree, pure overhead): only **6.2%** of
+full-width nodes need a forced eval — **93.8% already compute one** via
+null-move (remaining ≥ 4) or RFP (remaining ≤ 2). Over the d6 bench that is
+**6,779 added evals**, an eval TAX of **+0.19%** of estimated cycles. The
+task's worry about an expensive extra full eval at deep nodes is unfounded:
+null-move already evaluates almost everywhere. This tax is **internalized in
+the cycle-budget screens below** (every forced eval charged at 872 cyc).
+
+**Field screen (500 games, seed 6502, ±25 Elo)** — free-signal under a
+30 000-node budget, full-signal under a matched **143 M cycle/move** budget:
+
+| variant  | signal | budget | +W =D −L      | Elo      |
+|----------|--------|--------|---------------|----------|
+| free-rfp | free   | node   | +172 =163 −165 | +5 ± 25  |
+| full-rfp | full   | cycle  | +178 =150 −172 | +4 ± 26  |
+| **full-lmr** | full | cycle | +190 =155 −155 | **+24 ± 25** |
+| full-both | full  | cycle  | +182 =154 −164 | +13 ± 25 |
+
+Both RFP applications are neutral (+4/+5); combining RFP with LMR (full-both
++13) is **worse** than LMR alone (+24) — the shipped 120/500 margins are
+already tuned, and conditional tightening over-prunes. **full-lmr is the sole
+signal carrier.**
+
+**full-lmr promotion to 2000 then 4000 games** (cycle budget, ±13/±9),
+matching the countermove protocol (it sat on the bar at 2000, so extended):
+
+| seed  | games | +W =D −L       | Elo     |
+|-------|-------|----------------|---------|
+| 11111 | 1000  | +378 =315 −307 | +25 ± 18 |
+| 22222 | 1000  | +342 =322 −336 | +2 ± 18  |
+| 33333 | 1000  | +378 =310 −312 | +23 ± 18 |
+| 44444 | 1000  | +340 =324 −336 | +1 ± 18  |
+| **4000 total** |  | **+1438 =1271 −1291** | **+13 ± 9** |
+
+Big per-seed spread (+25/+2/+23/+1) — the same variance that fooled the
+countermove field screen. But unlike the countermove (which collapsed to
++4 ± 9 spanning zero), full-lmr holds at **+13 ± 9 with the lower bound ≈ +4,
+clearly positive.**
+
+**free vs full, plainly** (the deciding question): for LMR, full-signal
+(+13 ± 9) beats free-signal (0, inert) by far more than the 0.19% tax → the
+answer is **full-signal**. For RFP, full (+4) does NOT beat free (+5); both
+neutral → **nothing** ports there.
+
+**Port recommendation: PORT the full-signal LMR application; DO NOT PORT the
+RFP application.** Recommended constants:
+`ImprovingParams{Mode: 2 (full-signal), LMR: true, LMRExtra: 1}` — no RFP
+tightening (`RFP:false`). 6502 cost: an `evalStack` of 2 bytes/ply (~64 B)
+plus a forced static eval at ~6% of full-width nodes (the remaining-3 shell,
+in-check nodes, and null-skipped nodes — everywhere null-move/RFP don't
+already eval). The +13 is measured net of that cost.
+
+Toggle: `ImprovingParams{Mode, RFP, RFPNI, FutNI, LMR, LMRExtra}`; off
+(Mode==0) is a **byte-identical no-op** — the parity gates
+(`TestSearchMirrorParity`/`TestPStructMirrorParity`) run with it off and stay
+green. Soundness: `TestImprovingOffIsNoop` (Mode==0, even with RFP/LMR flags
+set, identical move/score/nodes to baseline), `TestImprovingDeterminism`
+(same seed → identical replay, node AND cycle budget, all variants),
+`TestImprovingMateSound` (exact fixed-depth mate score, every variant),
+`TestImprovingFullSignalEvalCost` (added-eval tax), `TestImprovingSweepNodes`
+(the d6 node sweep).
+
 ## 2026-07-21 — countermove heuristic — DO NOT PORT: neutral (+4 ± 9) at asm-matched 0x1f over 4000 games
 
 Added the **countermove heuristic** to the five-pass `moveLoop` (the

@@ -293,5 +293,14 @@ func (e *Engine) eval() int {
 		e.Seed = e.Seed*3 + 29
 		score += int(e.Seed & 3)
 	}
+	// Record the static eval for the improving heuristic. Gated on the
+	// heuristic being active so the OFF path never touches evalStack (the
+	// parity/no-op guarantee). Records at the CURRENT node's ply: eval() is
+	// only ever called for the position at p.Ply during search.
+	if e.Improving.on() {
+		ply := e.Pos.Ply
+		e.evalStack[ply] = score
+		e.evalValid[ply] = true
+	}
 	return score
 }

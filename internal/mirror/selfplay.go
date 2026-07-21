@@ -29,6 +29,12 @@ type PlayerCfg struct {
 	// (Costs.Countermove). 0 leaves it untaxed (node-budget behavior).
 	CMCost float64
 
+	// Improving enables the improving heuristic (zero value = off). The
+	// full-signal design (Mode==2) forces an extra eval() at every full-width
+	// node that lacks one; that eval's real cost (Costs.Eval) is charged
+	// automatically in CycleBudget mode, so no separate cost knob is needed.
+	Improving ImprovingParams
+
 	// Extra enables the experimental cheap eval terms (task #18/#51) for
 	// this side. Zero = off (the asm's current eval). Pair it with
 	// EvalTermsCost so cycle-budgeted screens pay the term's real 6502 tax.
@@ -79,6 +85,7 @@ func (c *PlayerCfg) engine() *Engine {
 	if c.CMCost != 0 {
 		e.Costs.Countermove = c.CMCost
 	}
+	e.Improving = c.Improving
 	return e
 }
 

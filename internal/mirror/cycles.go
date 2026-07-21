@@ -77,6 +77,13 @@ type CycleCosts struct {
 	// is the marginal cost per pseudo-legal move it emits.
 	Generate   float64
 	MovePerGen float64
+	// Countermove is the per-operation cost of the countermove heuristic:
+	// one indexed table load + 2-byte compare on the probe (once per
+	// full-width node where CM is active), and the 2-byte store on a quiet
+	// beta cutoff. Like EvalTerm it is NOT part of the calibration fit
+	// (defaults to 0, an untaxed node-budget run); a cycle screen sets it
+	// via PlayerCfg.CMCost to a pessimistic per-node surcharge (~20-40).
+	Countermove float64
 }
 
 // DefaultCycleCosts is the ridge-regularized fit against TestMicroAB's 18
@@ -147,6 +154,9 @@ type CycleAccount struct {
 
 	Generates uint64 // generate() calls (== the asm "generate" probe)
 	MovesGen  uint64 // pseudo-legal moves emitted across all generate() calls
+
+	CounterProbes uint64 // countermove table probes (per full-width CM node)
+	CounterStores uint64 // countermove table stores (quiet beta cutoffs)
 }
 
 // EvalTermsCost returns a conservative estimated per-eval-call cost, in
@@ -258,6 +268,16 @@ func (e *Engine) chargeTTProbe() {
 func (e *Engine) chargeTTStore() {
 	e.Cyc.TTStores++
 	e.Cyc.Est += uint64(e.Costs.TTStore)
+}
+
+func (e *Engine) chargeCounterProbe() {
+	e.Cyc.CounterProbes++
+	e.Cyc.Est += uint64(e.Costs.Countermove)
+}
+
+func (e *Engine) chargeCounterStore() {
+	e.Cyc.CounterStores++
+	e.Cyc.Est += uint64(e.Costs.Countermove)
 }
 
 func (e *Engine) chargeGenerate(nMoves int) {

@@ -108,6 +108,11 @@ func (e *Engine) SearchCycleBudget(budget uint64, maxDepth int) (Move, int) {
 // search — killers/history then persist across ID iterations.
 func (e *Engine) newMove() {
 	e.killer = [MaxPly][2]Move{}
+	if e.CM.on() && !e.CM.Persist {
+		// Cleared per root move like the killers; CM.Persist keeps it (the
+		// per-game fresh Engine in self-play resets it between games anyway).
+		e.counter = [8][128]Move{}
+	}
 	if e.Features&FtHistory != 0 {
 		if e.hist == nil {
 			e.hist = &[2][128][128]int32{}
@@ -406,6 +411,13 @@ func (e *Engine) moveLoop() int {
 	rem := e.MaxDepth - ply
 	lmpOn := !qs && e.lmpNodeOK(ply, rem)
 
+	// Countermove probe cost: one indexed table load per full-width node
+	// that reaches the quiet passes (charged pessimistically for every
+	// non-qs node when CM is active). Zero unless a cycle screen sets it.
+	if e.cyc && !qs && e.CM.on() {
+		e.chargeCounterProbe()
+	}
+
 	for {
 		for i := range list {
 			m := list[i]
@@ -427,8 +439,25 @@ func (e *Engine) moveLoop() int {
 						if !e.killerMatch(ply, m) {
 							continue
 						}
-					case 4: // final pass: skip killers (already done)
+						// Before-killers countermove already ran in pass 6;
+						// don't re-search a counter that is also a killer.
+						if e.CM.on() && e.CM.BeforeKillers && e.counterMatch(ply, m) {
+							continue
+						}
+					case 6: // countermove pass: only the stored counter (a quiet)
+						if !e.counterMatch(ply, m) {
+							continue
+						}
+						// After-killers: a counter that is also a killer was
+						// already searched in the killer pass — skip it here.
+						if !e.CM.BeforeKillers && e.Features&FtKiller != 0 && e.killerMatch(ply, m) {
+							continue
+						}
+					case 4: // final pass: skip killers and the counter (both done)
 						if e.Features&FtKiller != 0 && e.killerMatch(ply, m) {
+							continue
+						}
+						if e.CM.on() && e.counterMatch(ply, m) {
 							continue
 						}
 					case 5: // QS quiet-checks pass: keep quiets; the
@@ -578,6 +607,12 @@ func (e *Engine) moveLoop() int {
 							k[0] = Move{m.From, m.To, 0}
 						}
 					}
+					// Countermove: a quiet cutter refutes the previous ply's
+					// move; store it against that move's (piece, to) key.
+					if e.CM.on() && ply != 0 && p.Board[m.To] == 0 &&
+						m.Flags&(FlEP|FlPromo) == 0 {
+						e.storeCounter(ply, m)
+					}
 					e.ttstore(ttLower, m.From, m.To, e.beta[ply])
 				}
 				return e.beta[ply]
@@ -606,13 +641,21 @@ func (e *Engine) moveLoop() int {
 				}
 			} else if e.futile[ply] {
 				return e.done()
-			} else if e.Features&FtKiller != 0 {
-				pass = 3
+			} else {
+				pass = e.firstQuietPass()
+			}
+		case 3:
+			if e.CM.on() && !e.CM.BeforeKillers {
+				pass = 6 // after-killers countermove pass follows the killers
 			} else {
 				pass = 4
 			}
-		case 3:
-			pass = 4
+		case 6:
+			if e.CM.BeforeKillers && e.Features&FtKiller != 0 {
+				pass = 3 // before-killers: the killers still follow
+			} else {
+				pass = 4
+			}
 		default: // pass 4 (full-width final) or pass 5 (QS quiet-checks)
 			return e.done()
 		}

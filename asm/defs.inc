@@ -160,8 +160,17 @@ MUL1      = $D0
 MUL2      = $D1
 PSP0      = $D2         ; 16-bit: PSQT mg table pointer
 PSP1      = $D4         ; 16-bit: PSQT eg table pointer
-PDIRTY    = $D6         ; nonzero: a pawn or king moved; PSTRUCT is stale
-                        ; (bit 7 set by DIRTYTAB for pawns specifically).
+PDIRTY    = $D6         ; nonzero: a pawn or king moved; PSTRUCT is stale.
+                        ; Deep opt r4: EVERY writer (movepiece/takepiece
+                        ; prologues AND addpiece/rempiece) now ORs in the
+                        ; DIRTYTAB encoding — $81 pawn, $01 king — so
+                        ; PDIRTY==1 means exactly "a king moved, no pawn
+                        ; placement changed" (promotions mark bit 7 via
+                        ; the pawn's rempiece). pawnterm's king-only fast
+                        ; path keys on that; it also reads FROM/TO/
+                        ; MVPIECE, valid at make's tail where pawnterm is
+                        ; called (evalinit and the PTNOCACHE oracle enter
+                        ; at pawntermfull, which skips the dispatch).
                         ; MAIN $0200-$020F (PWBITS/PBBITS, eval.s) is
                         ; PERSISTENT pawn-file bitmask state: built by
                         ; evalinit (ptbuild), kept current by pbtoggle

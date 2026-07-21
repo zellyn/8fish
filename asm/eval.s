@@ -20,15 +20,16 @@ rempiece:
 psqcom: sta PSQPIECE
         sty PSQSQ
         stx EVTMP               ; 0 = add piece, 1 = remove piece
-        ; phase contribution
+        ; phase contribution. PDIRTY takes the DIRTYTAB encoding ($81
+        ; pawn, 1 king, 0 otherwise — type-indexed low half of the
+        ; nibble table) so that a promotion's rempiece marks bit 7 and
+        ; PDIRTY==1 means EXACTLY "king moved, no pawn placement
+        ; changed" (the pawnterm king-only fast path keys on it).
         and #TYPEMASK
         tax
-        cpx #PAWN               ; pawn/king changes invalidate PSTRUCT
-        beq :+
-        cpx #KING
-        bne :++
-:       stx PDIRTY              ; (nonzero type byte)
-:
+        lda DIRTYTAB,x
+        ora PDIRTY
+        sta PDIRTY
         lda PHASEVAL,x
         beq psqnoph
         sta MULCNT
@@ -240,9 +241,11 @@ mvpbody:
         ; psqt as a from/to delta straight into the accumulators.
         ; white: score += tbl[TO] - tbl[FROM]
         ; black: score += tbl[FROM^$70] - tbl[TO^$70]
-        ; (mvpsqt is also the tail of movepieceq: PSP0/PSP1 set, no X/Y)
+        ; (mvpsqt is also the tail of movepieceq. Entry contract: X =
+        ; MVPIECE nibble — both entries establish it and neither hash
+        ; body touches X — so the color bit comes from X, not a reload.)
 mvpsqt:
-        lda MVPIECE
+        txa
         and #COLORMASK
         beq mpwh
         lda TO
@@ -320,7 +323,7 @@ tkppawn:
         lda VICTIM              ; re-establish X (nibble); Y unchanged
         and #$0F
         tax
-        jmp tkpbody
+        jmp tkphash             ; pawn victim: PHASEV16 is 0, skip the sub
 
 ; ---------------------------------------------------------------
 ; takepiece: fused hash + phase + psqt removal of a captured piece.
@@ -340,8 +343,9 @@ takepiece:
 tkpbody:
         lda PHASE
         sec
-        sbc PHASEV16,x          ; 0 for pawns: no-op by construction
-        sta PHASE
+        sbc PHASEV16,x          ; (pawn victims enter at tkphash instead:
+        sta PHASE               ;  their PHASEV16 is 0 by construction)
+tkphash:
         ; hash: xor key[kind][sq], all four planes
         lda ZKHI0,x
         sta ZPTR+1
@@ -493,7 +497,7 @@ tkqpawn:
         lda VICTIM
         and #$0F
         tax
-        jmp tkqbody
+        jmp tkpsqt              ; pawn victim: PHASEV16 is 0, skip the sub
 takepieceq:
         sty EVTMP               ; capture square
         and #$0F
@@ -505,7 +509,7 @@ takepieceq:
 tkqbody:
         lda PHASE
         sec
-        sbc PHASEV16,x          ; 0 for pawns: no-op by construction
+        sbc PHASEV16,x
         sta PHASE
         jmp tkpsqt              ; shared psqt removal tail
 
@@ -746,7 +750,130 @@ ptnext: dex
 .ident(.sprintf("ptfd%d", f)):
 .endmacro
 
+; SHIDX: king-shield index computation (hoisted from ptshieldw/b, deep
+; optimization review r4). A = king file on entry; Y = 1..3 (shielded
+; count) or 4..6 (4 + neighbor count, own file open) on exit. bits is
+; PWBITS (white) or PBBITS (black). Clobbers A,X.
+.macro SHIDX bits
+        tax                     ; X = king file
+        ldy #1                  ; assume own file shielded
+        lda bits,x
+        bne :+
+        ldy #4                  ; open file under the king (count = 0)
+:       cpx #0
+        beq :+                  ; file a: no left neighbor
+        lda bits-1,x
+        beq :+
+        iny
+:       cpx #7
+        beq :+                  ; file h: no right neighbor
+        lda bits+1,x
+        beq :+
+        iny
+:
+.endmacro
+
+; SHADD: add the signed byte tbl,y (sign-extended) into T0/T1.
+.macro SHADD tbl
+        ldx #0
+        lda tbl,y
+        bpl :+
+        dex                     ; negative: sign-extend
+:       clc
+        adc T0
+        sta T0
+        txa
+        adc T1
+        sta T1
+.endmacro
+
+; ---------------------------------------------------------------
+; ptkonly: king-only fast path (deep optimization review r4).
+; PDIRTY==1 means exactly one thing under the DIRTYTAB encoding (see
+; psqcom): THIS make moved a king (mover, incl. castling) and changed
+; no pawn placement — promotions and pawn victims all set bit 7. The
+; pawn masks, every per-file term, and the NON-moving side's shield
+; are therefore unchanged, so
+;   PSTRUCT' = PSTRUCT - shield_side(FROM) + shield_side(TO),
+; each term gated by the same home-rank test as ptkings and negated
+; via the existing SHLDB/SHLDW mirror tables (exact negations of each
+; other). Reads FROM/TO/MVPIECE, still live at make's tail (search
+; writes them pre-make; make never overwrites; castlerook uses
+; GTMP/GTO). Sound because make's tail invariant guarantees PSTRUCT
+; was current at make entry (PDIRTY==0 there). ~55-130 cycles vs
+; ~850 for the full recompute; king-only makes are ~17% of pawnterm
+; calls at the adopted config.
+; ---------------------------------------------------------------
+ptkonly:
+        lda #0
+        sta PDIRTY
+        sta T0                  ; T0/T1 = signed shield delta
+        sta T1
+        lda MVPIECE
+        and #COLORMASK
+        beq ptkow
+        jmp ptkob               ; (branch range: each side's block > 127b)
+ptkow:  ; white king: shield only exists on rank 1 (sq & $70 == 0)
+        ; (named gate labels: ":+" would bind inside the macro bodies)
+        lda FROM
+        and #$70
+        bne ptkwto
+        lda FROM
+        and #$07
+        SHIDX PWBITS
+        SHADD SHLDB             ; - old shieldw (SHLDB[i] = -SHLDW[i])
+ptkwto: lda TO
+        and #$70
+        bne ptkapply
+        lda TO
+        and #$07
+        SHIDX PWBITS
+        SHADD SHLDW             ; + new shieldw
+ptkapply:
+        clc
+        lda T0
+        adc PSTRUCT
+        sta PSTRUCT
+        lda T1
+        adc PSTRUCT+1
+        sta PSTRUCT+1
+        rts
+ptkob:  ; black king: shield only exists on rank 8 (sq & $70 == $70)
+        lda FROM
+        and #$70
+        cmp #$70
+        bne ptkbto
+        lda FROM
+        and #$07
+        SHIDX PBBITS
+        SHADD SHLDW             ; - old shieldb (SHLDW[i] = -SHLDB[i])
+ptkbto: lda TO
+        and #$70
+        cmp #$70
+        bne ptkapply2
+        lda TO
+        and #$07
+        SHIDX PBBITS
+        SHADD SHLDB             ; + new shieldb
+ptkapply2:                      ; (duplicate of ptkapply: branch range)
+        clc
+        lda T0
+        adc PSTRUCT
+        sta PSTRUCT
+        lda T1
+        adc PSTRUCT+1
+        sta PSTRUCT+1
+        rts
+
 pawnterm:
+        ; make's entry: dispatch king-only makes to the delta path
+        ; (evalinit and the PTNOCACHE oracle enter at pawntermfull —
+        ; FROM/MVPIECE are meaningless there)
+        lda PDIRTY
+        cmp #1
+        bne pawntermfull
+        jmp ptkonly             ; (branch range: PTFILE bulk sits between)
+pawntermfull:
         lda #0
         sta PDIRTY
         sta T0                  ; T0/T1: signed accumulator
@@ -798,22 +925,8 @@ ptdone: lda T0
 ; one signed SHLDW/SHLDB table add replaces the four jsr ptadda/ptsuba
 ; round trips. Clobbers A,X,Y; T0/T1 accumulator as before.
 ptshieldw:
-        tax                     ; X = king file
-        ldy #1                  ; assume own file shielded
-        lda PWBITS,x
-        bne :+
-        ldy #4                  ; open file under the king (count = 0)
-:       cpx #0
-        beq :+                  ; file a: no left neighbor
-        lda PWBITS-1,x
-        beq :+
-        iny
-:       cpx #7
-        beq :+                  ; file h: no right neighbor
-        lda PWBITS+1,x
-        beq :+
-        iny
-:       ldx #0                  ; X = high byte of the signed term
+        SHIDX PWBITS
+        ldx #0                  ; X = high byte of the signed term
         lda SHLDW,y
 shtail: bpl :+
         dex                     ; negative: sign-extend
@@ -825,22 +938,8 @@ shtail: bpl :+
         sta T1
         rts
 ptshieldb:
-        tax
-        ldy #1
-        lda PBBITS,x
-        bne :+
-        ldy #4
-:       cpx #0
-        beq :+
-        lda PBBITS-1,x
-        beq :+
-        iny
-:       cpx #7
-        beq :+
-        lda PBBITS+1,x
-        beq :+
-        iny
-:       ldx #0
+        SHIDX PBBITS
+        ldx #0
         lda SHLDB,y             ; sets N for shtail's sign test
         jmp shtail              ; (jmp preserves flags)
 
@@ -1081,7 +1180,8 @@ evinext:
         beq :+
         jsr hashep
 :       jsr ptbuild             ; initial pawn-file bitmasks; make/unmake
-        jsr pawnterm            ;  maintain them from here on (clears PDIRTY)
+        jsr pawntermfull        ;  maintain them from here on (clears PDIRTY;
+                                ;  full entry: FROM/MVPIECE mean nothing here)
         ; task #51: cache the ROOT position's extra-term value for the
         ; parity harness. eval recomputes it live (into T2/T3) and never
         ; writes XSTRUCT, so this stays valid at the root after a search.
@@ -1111,29 +1211,59 @@ eval:
         lda FEATURES
         and #FT_PSTRUCT
         beq :+
-        jsr pawnterm
+        jsr pawntermfull        ; full entry: no make context here
 :
 .endif
         ldx PHASE
-        lda PHASEWX,x           ; cap at 24 baked into the 256-entry table
-        sta EVTMP               ; w, 0..32
-        ; fast paths: w=32 (full middlegame) is pure MG, w=0 pure EG —
-        ; no multiply needed. w=32 covers every opening/middlegame node.
+        lda PHASEWX,x           ; A = w, 0..32 (cap at 24 baked in)
+        ; fast paths (deep opt r4 restructure): w=32 (full middlegame)
+        ; is pure MG, w=0 pure EG — no multiply, and the FT_PSTRUCT
+        ; flat term is FUSED into the accumulator copy (one 16-bit add
+        ; instead of copy-then-add; identical arithmetic). w=32 covers
+        ; every opening/middlegame node. EVTMP (w) is only stored on
+        ; the taper path, its only consumer.
         cmp #32
-        bne :+
+        bne evnotmg
+        lda FEATURES
+        and #FT_PSTRUCT
+        beq evmgraw
+        clc
+        lda MGSCORE
+        adc PSTRUCT
+        sta SCORE
+        lda MGSCORE+1
+        adc PSTRUCT+1
+        sta SCORE+1
+        jmp evrookx
+evmgraw:
         lda MGSCORE
         sta SCORE
         lda MGSCORE+1
         sta SCORE+1
-        jmp evpov
-:       cmp #0
-        bne :+
+        jmp evrookx
+evnotmg:
+        sta EVTMP               ; w, 1..31 (or 0)
+        cmp #0
+        bne evtaper
+        lda FEATURES
+        and #FT_PSTRUCT
+        beq evegraw
+        clc
+        lda EGSCORE
+        adc PSTRUCT
+        sta SCORE
+        lda EGSCORE+1
+        adc PSTRUCT+1
+        sta SCORE+1
+        jmp evrookx
+evegraw:
         lda EGSCORE
         sta SCORE
         lda EGSCORE+1
         sta SCORE+1
-        jmp evpov
-:       ; D = MG - EG, signed
+        jmp evrookx
+evtaper:
+        ; D = MG - EG, signed
         sec
         lda MGSCORE
         sbc EGSCORE
@@ -1242,11 +1372,12 @@ evnosgn:
         lda EGSCORE+1
         adc MUL1
         sta SCORE+1
-evpov:  ; pawn-structure/king-shield term (white POV, kept current by
-        ; make via PDIRTY)
+        ; pawn-structure/king-shield term (white POV, kept current by
+        ; make via PDIRTY) — taper path only; the w=32/w=0 fast paths
+        ; fused it into their accumulator copy above
         lda FEATURES
         and #FT_PSTRUCT
-        beq :+
+        beq evrookx
         clc
         lda SCORE
         adc PSTRUCT
@@ -1254,7 +1385,7 @@ evpov:  ; pawn-structure/king-shield term (white POV, kept current by
         lda SCORE+1
         adc PSTRUCT+1
         sta SCORE+1
-:       ; experimental rook/blockade terms (white POV), FT_ROOKX-gated
+evrookx: ; experimental rook/blockade terms (white POV), FT_ROOKX-gated
         lda FEATURES
         and #FT_ROOKX
         beq :+
@@ -1266,24 +1397,27 @@ evpov:  ; pawn-structure/king-shield term (white POV, kept current by
         lda SCORE+1
         adc T3
         sta SCORE+1
-:       ; side-to-move POV
+:       ; side-to-move POV + tempo. Black fuses the negate with the
+        ; tempo add: TEMPO - SCORE == (0 - SCORE) + TEMPO exactly in
+        ; 16-bit two's complement (deep opt r4).
         lda SIDE
         beq evwtm
         sec
-        lda #0
+        lda #TEMPO
         sbc SCORE
         sta SCORE
         lda #0
         sbc SCORE+1
         sta SCORE+1
-evwtm:  ; tempo
+        jmp evseed
+evwtm:  ; white tempo
         clc
         lda SCORE
         adc #TEMPO
         sta SCORE
-        bcc :+
+        bcc evseed
         inc SCORE+1
-:       ; dither: 0-3cp of seeded noise breaks deterministic move
+evseed: ; dither: 0-3cp of seeded noise breaks deterministic move
         ; repetition (hardware seeds SEED from input timing; the bridge
         ; pokes a random byte; 0 = off, keeping tests reproducible)
         lda SEED

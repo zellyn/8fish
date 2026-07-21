@@ -166,6 +166,36 @@ DBLTAB:
         .byte $0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C,$0C
 
 .align 256
+SPREADTAB:
+        .byte $00,$03,$07,$07,$0E,$0F,$0F,$0F,$1C,$1F,$1F,$1F,$1E,$1F,$1F,$1F
+        .byte $38,$3B,$3F,$3F,$3E,$3F,$3F,$3F,$3C,$3F,$3F,$3F,$3E,$3F,$3F,$3F
+        .byte $70,$73,$77,$77,$7E,$7F,$7F,$7F,$7C,$7F,$7F,$7F,$7E,$7F,$7F,$7F
+        .byte $78,$7B,$7F,$7F,$7E,$7F,$7F,$7F,$7C,$7F,$7F,$7F,$7E,$7F,$7F,$7F
+        .byte $E0,$E3,$E7,$E7,$EE,$EF,$EF,$EF,$FC,$FF,$FF,$FF,$FE,$FF,$FF,$FF
+        .byte $F8,$FB,$FF,$FF,$FE,$FF,$FF,$FF,$FC,$FF,$FF,$FF,$FE,$FF,$FF,$FF
+        .byte $F0,$F3,$F7,$F7,$FE,$FF,$FF,$FF,$FC,$FF,$FF,$FF,$FE,$FF,$FF,$FF
+        .byte $F8,$FB,$FF,$FF,$FE,$FF,$FF,$FF,$FC,$FF,$FF,$FF,$FE,$FF,$FF,$FF
+        .byte $C0,$C3,$C7,$C7,$CE,$CF,$CF,$CF,$DC,$DF,$DF,$DF,$DE,$DF,$DF,$DF
+        .byte $F8,$FB,$FF,$FF,$FE,$FF,$FF,$FF,$FC,$FF,$FF,$FF,$FE,$FF,$FF,$FF
+        .byte $F0,$F3,$F7,$F7,$FE,$FF,$FF,$FF,$FC,$FF,$FF,$FF,$FE,$FF,$FF,$FF
+        .byte $F8,$FB,$FF,$FF,$FE,$FF,$FF,$FF,$FC,$FF,$FF,$FF,$FE,$FF,$FF,$FF
+        .byte $E0,$E3,$E7,$E7,$EE,$EF,$EF,$EF,$FC,$FF,$FF,$FF,$FE,$FF,$FF,$FF
+        .byte $F8,$FB,$FF,$FF,$FE,$FF,$FF,$FF,$FC,$FF,$FF,$FF,$FE,$FF,$FF,$FF
+        .byte $F0,$F3,$F7,$F7,$FE,$FF,$FF,$FF,$FC,$FF,$FF,$FF,$FE,$FF,$FF,$FF
+        .byte $F8,$FB,$FF,$FF,$FE,$FF,$FF,$FF,$FC,$FF,$FF,$FF,$FE,$FF,$FF,$FF
+
+.align 128
+FILEBIT:
+        .byte $01,$02,$04,$08,$10,$20,$40,$80,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $01,$02,$04,$08,$10,$20,$40,$80,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $01,$02,$04,$08,$10,$20,$40,$80,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $01,$02,$04,$08,$10,$20,$40,$80,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $01,$02,$04,$08,$10,$20,$40,$80,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $01,$02,$04,$08,$10,$20,$40,$80,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $01,$02,$04,$08,$10,$20,$40,$80,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $01,$02,$04,$08,$10,$20,$40,$80,$00,$00,$00,$00,$00,$00,$00,$00
+
+.align 256
 SQRLO:
         .byte $00,$00,$01,$02,$04,$06,$09,$0C,$10,$14,$19,$1E,$24,$2A,$31,$38
         .byte $40,$48,$51,$5A,$64,$6E,$79,$84,$90,$9C,$A9,$B6,$C4,$D2,$E1,$F0

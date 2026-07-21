@@ -182,6 +182,27 @@ func main() {
 	b.WriteString("\n.align 256\n")
 	emit(&b, "DBLTAB", dblTab[:])
 
+	// Per-file pawn-term cache support (deep optimization review r4
+	// integration pass): FILEBIT[sq] = 1 << file for on-board 0x88
+	// squares (make's tail marks changed files into FDIRTY with it);
+	// SPREADTAB[b] = b | b<<1 | b>>1 widens a changed-files mask to the
+	// files whose per-file terms could be affected (each file's
+	// doubled/isolated/passed terms read files f-1..f+1 of both sides).
+	var fileBit [128]byte
+	for sq := range fileBit {
+		if sq&0x88 == 0 {
+			fileBit[sq] = 1 << (sq & 7)
+		}
+	}
+	var spreadTab [256]byte
+	for i := range spreadTab {
+		spreadTab[i] = byte(i | i<<1 | i>>1)
+	}
+	b.WriteString("\n.align 256\n")
+	emit(&b, "SPREADTAB", spreadTab[:])
+	b.WriteString("\n.align 128\n")
+	emit(&b, "FILEBIT", fileBit[:])
+
 	// Quarter-square multiply tables for the taper (eval's evmul):
 	// SQRLO/HI[i] = floor(i*i/4), ISQLO/HI[i] = floor((i-32)*(i-32)/4).
 	// a*b = f(a+b) - f(a-b) (exact for integers: a+b and a-b share

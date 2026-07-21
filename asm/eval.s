@@ -607,6 +607,8 @@ PBBITS = $0208          ; black pawn rank-occupancy bits per file (8)
 ; The PTNOCACHE oracle build still rebuilds here on every pawnterm so
 ; its PSTRUCT is independent of the maintained state.
 ptbuild:
+        lda #$FF                ; masks rebuilt from scratch: every file's
+        sta FDIRTY              ;  cached per-file term (PTFVAL) is stale
         lda #0
         ldx #7
 ptclr:  sta PWBITS,x
@@ -642,26 +644,28 @@ ptnext: dex
         bpl ptscan
         rts
 
-; PTFILE: one file's white+black terms, fully unrolled (deep
-; optimization review r3). All loads are absolute (PWBITS/PBBITS bytes
-; and page-aligned lookup tables), boundary files drop the missing
+; PTFILEC: one file's white+black terms, fully unrolled, accumulated
+; into the single signed byte MULCNT (deep opt r4 integration: the
+; 16-bit T0/T1 updates of the old PTFILE became 8-bit — a file's total
+; is bounded by 12+7+52 = 71 in magnitude, so a signed byte always
+; holds it exactly). All loads are absolute (PWBITS/PBBITS bytes and
+; page-aligned lookup tables), boundary files drop the missing
 ; neighbor at assembly time, and the doubled test is a DBLTAB lookup
-; (12 iff >= 2 bits set) instead of bits&(bits-1). The 16-bit T0/T1
-; accumulator updates are inlined on the (rarer) term-hit paths.
-; Common case (both sides have pawns on the file; no doubled/isolated/
-; passed hit) is 86 cycles/file vs 195 for the old helper-call loop.
-.macro PTFILE f
+; (12 iff >= 2 bits set). Semantics term-exact with the old PTFILE
+; (TestPStructParity); the caller folds MULCNT into T0/T1 with PTADD8,
+; and two's-complement addition being order-independent makes the
+; final 16-bit sum bit-identical to the old interleaved walk.
+.macro PTFILEC f
+        .local bterm, fdone
         ; ---- white terms ----
         ldy PWBITS+f            ; Y = own-file bits, kept for lookups
-        beq .ident(.sprintf("ptbw%d", f))       ; no white pawns here
+        beq bterm               ; no white pawns here
         lda DBLTAB,y            ; 12 iff doubled (>= 2 pawns)
         beq :+
-        lda T0
+        lda MULCNT
         sec
         sbc #12
-        sta T0
-        bcs :+
-        dec T1
+        sta MULCNT
 :
 .if f = 0
         lda PWBITS+1            ; isolated: no own pawns on neighbors
@@ -672,12 +676,10 @@ ptnext: dex
         ora PWBITS+(f+1)
 .endif
         bne :+
-        lda T0
+        lda MULCNT
         sec
         sbc #7
-        sta T0
-        bcs :+
-        dec T1
+        sta MULCNT
 :
 .if f = 0
         lda PBBITS+0            ; black bits on files f-1..f+1
@@ -691,25 +693,20 @@ ptnext: dex
         ora PBBITS+(f+1)
 .endif
         and WBLOCKM,y           ; any black pawn at rank >= our best?
-        bne .ident(.sprintf("ptbw%d", f))
+        bne bterm
         lda WPASSB,y            ; passed: bonus by the best pawn's rank
         clc
-        adc T0
-        sta T0
-        bcc .ident(.sprintf("ptbw%d", f))
-        inc T1
-.ident(.sprintf("ptbw%d", f)):
-        ; ---- black terms, mirrored (advancement = low rank) ----
+        adc MULCNT
+        sta MULCNT
+bterm:  ; ---- black terms, mirrored (advancement = low rank) ----
         ldy PBBITS+f
-        beq .ident(.sprintf("ptfd%d", f))
+        beq fdone
         lda DBLTAB,y
         beq :+
-        lda T0
+        lda MULCNT
         clc
         adc #12
-        sta T0
-        bcc :+
-        inc T1
+        sta MULCNT
 :
 .if f = 0
         lda PBBITS+1
@@ -720,12 +717,10 @@ ptnext: dex
         ora PBBITS+(f+1)
 .endif
         bne :+
-        lda T0
+        lda MULCNT
         clc
         adc #7
-        sta T0
-        bcc :+
-        inc T1
+        sta MULCNT
 :
 .if f = 0
         lda PWBITS+0
@@ -739,15 +734,35 @@ ptnext: dex
         ora PWBITS+(f+1)
 .endif
         and BBLOCKM,y
-        bne .ident(.sprintf("ptfd%d", f))
-        lda BPASSB,y            ; T0/T1 -= bonus, via +(~bonus)+1
+        bne fdone
+        lda BPASSB,y            ; MULCNT -= bonus, via +(~bonus)+1
         eor #$FF
         sec
+        adc MULCNT
+        sta MULCNT
+fdone:
+.endmacro
+
+; PTADD8: add the signed byte in A (whose N flag is still live from
+; the load) into the T0/T1 16-bit accumulator, sign-extended. Uses
+; only .local labels, so surrounding anonymous labels stay safe.
+.macro PTADD8
+        .local neg, done
+        bmi neg
+        clc                     ; positive: 16-bit add of 0:A
         adc T0
         sta T0
-        bcs .ident(.sprintf("ptfd%d", f))
-        dec T1
-.ident(.sprintf("ptfd%d", f)):
+        bcc done
+        inc T1
+        bcs done                ; always (bcc above fell through: C=1,
+                                ;  inc does not touch it)
+neg:    clc                     ; negative: add $FF:A (sign extension)
+        adc T0
+        sta T0
+        lda T1
+        adc #$FF
+        sta T1
+done:
 .endmacro
 
 ; SHIDX: king-shield index computation (hoisted from ptshieldw/b, deep
@@ -865,31 +880,80 @@ ptkapply2:                      ; (duplicate of ptkapply: branch range)
         sta PSTRUCT+1
         rts
 
-pawnterm:
-        ; make's entry: dispatch king-only makes to the delta path
-        ; (evalinit and the PTNOCACHE oracle enter at pawntermfull —
-        ; FROM/MVPIECE are meaningless there)
-        lda PDIRTY
-        cmp #1
-        bne pawntermfull
-        jmp ptkonly             ; (branch range: PTFILE bulk sits between)
+; pawntermfull: full PSTRUCT recompute with the per-file cache (deep
+; opt r4 integration). The old pawnterm dispatch entry is gone: make's
+; tail dispatches to ptkonly/pawntermfull itself (board.s); evalinit
+; and the PTNOCACHE oracle enter here directly as before.
+; Only the files in SPREADTAB[FDIRTY] (changed files widened by one:
+; a file's doubled/isolated/passed terms read files f-1..f+1 of both
+; sides) are recomputed and re-cached in PTFVAL; every other file
+; contributes its cached signed byte. The 16-bit T0/T1 sum is
+; bit-identical to the old always-recompute walk (each file's value is
+; exact in 8 bits and two's-complement addition commutes); the king
+; shields are recomputed fresh as before.
 pawntermfull:
         lda #0
         sta PDIRTY
         sta T0                  ; T0/T1: signed accumulator
         sta T1
 .ifdef PTNOCACHE
-        jsr ptbuild             ; oracle: fresh masks, ignore maintenance
+        jsr ptbuild             ; oracle: fresh masks AND FDIRTY = $FF, so
+                                ;  every file recomputes below - PSTRUCT
+                                ;  stays independent of maintained state
 .endif
-ptfile:
-        PTFILE 0
-        PTFILE 1
-        PTFILE 2
-        PTFILE 3
-        PTFILE 4
-        PTFILE 5
-        PTFILE 6
-        PTFILE 7
+        ldx FDIRTY
+        lda SPREADTAB,x         ; dirty files + neighbors
+        sta EVTMP               ; per-file dispatch shifter (lsr per file)
+        lda #0
+        sta FDIRTY
+ptcf0:  lsr EVTMP
+        bcc :+
+        jmp ptrc0               ; dirty: recompute (bulk is out of range)
+:       lda PTFVAL+0            ; clean: cached per-file value
+        beq ptcf1               ; zero contribution (the common case)
+        PTADD8
+ptcf1:  lsr EVTMP
+        bcc :+
+        jmp ptrc1
+:       lda PTFVAL+1
+        beq ptcf2
+        PTADD8
+ptcf2:  lsr EVTMP
+        bcc :+
+        jmp ptrc2
+:       lda PTFVAL+2
+        beq ptcf3
+        PTADD8
+ptcf3:  lsr EVTMP
+        bcc :+
+        jmp ptrc3
+:       lda PTFVAL+3
+        beq ptcf4
+        PTADD8
+ptcf4:  lsr EVTMP
+        bcc :+
+        jmp ptrc4
+:       lda PTFVAL+4
+        beq ptcf5
+        PTADD8
+ptcf5:  lsr EVTMP
+        bcc :+
+        jmp ptrc5
+:       lda PTFVAL+5
+        beq ptcf6
+        PTADD8
+ptcf6:  lsr EVTMP
+        bcc :+
+        jmp ptrc6
+:       lda PTFVAL+6
+        beq ptcf7
+        PTADD8
+ptcf7:  lsr EVTMP
+        bcc :+
+        jmp ptrc7
+:       lda PTFVAL+7
+        beq ptkings
+        PTADD8
 
 ptkings:
         ; king shield: only for kings on their own back two ranks
@@ -913,6 +977,29 @@ ptdone: lda T0
         lda T1
         sta PSTRUCT+1
         rts
+
+; Per-file recompute blocks (out of line: each PTFILEC expansion is far
+; past branch range from the consume walk above). MULCNT accumulates
+; the 8-bit signed per-file value; it is re-cached in PTFVAL and folded
+; into T0/T1 exactly like a clean file's cached byte.
+.macro PTRECF f, back
+        lda #0
+        sta MULCNT
+        PTFILEC f
+        lda MULCNT
+        sta PTFVAL+f
+        beq :+
+        PTADD8
+:       jmp back
+.endmacro
+ptrc0:  PTRECF 0, ptcf1
+ptrc1:  PTRECF 1, ptcf2
+ptrc2:  PTRECF 2, ptcf3
+ptrc3:  PTRECF 3, ptcf4
+ptrc4:  PTRECF 4, ptcf5
+ptrc5:  PTRECF 5, ptcf6
+ptrc6:  PTRECF 6, ptcf7
+ptrc7:  PTRECF 7, ptkings
 
 ; (doubled/isolated magnitudes — 12 and 7, Texel-tuned on the
 ; diversified corpus — are inlined in the PTFILE macro; DBLTAB gates

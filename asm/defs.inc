@@ -129,6 +129,29 @@ RECAPONLY = $0D         ; recap2 qs gate: nonzero -> generateq emits only
                         ;  captures landing on RECAPSQ (prev move's TO)
 TTF0      = $0E         ; search pass 0: TT-move from (TTFROMA[PLY] mirror)
 TTT0      = $0F         ; search pass 0: TT-move to (TTTOA[PLY] mirror)
+FDIRTY    = $33         ; pawn-term per-file cache (deep opt r4 integration):
+                        ;  bit f = file f's pawn placement changed since
+                        ;  pawntermfull last consumed the mask. Written by
+                        ;  make's tail (FT_PSTRUCT-gated: FILEBIT[FROM] |
+                        ;  FILEBIT[TO] for pawn movers, FILEBIT[capsq] for a
+                        ;  pawn victim under a non-pawn mover); unmake ORs
+                        ;  back UNDOFD (this move's make-time value) on the
+                        ;  same pawn/slow undo paths; ptbuild seeds $FF.
+                        ;  pawntermfull recomputes exactly the files in
+                        ;  SPREADTAB[FDIRTY] (neighbor smear: a file's terms
+                        ;  read files f-1..f+1), sums the rest from PTFVAL,
+                        ;  then clears FDIRTY.
+PTFVAL    = $34         ; $34-$3B: per-file pawn-term value cache (signed
+                        ;  byte each, white POV; |v| <= 71 = 12+7+52 by
+                        ;  construction so 8 bits always suffice). Entry f
+                        ;  is valid iff FDIRTY bit f is clear.
+CLSP      = $3C         ; movegen class-presence accumulator (deep opt r4
+                        ;  integration): every classic emit ORs its tier
+                        ;  byte in - bit 0 = a heavy capture/promo was
+                        ;  emitted, bit 1 = a light capture (higher bits
+                        ;  meaningless; batched quiets skip the OR).
+                        ;  Reset by gennodeq/gennodef, latched to
+                        ;  CLSPRES[PLY] by gennd2 after generation.
 EVALVALID = $32         ; improving (FT2_IMPROV): nonzero = a static eval was
                         ;  recorded for the CURRENT node's visit (deep opt r4:
                         ;  was a 32-byte per-ply array at $0278; single ZP byte
@@ -340,7 +363,13 @@ THRT       = $0D60      ; qs delta-pruning threshold as a TIER byte
                         ;  (tier = victimtype<<4|class, class <= 2 here).
                         ;  $00 = everything passes (full-width nodes, low
                         ;  phase, raised stand pat); $70 = nothing passes.
-                        ;  ($0D80 FREE: the old DELTATH slot.)
+UNDOFD     = $0D80      ; per-ply FDIRTY restore mask (deep opt r4
+                        ;  integration; reuses the old DELTATH slot):
+                        ;  written by make's FT_PSTRUCT-gated dirty tail
+                        ;  (= FDIRTY after this move's file marks),
+                        ;  OR-restored into FDIRTY by unmake's pawn-victim/
+                        ;  pawn-mover/slow undo paths (the re-toggled files'
+                        ;  cached PTFVAL entries go stale again).
 UNDOPSL    = $0DA0      ; PSTRUCT saved by make, restored by unmake
 UNDOPSH    = $0DC0
 SMODE      = $0DE0      ; child window mode for the move being searched:
@@ -380,8 +409,13 @@ ASPFAIL    = $0237      ; fails this iteration (0..3; 3 forces full window)
 ; OFF path never touches these, so the search tree is unchanged.
 EVALSTKL   = $0238      ; 32 bytes: static eval low byte, indexed by ply
 EVALSTKH   = $0258      ; 32 bytes: static eval high byte, indexed by ply
-                        ; ($0278-$0297 FREE: the old EVALVALID per-ply array
-                        ;  moved to a single ZP byte, deep opt r4 — see $30.)
+CLSPRES    = $0278      ; 32 bytes: per-ply move-list class presence (CLSP
+                        ;  latched by gennd2; was the old EVALVALID array
+                        ;  slot): the move loop skips the pass 1/2 scans
+                        ;  outright when no move of that class was emitted
+                        ;  (bit 0 = heavy capture/promo, bit 1 = light
+                        ;  capture; conservative - a consumed TT move may
+                        ;  leave a set bit with nothing left to find).
 
 MOVESTACK  = $0E00      ; 4 bytes/move (tier,from,to,flags); through $1FFF
                         ;  (1151-move capacity; emitmove traps overflow with

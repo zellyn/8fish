@@ -701,7 +701,11 @@ ckdone:
         ; only kind of move that can change PSTRUCT: save the pre-move
         ; value into this move's undo slot (deep opt r4; clean moves
         ; skip both the save here and the restore in unmake), then
-        ; refresh the term.
+        ; refresh the term. The pawnterm dispatch lives HERE now (r4
+        ; integration): king-only makes (PDIRTY == 1) go straight to
+        ; ptkonly; pawn-placement makes mark their changed files into
+        ; FDIRTY (and save the per-ply UNDOFD restore mask) before the
+        ; full recompute consumes the mask.
         lda PDIRTY
         beq mkpdone             ; clean: no save, no recompute
         ldx PLY
@@ -720,9 +724,36 @@ ckdone:
 .else
         lda FEATURES
         and #FT_PSTRUCT
-        beq :+
-        jmp pawnterm            ; clears PDIRTY; rts returns to caller
-:       lda #0
+        beq mkptoff
+        lda PDIRTY
+        cmp #1
+        bne mkmarks
+        lda #0                  ; king-only: no pawn placement changed -
+        sta UNDOFD,x            ;  nothing for the castle undo path to
+        jmp ptkonly             ;  re-dirty; shield delta clears PDIRTY,
+                                ;  rts returns to caller
+mkmarks:
+        lda MVPIECE             ; PDIRTY bit 7: pawn placement changed
+        and #TYPEMASK
+        cmp #PAWN
+        bne mknpm
+        ldy FROM                ; pawn mover: FROM/TO files change (an ep
+        lda FILEBIT,y           ;  victim shares TO's file; a promotion
+        ldy TO                  ;  marks TO conservatively)
+        ora FILEBIT,y
+        bne mkfd                ; always (file bits are nonzero)
+mknpm:  ldy UNDOCAPSQ,x         ; non-pawn mover with bit 7 set: the victim
+        lda FILEBIT,y           ;  is provably a pawn, on capsq (=TO here)
+mkfd:   sta UNDOFD,x            ; unmake's restore mask is THIS move's
+                                ;  files ONLY (an accumulated mask here
+                                ;  measured a net regression: the move
+                                ;  loop's sibling files snowball into
+                                ;  near-full recomputes)
+        ora FDIRTY
+        sta FDIRTY
+        jmp pawntermfull        ; clears PDIRTY; rts returns to caller
+mkptoff:
+        lda #0
         sta PDIRTY
 .endif
 mkpdone:
@@ -992,6 +1023,9 @@ umnohash:
         eor PWBITS,x
         sta PWBITS,x
         ldx PLY
+        lda UNDOFD,x            ; the re-toggled file's cached term goes
+        ora FDIRTY              ;  stale again: OR back this move's
+        sta FDIRTY              ;  make-time dirty-file mask (r4)
         lda UNDOPSL,x           ; pawn event: PSTRUCT returns (make saved
         sta PSTRUCT             ;  it under the same condition)
         lda UNDOPSH,x
@@ -1032,6 +1066,9 @@ umfmover:
         sta PSTRUCT+1
         rts
 umfpawn:
+        lda UNDOFD,x            ; re-toggled files' cached terms go stale:
+        ora FDIRTY              ;  OR back this move's dirty-file mask (r4)
+        sta FDIRTY
         lda UNDOPSL,x           ; pawn mover: PSTRUCT returns
         sta PSTRUCT
         lda UNDOPSH,x
@@ -1082,6 +1119,9 @@ umslow2:
         sta PSTRUCT             ;  make always saved PSTRUCT (promo/ep =
         lda UNDOPSH,x           ;  pawn, castle = king, double = pawn)
         sta PSTRUCT+1
+        lda UNDOFD,x            ; re-toggled files' cached terms go stale:
+        ora FDIRTY              ;  OR back this move's dirty-file mask
+        sta FDIRTY              ;  (castle saved it on the king-only path)
 .endif
         lda UNDOFLAGS,x
         and #FL_CASTLE

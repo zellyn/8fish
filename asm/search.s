@@ -7,22 +7,24 @@
 ; check, a full evasion node instead (no stand pat, all moves, mate
 ; detection) — which is exactly a full-width node, so it reuses one.
 ;
-; Move loop runs two passes over the generated list: pass 0 processes
-; captures/promotions, pass 1 the quiets. QS capture-only nodes stop
-; after pass 0.
+; Move loop runs up to five passes over the generated list (see the
+; move-loop comment below): 0 TT move, 1 heavy captures/promos, 2
+; light captures, 3 killers, 4 remaining quiets. QS capture-only
+; nodes run passes 1-2 only.
 
 ; ---------------------------------------------------------------
-; gennode: set base/cursor from MSP, generate, set end. QS capture
-; nodes use the specialized captures-only generator copy.
+; gennodeq / gennodef: set base/cursor from MSP, generate, set end.
+; Split by node kind (deep opt r4): the caller always knows whether
+; this is a qs capture node (snodeq) or a full-width/evasion node
+; (snode), so neither entry tests QSKIND. QS nodes use the
+; specialized captures-only generator copy.
 ; ---------------------------------------------------------------
-gennode:
+gennodeq:
         ldy PLY
         lda MSP
         sta PLYBASELO,y
         lda MSP+1
         sta PLYBASEHI,y
-        lda QSKIND,y
-        beq :+
         ; recap2 gate: past RecapAfter=2 qs plies, restrict generateq
         ; to recaptures onto the previous move's TO (UNDOTO[PLY-1]).
         ; qs depth = PLY - MAXDEPTH (>= 0 here; MAXDEPTH is constant
@@ -42,7 +44,13 @@ gennode:
         sta RECAPONLY
 genq:   jsr generateq
         jmp gennd2
-:       jsr generate
+gennodef:
+        ldy PLY
+        lda MSP
+        sta PLYBASELO,y
+        lda MSP+1
+        sta PLYBASEHI,y
+        jsr generate
 gennd2: ldy PLY
         lda MSP
         sta PLYENDLO,y
@@ -75,6 +83,8 @@ curincheck:
 ; hard limit (2x budget). No-op in fixed-depth mode (budget 0).
 ; ---------------------------------------------------------------
 checkclock:
+        lda #128                ; rearm the poll divider (search counts it
+        sta NODECNT             ;  down; 0 -> poll here -> reset to 128)
         lda BUDGET0
         ora BUDGET1
         ora BUDGET2
@@ -97,9 +107,8 @@ ccout:  rts
 ; search
 ; ---------------------------------------------------------------
 search:
-        inc NODECNT
-        inc NODECNT             ; +2: poll the clock every 128 nodes
-        bne :+
+        dec NODECNT             ; countdown: poll the clock every 128 nodes
+        bne :+                  ;  (checkclock rearms; first poll after 256)
         jsr checkclock
 :       lda ABORT
         beq :+
@@ -108,11 +117,12 @@ search:
         sta SCORE+1
         rts
 :       lda PLY
+        beq sdrawend            ; root: no draw checks; a move is required
+                                ;  (and never at the ply cap)
         cmp #MAXPLY-1
         bcc :+
         jmp eval                ; hard ply cap: static eval
-:       lda PLY
-        beq sdrawend            ; root: no draw checks; a move is required
+:
         ; 50-move rule. (Nuance accepted: a mate delivered exactly on the
         ; 100th halfmove is scored as a draw here.)
         lda HALFMOVE
@@ -206,27 +216,21 @@ ckvdone:
         ; never touch RAISED/FUTILE (sdone and p2done test QSKIND
         ; first), TTFROMA (snode tests QSKIND first), or TTBF (only
         ; sret reads it), and qs sets its own delta threshold before
-        ; snode (qsdelta/qsnodelta).
+        ; snode (qsdelta/qsnothr).
         lda #0
         sta RAISED,y
         sta FUTILE,y
-        sta DELTATL,y
-        lda #$80                ; delta threshold -32768: no delta pruning
-        sta DELTATH,y
+        sta THRT,y              ; tier threshold 0: no delta pruning
+        ; improving heuristic (FT2_IMPROV): mark this ply's eval unrecorded
+        ; for this visit (improving.go resets evalValid[ply] at node entry).
+        ; A natural eval (null/RFP) or the full-signal force re-sets it.
+        ; Unconditional: nothing reads EVALVALID when the feature is off, so
+        ; the blind ZP write is cheaper than gating on FEATURES2.
+        sta EVALVALID
         lda #NOSQ
         sta TTFROMA,y
         sta TTBF,y
-        ; improving heuristic (FT2_IMPROV): mark this ply's eval unrecorded for
-        ; this visit (improving.go resets evalValid[ply] at node entry). A
-        ; natural eval (null/RFP) or the full-signal force re-sets it. Gated so
-        ; the OFF path never touches EVALVALID. Only full-width nodes reach
-        ; here; qs plies are never read by improving().
-        lda FEATURES2
-        and #FT2_IMPROV
-        beq :+
-        lda #0
-        sta EVALVALID,y
-:       ; full-width node: probe the transposition table
+        ; full-width node: probe the transposition table
         jsr ttprobe
         bcc snodej
         ldy PLY
@@ -234,19 +238,19 @@ ckvdone:
         sta TTFROMA,y           ; TT move: searched first (pass 0)
         lda TTENTRY+4
         sta TTTOA,y
-        ; cutoff allowed if stored depth >= remaining depth, not at root
+        ; cutoff allowed if stored depth >= remaining depth, not at root.
+        ; Compare remaining<<2 against the packed depth<<2|bound byte: the
+        ; bound bits are 1-3 (never 0 on a hit), so rem<<2 < depth<<2|bound
+        ; is exactly rem <= depth — one shift-compare, no scratch byte.
         lda PLY
         beq snodej
-        lda TTENTRY+7
-        lsr
-        lsr
-        sta T0
         lda MAXDEPTH
         sec
         sbc PLY
-        cmp T0
-        bcc ttcut               ; remaining < stored depth
-        beq ttcut               ; equal: cutoff ok
+        asl
+        asl
+        cmp TTENTRY+7
+        bcc ttcut               ; remaining <= stored depth: cutoff ok
 snodej: jmp sprep               ; otherwise ordering only
 ttcut:  lda TTENTRY+7
         and #$03
@@ -295,9 +299,7 @@ squiesce:
         lda #0                  ; in check: full evasion node, which
         sta RAISED,y            ;  exits through sret/p2done like a
         sta FUTILE,y            ;  full-width one: full init
-        sta DELTATL,y
-        lda #$80
-        sta DELTATH,y
+        sta THRT,y              ; tier threshold 0: no delta pruning
         lda #NOSQ
         sta TTFROMA,y
         sta TTBF,y
@@ -328,41 +330,88 @@ qsnofh: ; if SCORE > ALPHA: ALPHA = SCORE
         sbc SCORE+1
         bvc :+
         eor #$80
-:       bmi :+
-        jmp qsdelta             ; no improvement
-:       lda SCORE
-        sta ALPHALO,y
-        lda SCORE+1
-        sta ALPHAHI,y
+:       bmi qsraise
 qsdelta:
-        ; delta pruning threshold: search a capture only if its victim
-        ; is worth at least alpha - standpat - margin. Disabled at low
-        ; phase, where every pawn matters. (Node entry no longer sets
-        ; the no-prune sentinel, so the low-phase path writes it here.)
+        ; delta pruning: search a capture only if its victim value clears
+        ; T = alpha - standpat - 200 (16-bit, same wrap semantics as the
+        ; old stored threshold). Disabled at low phase, where every pawn
+        ; matters. T is classified ONCE per node into a tier-byte
+        ; threshold THRT = minvictimtype<<4 (see defs.inc), making the
+        ; per-capture filter in passes 1/2 a single unsigned tier compare
+        ; (deep opt r4; VV16 victim-value tables retired).
+        ; Every qs path below also presets SMODE = 0 once: a qs node's
+        ; children all get the full window, so the per-move store in the
+        ; old slegal chain is gone.
         lda PHASE
         cmp #6
-        bcc qsnodelta
+        bcc qsnothr
         sec
         lda ALPHALO,y
         sbc SCORE               ; SCORE still holds the stand-pat eval
-        sta DELTATL,y
+        sta T0
         lda ALPHAHI,y
         sbc SCORE+1
-        sta DELTATH,y
+        tax
         sec
-        lda DELTATL,y
+        lda T0
         sbc #<200               ; margin
-        sta DELTATL,y
-        lda DELTATH,y
-        sbc #>200
-        sta DELTATH,y
-        jmp snode               ; qs nodes skip sprep (no null/futility)
-qsnodelta:
-        lda #0                  ; low phase: no delta pruning (-32768)
-        sta DELTATL,y
-        lda #$80
-        sta DELTATH,y
-        jmp snode
+        sta T0
+        txa
+        sbc #>200               ; A:T0 = T (hi:lo)
+        bmi qsnothr             ; T < 0: every capture passes
+        sta T1
+        ldx #$00                ; T <= VV[pawn]=100: everything passes
+        lda T0
+        cmp #<101
+        lda T1
+        sbc #>101
+        bcc qsthr
+        ldx #$20                ; T <= 320: knight victims and up
+        lda T0
+        cmp #<321
+        lda T1
+        sbc #>321
+        bcc qsthr
+        ldx #$30                ; T <= 330: bishop victims and up
+        lda T0
+        cmp #<331
+        lda T1
+        sbc #>331
+        bcc qsthr
+        ldx #$40                ; T <= 500: rook victims and up
+        lda T0
+        cmp #<501
+        lda T1
+        sbc #>501
+        bcc qsthr
+        ldx #$50                ; T <= 975: queen/king victims only
+        lda T0
+        cmp #<976
+        lda T1
+        sbc #>976
+        bcc qsthr
+        ldx #$60                ; T <= 20000: pseudo-legal king capture only
+        lda T0
+        cmp #<20001
+        lda T1
+        sbc #>20001
+        bcc qsthr
+        ldx #$70                ; T > 20000: nothing passes (as before:
+qsthr:  txa                     ;  even the king row's 20000 fails then)
+        sta THRT,y
+        lda #0
+        sta SMODE,y
+        jmp snodeq              ; qs nodes skip sprep (no null/futility)
+qsraise:
+        lda SCORE               ; stand pat raised alpha: ALPHA = SCORE, so
+        sta ALPHALO,y           ;  T = -200 < 0: every capture passes
+        lda SCORE+1
+        sta ALPHAHI,y
+qsnothr:
+        lda #0                  ; no delta pruning: tier threshold 0
+        sta THRT,y
+        sta SMODE,y
+        jmp snodeq
 
 ; ---------------------------------------------------------------
 ; sprep: full-width-node pruning, before move generation.
@@ -403,11 +452,18 @@ sprep:  ldy PLY
         jsr eval
         ; improving (FT2_IMPROV): capture the null-gate static eval as this
         ; ply's recorded eval (full-signal reuses natural evals; improving.go
-        ; records it via eval()). Kept out of eval() to leave the qs path free.
+        ; records it via eval()). Kept out of eval() to leave the qs path
+        ; free; inlined here (deep opt r4) instead of a jsr everec.
         lda FEATURES2
         and #FT2_IMPROV
         beq nonrec1
-        jsr everec
+        ldy PLY
+        lda SCORE
+        sta EVALSTKL,y
+        lda SCORE+1
+        sta EVALSTKH,y
+        lda #1
+        sta EVALVALID
 nonrec1:
         ldy PLY
         sec
@@ -463,7 +519,7 @@ snonullj:
         sbc BETAHI,y
         bvc :+
         eor #$80
-:       bmi snonull             ; below beta: search normally
+:       bmi snullf              ; below beta: search normally
 nullcut:
         lda BETALO,y            ; null cutoff: fail hard
         sta SCORE
@@ -480,6 +536,11 @@ nullcut:
         lda #TT_LOWER
         jsr ttstore
         rts
+snullf: jmp snode               ; failed null: remaining >= 4, so RFP and
+                                ;  futility can never fire (their gate walk
+                                ;  is a pure no-op at that depth) and the
+                                ;  null-gate eval is already recorded for
+                                ;  improving — straight to the move loop.
 snonull:
         ; ---- RFP + futility: FT_FUTIL, remaining <= 2, and the window
         ; not inside a mate zone (static eval can't speak to mates)
@@ -518,11 +579,17 @@ rfpbok:
         bcs gskip
         jsr eval
         ; improving (FT2_IMPROV): capture the RFP static eval as this ply's
-        ; recorded eval (same reuse as the null gate).
+        ; recorded eval (same reuse as the null gate; inlined).
         lda FEATURES2
         and #FT2_IMPROV
         beq nonrec2
-        jsr everec
+        ldy PLY
+        lda SCORE
+        sta EVALSTKL,y
+        lda SCORE+1
+        sta EVALSTKH,y
+        lda #1
+        sta EVALVALID
 nonrec2:
         ldy PLY
         ; margin: 120 @ rem1, 500 @ rem2 (16-bit; 500 = $01F4). rem2 at
@@ -586,17 +653,24 @@ sprepj: ; full-signal improving (FT2_IMPROV): guarantee a static eval at this
         ; full-width node so the ply-2 comparison is available for this node's
         ; LMR and for descendants (improving.go forces one when no natural
         ; eval ran). Reached by every full-width node headed for the move loop
-        ; — the not-in-check paths fall through here, the in-check path jumps
-        ; here (it skips null/RFP). Skip when a natural eval already recorded
-        ; (EVALVALID set) so that eval is never charged twice.
+        ; except failed nulls (snullf: their eval is always recorded) — the
+        ; not-in-check paths fall through here, the in-check path jumps here
+        ; (it skips null/RFP). Skip when a natural eval already recorded
+        ; (EVALVALID set) so that eval is never charged twice. No recursion
+        ; can run between the EVALVALID write and this read, so the ZP flag
+        ; is safe. (EVALVALID is not re-set on the forced path: nothing reads
+        ; it again before the next node's init resets it.)
         lda FEATURES2
         and #FT2_IMPROV
         beq snodeg
-        ldy PLY
-        lda EVALVALID,y
+        lda EVALVALID
         bne snodeg
         jsr eval                ; forced full-signal eval (no natural one ran)
-        jsr everec              ; record it as this ply's static eval
+        ldy PLY                 ; record it as this ply's static eval
+        lda SCORE
+        sta EVALSTKL,y
+        lda SCORE+1
+        sta EVALSTKH,y
 snodeg: jmp snode
 
 ; makenull / unmakenull: pass the move. Only ep, the hash, the halfmove
@@ -669,10 +743,21 @@ unmakenull:
 ; -> 2 light captures -> 3 killer quiets -> 4 remaining quiets; qs
 ; and futility nodes stop after pass 2.
 ; ---------------------------------------------------------------
-snode:  jsr gennode             ; CURPTR = base, SENDL/H = end
+snodeq: jsr gennodeq            ; qs capture node: no TT pass
         ldy PLY
-        lda QSKIND,y
-        bne stop1               ; qs capture node: no TT pass
+        lda CURPTR              ; empty capture list (common for qs):
+        cmp SENDL               ;  straight to the alpha return instead
+        bne stop1               ;  of two no-op pass scans (deep opt r4)
+        lda CURPTR+1
+        cmp SENDH
+        bne stop1
+        jmp sdone
+stop1:  lda #1
+        sta PASSNO,y
+        ldy #0
+        beq p1loop              ; always
+snode:  jsr gennodef            ; CURPTR = base, SENDL/H = end
+        ldy PLY
         lda TTFROMA,y
         cmp #NOSQ
         beq stop1
@@ -682,10 +767,6 @@ snode:  jsr gennode             ; CURPTR = base, SENDL/H = end
         lda #0
         sta PASSNO,y
         beq p0loopj             ; always
-stop1:  lda #1
-        sta PASSNO,y
-        ldy #0
-        beq p1loop              ; always
 p0loopj:
         jmp p0loop
 
@@ -715,15 +796,10 @@ p1go:   lda (CURPTR),y          ; tier byte
         sta MVFLAGS
         and #FL_PROMO
         bne p1promo
-        ldy PLY                 ; delta filter: victim value vs threshold
-        sec
-        lda VV16L,x
-        sbc DELTATL,y
-        lda VV16H,x
-        sbc DELTATH,y
-        bvc :+
-        eor #$80
-:       bpl sload               ; victim value >= threshold: search it
+        ldy PLY                 ; delta filter: one unsigned tier compare
+        txa                     ;  (X = tier = victimtype<<4 | class)
+        cmp THRT,y
+        bcs sload               ; tier >= threshold: search it
 p1rej:  ldy #0
         beq p1next              ; always
 p1promo:
@@ -774,15 +850,10 @@ p2go:   lda (CURPTR),y          ; tier byte
         ldy #3
         lda (CURPTR),y
         sta MVFLAGS
-        ldy PLY                 ; delta filter
-        sec
-        lda VV16L,x
-        sbc DELTATL,y
-        lda VV16H,x
-        sbc DELTATH,y
-        bvc :+
-        eor #$80
-:       bpl sload
+        ldy PLY                 ; delta filter: one unsigned tier compare
+        txa
+        cmp THRT,y
+        bcs sload
         ldy #0
         beq p2next              ; always
 p2done: ldy PLY
@@ -911,6 +982,9 @@ p3hit:  ldy #1                  ; a killer: load the move and search it
         iny
         lda (CURPTR),y
         sta MVFLAGS
+        lda #0                  ; consume: zero the tier so pass 4 skips it
+        tay                     ;  like the TT move — no killer compares (or
+        sta (CURPTR),y          ;  killer ZP mirrors) needed there (r4)
         jmp sgo
 p3done: ldy PLY                 ; -> final quiet pass
         lda #4
@@ -919,51 +993,13 @@ p3done: ldy PLY                 ; -> final quiet pass
         sta CURPTR
         lda PLYBASEHI,y
         sta CURPTR+1
-        jmp p4loop
-
-; ---- pass 4: remaining quiets (killers already searched) ----
-p4page: inc CURPTR+1
-        jmp p4loop
-p4next: lda CURPTR
-        clc
-        adc #4
-        sta CURPTR
-        bcs p4page
-p4loop: lda CURPTR
-        cmp SENDL
-        bne p4go
-        lda CURPTR+1
-        cmp SENDH
-        beq sdonej
-p4go:   ldy #0
-        lda (CURPTR),y
-        cmp #$04
-        bne p4next
-        iny
-        lda (CURPTR),y
-        sta FROM
-        iny
-        lda (CURPTR),y
-        sta TO
-        lda FROM
-        cmp KF1
-        bne p4k2
-        lda TO
-        cmp KT1
-        beq p4next              ; killer 1: searched in pass 3
-p4k2:   lda FROM
-        cmp KF2
-        bne p4hit
-        lda TO
-        cmp KT2
-        beq p4next              ; killer 2: searched in pass 3
-p4hit:  ldy #3
-        lda (CURPTR),y
-        sta MVFLAGS
-        jmp sgo
+        jmp p4nk
 sdonej: jmp sdone
 
-; ---- pass 4 variant when FT_KILLER is off: every quiet ----
+; ---- pass 4: every remaining quiet (tier $04). Killers-on nodes reach
+; here after pass 3 CONSUMED its killers (tier zeroed), so one loop
+; serves both FT_KILLER settings — the old by-value killer-exclusion
+; copy is gone (deep opt r4). ----
 p4nkpg: inc CURPTR+1
         jmp p4nk
 p4nknx: lda CURPTR
@@ -1019,7 +1055,9 @@ srp0:   lda TTFROMA,y           ; pass 0: refresh the TT-move mirrors
         lda TTTOA,y
         sta TTT0
         jmp p0loop
-srp34:  lda KILLER1F,y          ; quiet passes: refresh killer mirrors
+srp34:  cpx #3
+        bne srp4                ; pass 4 reads no killer state at all
+        lda KILLER1F,y          ; pass 3: refresh the killer mirrors
         sta KF1
         lda KILLER1T,y
         sta KT1
@@ -1027,14 +1065,8 @@ srp34:  lda KILLER1F,y          ; quiet passes: refresh killer mirrors
         sta KF2
         lda KILLER2T,y
         sta KT2
-        cpx #3
-        beq srp3
-        lda FEATURES
-        and #FT_KILLER
-        beq srp4nk
-        jmp p4loop
-srp3:   jmp p3loop
-srp4nk: jmp p4nk
+        jmp p3loop
+srp4:   jmp p4nk
 
 ; sgo: search the move at CURPTR (FROM/TO/MVFLAGS loaded): advance
 ; the cursor past it and persist for sloopret/setmove4, then make.
@@ -1103,12 +1135,15 @@ slegal: ldy PLY                 ; PLY = child here
         ; by 1/2. The first legal move always gets the full window;
         ; reductions only for late quiets (pass 4), never in check,
         ; never for checking moves, remaining >= 3.
+        ; QS capture nodes take none of this: SMODE[ply] was preset to 0
+        ; at qs node entry (qsdelta), so they skip straight to the child
+        ; search (deep opt r4).
+        lda QSKIND,y
+        bne sqgo
         ldx #0
         lda FEATURES
         and #FT_LMR
         beq smset
-        lda QSKIND,y
-        bne smset               ; qs capture nodes: full window
         lda LEGALCNT,y
         cmp #2
         bcc smset               ; first legal move: the PV move
@@ -1125,14 +1160,13 @@ slegal: ldy PLY                 ; PLY = child here
         lda LEGALCNT,y
         cmp #4
         bcc smset               ; late: >= 3 moves already searched
-        sty T2
-        lda MAXDEPTH
-        sec
-        sbc T2                  ; remaining depth at this node
-        cmp #3
-        bcc smset               ; too shallow to reduce
+        lda MAXDEPTH            ; ZP PLY is the CHILD ply here (Y = PLY-1),
+        sec                     ;  so MAXDEPTH-PLY = remaining-1: compare
+        sbc PLY                 ;  one lower and skip the T2 staging (r4)
+        cmp #2
+        bcc smset               ; remaining < 3: too shallow to reduce
         ldx #2                  ; reduce by 1
-        cmp #5
+        cmp #4
         bcc smimp
         lda LEGALCNT,y
         cmp #7
@@ -1144,64 +1178,48 @@ smimp:  ; improving heuristic (FT2_IMPROV): a late quiet at a NOT-improving
         ; (X < 2) branch straight to smset and execute nothing new. Y = this
         ; node's ply (>= 1; the root already branched to smset above).
         ; "improving" = EVALSTK[ply] > EVALSTK[ply-2] (full-signal guarantees
-        ; both are recorded at full-width nodes).
+        ; both are recorded at full-width nodes). The ply-2 entry is read
+        ; through the assembled base address (EVALSTK*-2,y), so X keeps the
+        ; reduction mode and no scratch save/restore is needed (deep opt r4).
         lda FEATURES2
         and #FT2_IMPROV
         beq smset
         cpy #2
         bcc smset               ; ply < 2: permissive default (assume improving)
-        stx T2                  ; save reduction mode (T2 dead until ssearch)
-        tya
-        sec
-        sbc #2
-        tax                     ; X = ply-2 (EVALSTK index; Y stays = ply)
         sec                     ; signed compare EVALSTK[ply-2] - EVALSTK[ply]
-        lda EVALSTKL,x
+        lda EVALSTKL-2,y
         sbc EVALSTKL,y
-        lda EVALSTKH,x
+        lda EVALSTKH-2,y
         sbc EVALSTKH,y
         bvc :+
         eor #$80
-:       bmi smimpok             ; < 0: EVALSTK[ply-2] < EVALSTK[ply] => improving
-        ldx T2                  ; NOT improving: restore mode, add one ply
-        inx
-        bne smset               ; always (X = 3 or 4, nonzero)
-smimpok:
-        ldx T2                  ; improving: restore mode unchanged
+:       bmi smset               ; < 0: EVALSTK[ply-2] < EVALSTK[ply] => improving
+        inx                     ; NOT improving: add one reduction ply (X = 3/4)
 smset:  txa
         sta SMODE,y
-        iny
+sqgo:   iny
 ssearch:                        ; (re)search entry; Y = child ply
         ; child window: BETA[c] = -ALPHA[p] always; ALPHA[c] is
-        ; -BETA[p] (full window) or BETA[c] - 1 (zero-window scout)
+        ; -BETA[p] (full window) or BETA[c] - 1 = NOT ALPHA[p] (scout:
+        ; -x - 1 is the one's complement, so no carry chain and no
+        ; T0/T1 staging — deep opt r4)
         sec
         lda #0
         sbc ALPHALO-1,y
         sta BETALO,y
-        sta T0
         lda #0
         sbc ALPHAHI-1,y
         sta BETAHI,y
-        sta T1
         lda SMODE-1,y
         beq swfull
-        sec
-        lda T0
-        sbc #1
+        tax                     ; X = mode (>= 1: scout or reduced scout)
+        lda ALPHALO-1,y
+        eor #$FF
         sta ALPHALO,y
-        lda T1
-        sbc #0
+        lda ALPHAHI-1,y
+        eor #$FF
         sta ALPHAHI,y
-        jmp swgo
-swfull: sec
-        lda #0
-        sbc BETALO-1,y
-        sta ALPHALO,y
-        lda #0
-        sbc BETAHI-1,y
-        sta ALPHAHI,y
-swgo:   lda SMODE-1,y
-        cmp #2
+        cpx #2
         bcc snored
         lda MAXDEPTH            ; reduced scout: shrink the horizon
         pha                     ;  for the subtree by mode-1 plies
@@ -1214,28 +1232,41 @@ swgo:   lda SMODE-1,y
         pla
         sta MAXDEPTH
         jmp spostsr
+swfull: sec                     ; full window: ALPHA[c] = -BETA[p]
+        lda #0
+        sbc BETALO-1,y
+        sta ALPHALO,y
+        lda #0
+        sbc BETAHI-1,y
+        sta ALPHAHI,y
 snored: jsr search
 spostsr:
-        sec                     ; SCORE = -SCORE
-        lda #0
+        jsr unmake
+        ; scout results: a fail-high zero-window score is not final
+        ldy PLY
+        lda SMODE,y
+        beq snegf               ; full-window result: negate, then final
+        ; scout: fail high iff -SCORE > ALPHA, i.e. ALPHA + SCORE < 0 —
+        ; tested on the RAW child score, so a failed-low scout (the
+        ; common outcome) skips the 16-bit negate entirely (deep opt r4)
+        clc
+        lda ALPHALO,y
+        adc SCORE
+        lda ALPHAHI,y
+        adc SCORE+1
+        bvc :+
+        eor #$80
+:       bmi :+                  ; sum < 0: the scout failed high
+        jmp sloopret            ; failed low: SCORE <= ALPHA < BETA, so the
+                                ;  beta-cutoff and alpha-raise tests below
+                                ;  are provably no-ops — next move (r4)
+:       sec                     ; fail high: now negate for the demote /
+        lda #0                  ;  zero-window-final paths
         sbc SCORE
         sta SCORE
         lda #0
         sbc SCORE+1
         sta SCORE+1
-        jsr unmake
-        ; scout results: a fail-high zero-window score is not final
-        ldy PLY
-        lda SMODE,y
-        beq scheckbc            ; full-window result: final
-        sec                     ; fail high iff SCORE > ALPHA (strict)
-        lda ALPHALO,y
-        sbc SCORE
-        lda ALPHAHI,y
-        sbc SCORE+1
-        bvc :+
-        eor #$80
-:       bpl scheckbc            ; ALPHA >= SCORE: scout failed low
         lda SMODE,y
         cmp #2
         bcs sdemote1            ; reduced: retry unreduced, zero window
@@ -1252,7 +1283,9 @@ spostsr:
         lda T0
         cmp #2
         bcs sdemote0
-        bcc scheckbc            ; always (zero-window node)
+        bcc scut                ; always (zero-window node: SCORE > ALPHA
+                                ;  = BETA-1 means SCORE >= BETA, so the
+                                ;  beta test is a proven cutoff — r4)
 sdemote1:
         lda #1
         bne :+                  ; always
@@ -1280,6 +1313,13 @@ sdemote0:
         jsr make
         ldy PLY
         jmp ssearch
+snegf:  sec                     ; SCORE = -SCORE (full-window result)
+        lda #0
+        sbc SCORE
+        sta SCORE
+        lda #0
+        sbc SCORE+1
+        sta SCORE+1
 scheckbc:
         ; beta cutoff?
         sec
@@ -1290,7 +1330,7 @@ scheckbc:
         bvc :+
         eor #$80
 :       bmi snocut              ; SCORE < BETA
-        lda BETALO,y            ; fail-hard: return BETA
+scut:   lda BETALO,y            ; fail-hard: return BETA
         sta SCORE
         lda BETAHI,y
         sta SCORE+1
@@ -1398,8 +1438,7 @@ sterm:  lda #NOSQ               ; TT: exact, no move
         lda #TT_EXACT
         jsr ttstore
         jmp spop
-sret:   ldy PLY
-        lda ALPHALO,y
+sret:   lda ALPHALO,y           ; (Y = PLY from sdone)
         sta SCORE
         lda ALPHAHI,y
         sta SCORE+1
@@ -1418,8 +1457,7 @@ sret:   ldy PLY
         lda #TT_EXACT
 :       jsr ttstore
         jmp spop
-sretqs: ldy PLY
-        lda ALPHALO,y
+sretqs: lda ALPHALO,y           ; (Y = PLY from sdone)
         sta SCORE
         lda ALPHAHI,y
         sta SCORE+1
@@ -1456,7 +1494,10 @@ setmove4:
 ; TIERTAB: victim piece byte -> move tier (victimtype<<4 | class).
 ; Only the low 3 type bits matter (0 = empty square -> quiet); heavy
 ; class 1 for victims >= rook, light class 2 below. A pseudo-legal
-; king "capture" must always be searched, hence its huge VV16 value.
+; king "capture" must always be searched: its victim type (6) tops the
+; tier ordering, so it clears every reachable THRT threshold.
+; (The old VV16L/VV16H victim-value rows are gone — the delta filter
+; compares tier bytes directly against THRT, deep opt r4.)
         .align 256
 TIERTAB:
 .repeat 32
@@ -1465,35 +1506,5 @@ TIERTAB:
         .byte (ROOK<<4)|1, (QUEEN<<4)|1, (KING<<4)|1
         .byte $04                       ; type 7: never occurs
 .endrepeat
-
-; VV16L/VV16H: victim value for delta pruning, indexed by the full
-; tier byte (row = victimtype, 16 bytes per row; promotions bypass
-; the filter, so row 0 is never consulted).
-.macro VROW val
-.repeat 16
-        .byte <(val)
-.endrepeat
-.endmacro
-.macro VROWH val
-.repeat 16
-        .byte >(val)
-.endrepeat
-.endmacro
-VV16L:
-        VROW 0
-        VROW 100
-        VROW 320
-        VROW 330
-        VROW 500
-        VROW 975
-        VROW 20000
-VV16H:
-        VROWH 0
-        VROWH 100
-        VROWH 320
-        VROWH 330
-        VROWH 500
-        VROWH 975
-        VROWH 20000
 
         .segment "CODE"

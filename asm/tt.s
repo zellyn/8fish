@@ -11,12 +11,13 @@
 ; mates), +7 depth<<2 | bound; bound 0 marks an empty entry.
 
 ; ---------------------------------------------------------------
-; ttaddr: TTPTR = TTBASE + (12-bit index from HASH0/HASH1) * 8.
+; ttaddr (as a macro, inlined into ttprobe and ttstore - deep opt r4):
+; TTPTR = TTBASE + (12-bit index from HASH0/HASH1) * 8.
 ; Table-driven: TTHITAB fills bits 3-6, SHR5TAB bits 0-2 (disjoint,
 ; so ora); the final +>TTBASE must stay adc (base $02 overlaps).
 ; Clobbers A,X,Y.
 ; ---------------------------------------------------------------
-ttaddr:
+.macro TTADDR
         ldx HASH0
         lda SHL3TAB,x
         sta TTPTR
@@ -26,7 +27,7 @@ ttaddr:
         clc
         adc #>TTBASE
         sta TTPTR+1
-        rts
+.endmacro
 
 ; ---------------------------------------------------------------
 ; ttprobe: carry set = hit; TTENTRY+3..7 holds the entry, mate scores
@@ -36,7 +37,7 @@ ttaddr:
 ; written on the probe path; ttstore rebuilds them from HASH1..3).
 ; ---------------------------------------------------------------
 ttprobe:
-        jsr ttaddr
+        TTADDR
         jsr ttfetch             ; LC-resident: verify + copy, cc = miss
         bcs :+
         rts                     ; carry clear: miss
@@ -116,7 +117,7 @@ tsgo:   lda HASH1
         sta TTENTRY+1
         lda HASH3
         sta TTENTRY+2
-        jsr ttaddr
+        TTADDR
         sta $C005               ; RAMWRT on: stores land in aux
         ; unrolled: entries are 8-aligned, (TTPTR),y never crosses
         ldy #7

@@ -1,0 +1,548 @@
+package chesstest
+
+import (
+	"fmt"
+	"sort"
+	"testing"
+)
+
+// Deep optimization review round 4, board cluster: diagnostics.
+//
+// TestBoardClusterShare: cycle share of the board cluster (board.s:
+// attacked/make/unmake/castle helpers/hashcatchup + tt.s) on the
+// adopted config (FEATURES 0x1F + FEATURES2 0x01), MicroAB suite.
+//
+// TestMicroABAdopted: MicroAB-style fingerprint at the adopted config
+// (0x1F + FT2_IMPROV), for tree-identity capture before/after.
+//
+// TestAttackSlotOrder: taps every attacked() call's operands and
+// evaluates candidate slot-scan orderings + the reverse-attack-table
+// (RATT) slot filter on the true operand distribution.
+
+var board4Fens = []string{
+	"r1b1k2r/ppp2ppp/2nqpn2/3p4/3P4/P1P1BN2/2P1PPPP/2RQKB1R w Kkq - 2 8",
+	"r2q1rk1/pp1nbppp/2p1pn2/3p2B1/2PP4/2N1PN2/PPQ2PPP/R3KB1R w KQ - 6 8",
+	"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+	"r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+	"8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+	"2rq1rk1/pp1bppbp/2np1np1/8/3NP3/2N1BP2/PPPQ2PP/2KR1B1R w - - 0 11",
+}
+
+func TestBoardClusterShare(t *testing.T) {
+	if testing.Short() {
+		t.Skip("diagnostic: run explicitly")
+	}
+	bin := loadEngine(t)
+	labels, err := ParseLabelFile("../../asm/engine.lbl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cluster address ranges: board.s spans [TYPEATKTAB, emitmove)
+	// (movegen.s follows board.s in engine.s include order); tt.s CODE
+	// spans [ttprobe, addpiece) (eval.s follows tt.s; ttaddr was
+	// inlined in r4); ttfetch lives in the LC segment on its own.
+	type rng struct {
+		name     string
+		lo, hi   uint16
+		lolabel  string
+		hilabel  string
+	}
+	mk := func(name, lo, hi string) rng {
+		l, ok1 := labels[lo]
+		h, ok2 := labels[hi]
+		if !ok1 || !ok2 {
+			t.Fatalf("missing labels %s/%s", lo, hi)
+		}
+		return rng{name, l, h, lo, hi}
+	}
+	ranges := []rng{
+		mk("attacked", "TYPEATKTAB", "make"),
+		mk("make", "make", "castlerook"),
+		mk("castle/hashcatch", "castlerook", "unmake"),
+		mk("unmake", "unmake", "emitmove"),
+		mk("tt(main)", "ttprobe", "addpiece"),
+		{"ttfetch(LC)", labels["ttfetch"], labels["ttfetch"] + 0x60, "ttfetch", "+60"},
+	}
+	var grand uint64
+	sums := make([]uint64, len(ranges))
+	for _, fen := range board4Fens {
+		pos, err := ParseFEN(fen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := NewMachine(bin, defs, pos, 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		SetFeatures(m, defs, 0x1F)
+		SetFeatures2(m, defs, 0x01)
+		SetBudget(m, defs, 0, 6)
+		m.Mem.Main[defs["HALFMOVE"]] = pos.Halfmove
+		exited, code, p, err := RunProfiled(m, defs, 400_000_000_000)
+		if err != nil || !exited || code > 2 {
+			t.Fatalf("exited=%v code=%d err=%v", exited, code, err)
+		}
+		grand += p.Total
+		for i, r := range ranges {
+			for pc := uint32(r.lo); pc < uint32(r.hi); pc++ {
+				sums[i] += p.PCCycles[pc]
+			}
+		}
+	}
+	var cluster uint64
+	for i, r := range ranges {
+		cluster += sums[i]
+		t.Logf("%-18s [%04x,%04x) %12d  %5.2f%%", r.name, r.lo, r.hi, sums[i],
+			100*float64(sums[i])/float64(grand))
+	}
+	t.Logf("CLUSTER TOTAL %d of %d = %.2f%%", cluster, grand,
+		100*float64(cluster)/float64(grand))
+}
+
+// TestBoardClusterFine: per-sublabel cycle breakdown inside the board
+// cluster (adopted config), to aim further shaves.
+func TestBoardClusterFine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("diagnostic: run explicitly")
+	}
+	bin := loadEngine(t)
+	labels, err := ParseLabelFile("../../asm/engine.lbl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg := &Profile{PCCycles: make([]uint64, 65536)}
+	for _, fen := range board4Fens {
+		pos, err := ParseFEN(fen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := NewMachine(bin, defs, pos, 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		SetFeatures(m, defs, 0x1F)
+		SetFeatures2(m, defs, 0x01)
+		SetBudget(m, defs, 0, 6)
+		m.Mem.Main[defs["HALFMOVE"]] = pos.Halfmove
+		exited, code, p, err := RunProfiled(m, defs, 400_000_000_000)
+		if err != nil || !exited || code > 2 {
+			t.Fatalf("exited=%v code=%d err=%v", exited, code, err)
+		}
+		agg.Total += p.Total
+		for pc, c := range p.PCCycles {
+			agg.PCCycles[pc] += c
+		}
+	}
+	lo, hi := labels["TYPEATKTAB"], labels["emitmove"]
+	for _, r := range agg.ByRoutine(labels) {
+		addr, ok := labels[r.Name]
+		if !ok || ((addr < lo || addr >= hi) && r.Name != "ttprobe" && r.Name != "ttstore" && r.Name != "ttfetch") {
+			continue
+		}
+		if r.Cycles*10000/agg.Total < 2 {
+			continue
+		}
+		t.Logf("%-14s %10d  %5.2f%%", r.Name, r.Cycles, 100*float64(r.Cycles)/float64(agg.Total))
+	}
+}
+
+func TestMicroABAdopted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("diagnostic: run explicitly")
+	}
+	bin := loadEngine(t)
+	labels, err := ParseLabelFile("../../asm/engine.lbl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type probe struct {
+		name string
+		addr uint16
+	}
+	probes := []probe{
+		{"search", labels["search"]},
+		{"make", labels["make"]},
+		{"eval", labels["eval"]},
+		{"attacked", labels["attacked"]},
+		{"ttprobe", labels["ttprobe"]},
+		{"generate", labels["generate"]},
+	}
+	var grand uint64
+	for _, fen := range board4Fens {
+		pos, err := ParseFEN(fen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := NewMachine(bin, defs, pos, 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		SetFeatures(m, defs, 0x1F)
+		SetFeatures2(m, defs, 0x01)
+		SetBudget(m, defs, 0, 6)
+		m.Mem.Main[defs["HALFMOVE"]] = pos.Halfmove
+		counts := make([]uint64, len(probes))
+		exited, code, err := m.RunProfile(400_000_000_000, func(pc uint16, cycles uint8) {
+			for i := range probes {
+				if pc == probes[i].addr {
+					counts[i]++
+				}
+			}
+		})
+		if err != nil || !exited || code > 2 {
+			t.Fatalf("fen=%q exited=%v code=%d err=%v", fen, exited, code, err)
+		}
+		score := int16(uint16(m.Mem.Main[defs["SCORE"]]) | uint16(m.Mem.Main[defs["SCORE"]+1])<<8)
+		bf, bt, bfl := m.Mem.Main[defs["BESTFROM"]], m.Mem.Main[defs["BESTTO"]], m.Mem.Main[defs["BESTFLAGS"]]
+		grand += m.Cycles
+		line := fmt.Sprintf("adopt %-24s sc=%6d mv=%s cyc=%10d |", fen[:24], score, MoveUCI(bf, bt, bfl), m.Cycles)
+		for i := range probes {
+			line += fmt.Sprintf(" %s=%d", probes[i].name, counts[i])
+		}
+		t.Log(line)
+	}
+	t.Logf("ADOPTED GRAND TOTAL CYCLES: %d", grand)
+}
+
+// TestRATTackTable proves the reversed attack table RATTACK (board.s,
+// generated by closed-form geometry) matches the engine's own
+// gentables-generated ATTACKTAB byte-for-byte under reversal, with a
+// zero tombstone tail. Runs in the short suite: it is the correctness
+// anchor for attacked()'s r4 slot filter.
+func TestRATTackTable(t *testing.T) {
+	bin := loadEngine(t)
+	labels, err := ParseLabelFile("../../asm/engine.lbl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ratt, ok := labels["RATTACK"]
+	if !ok {
+		t.Fatal("RATTACK label missing")
+	}
+	att, ok := labels["ATTACKTAB"]
+	if !ok {
+		t.Fatal("ATTACKTAB label missing")
+	}
+	if ratt&0xFF != 0 {
+		t.Fatalf("RATTACK not page-aligned: %04x", ratt)
+	}
+	pos, err := ParseFEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewMachine(bin, defs, pos, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for j := 0; j <= 0xEE; j++ {
+		want := m.Mem.Main[att+uint16(0xEE-j)]
+		got := m.Mem.Main[ratt+uint16(j)]
+		if got != want {
+			t.Errorf("RATTACK[%02x] = %02x, want ATTACKTAB[%02x] = %02x", j, got, 0xEE-j, want)
+		}
+	}
+	for j := 0xEF; j <= 0x176; j++ {
+		if got := m.Mem.Main[ratt+uint16(j)]; got != 0 {
+			t.Errorf("RATTACK[%02x] = %02x, want zero tail", j, got)
+		}
+	}
+}
+
+// attackOp is one tapped attacked() call: operands + which slots
+// (0-15 within the attacking side's half) attack ATSQ.
+type attackOp struct {
+	atsq, atside byte
+	psq          [16]byte
+	board        [128]byte
+	attackers    uint16 // bit i: slot i attacks atsq
+	tombs        uint16 // bit i: slot i is NOSQ
+}
+
+// board4Heldout: positions NOT in the bench/MicroAB suite, used to
+// validate that a slot-scan ordering fitted on the bench distribution
+// generalizes (guards against overfitting the bench FENs).
+var board4Heldout = []string{
+	"2rr3k/pp3pp1/1nnqbN1p/3pN3/2pP4/2P3Q1/PPB4P/R4RK1 w - - 0 1",
+	"8/7p/5k2/5p2/p1p2P2/Pr1pPK2/1P1R3P/8 b - - 0 1",
+	"r1bq2rk/pp3pbp/2p1p1pQ/7P/3P4/2PB1N2/PP3PPR/2KR4 w - - 0 1",
+	"4k1r1/2p3r1/1pR1p3/3pP2p/3P2qP/P4N2/1PQ4P/5RK1 b - - 0 1",
+	"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+	"2br2k1/2q3rn/p2NppQ1/2p1P3/Pp5R/4P3/1P3PPP/3R2K1 w - - 0 1",
+}
+
+func tapAttackOps(t *testing.T, fens []string) []attackOp {
+	bin := loadEngine(t)
+	labels, err := ParseLabelFile("../../asm/engine.lbl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attackedAddr := labels["attacked"]
+	atsqA, atsideA := defs["ATSQ"], defs["ATSIDE"]
+	boardA, psqA := defs["BOARD"], defs["PIECESQ"]
+	var ops []attackOp
+	for _, fen := range fens {
+		pos, err := ParseFEN(fen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := NewMachine(bin, defs, pos, 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		SetBudget(m, defs, 0, 5)
+		m.Mem.Main[defs["HALFMOVE"]] = pos.Halfmove
+		exited, code, err := m.RunProfile(400_000_000_000, func(pc uint16, cycles uint8) {
+			if pc != attackedAddr {
+				return
+			}
+			var op attackOp
+			op.atsq = m.Mem.Main[atsqA]
+			op.atside = m.Mem.Main[atsideA]
+			half := uint16(op.atside) << 1
+			for i := 0; i < 128; i++ {
+				op.board[i] = m.Mem.Main[boardA+uint16(i)]
+			}
+			board := func(sq byte) byte { return op.board[sq&0x7F] }
+			for i := 0; i < 16; i++ {
+				op.psq[i] = m.Mem.Main[psqA+half+uint16(i)]
+				if op.psq[i] == 0xFF {
+					op.tombs |= 1 << i
+				} else if slotAttacks(op.atsq, op.psq[i], board) {
+					op.attackers |= 1 << i
+				}
+			}
+			ops = append(ops, op)
+		})
+		if err != nil || !exited || code > 2 {
+			t.Fatalf("exited=%v code=%d err=%v", exited, code, err)
+		}
+	}
+	return ops
+}
+
+// slotAttacks: does the piece on `from` attack atsq? (Same geometry the
+// asm uses: ATTACKTAB bits + TYPEATK2 + blocker walk.)
+func slotAttacks(atsq, from byte, board func(byte) byte) bool {
+	diff := atsq - from + 0x77
+	bits := attackTabGo[diff]
+	if bits == 0 {
+		return false
+	}
+	pieceAtk := typeAtk2Go[board(from)&0x0F] & bits
+	if pieceAtk == 0 {
+		return false
+	}
+	if pieceAtk < 0x04 || pieceAtk >= 0x10 {
+		return true
+	}
+	delta := deltaTabGo[diff]
+	for sq := from + delta; sq != atsq; sq += delta {
+		if board(sq) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// costRATT models the RATT-filter attacked() body for a given static
+// slot scan order: per slot ldy PIECESQ+n(4) + lda (P2),y (5 live /
+// 6 tomb) + beq(3 skip / 2 enter geo). Geometric relations re-use the
+// existing atgeo tail (same interior costs as modelB from
+// attackdist_test.go); this model prices only order-dependent parts
+// exactly and uses modelB's atgeo pricing for the rest.
+func costRATT(op attackOp, order []int, board func(byte) byte) uint64 {
+	cyc := uint64(30) // entry: side branch + P2 lo/hi + X=ATSQ+$77
+	for _, slot := range order {
+		from := op.psq[slot]
+		if op.tombs&(1<<slot) != 0 {
+			cyc += 4 + 6 + 3 // tomb: RATT page-crossed read, zero
+			continue
+		}
+		diff := op.atsq - from + 0x77
+		bits := attackTabGo[diff]
+		if bits == 0 {
+			cyc += 4 + 5 + 3
+			continue
+		}
+		// geometric relation: enter atgeo
+		cyc += 4 + 5 + 2 + 6      // ldy, lda, beq nt, jsr
+		cyc += 16                 // atgeo prefix (sta/sty/txa/sec/sbc/sta)
+		cyc += 4 + 2 + 2 + 4 + 3 // lda BOARD,y; and; tay; lda TYPEATK2; and
+		pieceAtk := typeAtk2Go[board(from)&0x0F] & bits
+		if pieceAtk == 0 {
+			cyc += 3 + 2 + 6 + 3 // beq miss, clc, rts, bcc taken
+			continue
+		}
+		cyc += 2 + 2 // beq nt, cmp
+		hit := false
+		if pieceAtk < 0x04 {
+			cyc += 3 + 2 + 6
+			hit = true
+		} else {
+			cyc += 2 + 2
+			if pieceAtk >= 0x10 {
+				cyc += 3 + 2 + 6
+				hit = true
+			} else {
+				cyc += 2 + 3 + 4 + 3 + 3
+				delta := deltaTabGo[diff]
+				sq := from
+				for {
+					sq += delta
+					cyc += 2 + 3 + 3
+					if sq == op.atsq {
+						cyc += 3 + 2 + 6
+						hit = true
+						break
+					}
+					cyc += 2 + 2 + 4
+					if board(sq) != 0 {
+						cyc += 3 + 2 + 6
+						break
+					}
+					cyc += 2 + 2 + 3
+				}
+			}
+		}
+		if hit {
+			cyc += 2 + 6 // bcc nt, rts to caller
+			return cyc
+		}
+		cyc += 3 // bcc taken to next slot
+	}
+	return cyc + 2 + 6 // miss: clc, rts
+}
+
+// slotFreq: per-side slot attack frequency over a tap.
+func slotFreq(ops []attackOp) (freq [2][16]uint64, hits uint64) {
+	for _, op := range ops {
+		side := 0
+		if op.atside != 0 {
+			side = 1
+		}
+		if op.attackers != 0 {
+			hits++
+		}
+		for i := 0; i < 16; i++ {
+			if op.attackers&(1<<i) != 0 {
+				freq[side][i]++
+			}
+		}
+	}
+	return
+}
+
+func greedyOrders(freq [2][16]uint64) [2][]int {
+	var greedy [2][]int
+	for s := 0; s < 2; s++ {
+		idx := make([]int, 16)
+		for i := range idx {
+			idx[i] = i
+		}
+		f := freq[s]
+		sort.SliceStable(idx, func(a, b int) bool { return f[idx[a]] > f[idx[b]] })
+		greedy[s] = idx
+	}
+	return greedy
+}
+
+func priceOrders(t *testing.T, tag string, ops []attackOp, cands map[string][2][]int) {
+	var cur uint64
+	sums := map[string]uint64{}
+	for i := range ops {
+		op := &ops[i]
+		board := func(sq byte) byte { return op.board[sq&0x7F] }
+		b, _, _ := modelB(op.atsq, op.atside, op.psq, board)
+		cur += b
+		s := 0
+		if op.atside != 0 {
+			s = 1
+		}
+		for name, ord := range cands {
+			sums[name] += costRATT(*op, ord[s], board)
+		}
+	}
+	n := float64(len(ops))
+	t.Logf("[%s] modelB current impl: %.1f cyc/call over %d calls", tag, float64(cur)/n, len(ops))
+	names := make([]string, 0, len(cands))
+	for name := range cands {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		c := sums[name]
+		t.Logf("[%s] RATT %-12s %.1f cyc/call (%+.1f%%)", tag, name, float64(c)/n,
+			100*(float64(c)-float64(cur))/float64(cur))
+	}
+}
+
+// board4Corpus: a broader fitting corpus, disjoint from the MicroAB
+// bench FENs, spanning opening/middlegame/endgame — the slot-order fit
+// uses THIS set so the MicroAB numbers stay out-of-sample.
+var board4Corpus = []string{
+	"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+	"2rr3k/pp3pp1/1nnqbN1p/3pN3/2pP4/2P3Q1/PPB4P/R4RK1 w - - 0 1",
+	"8/7p/5k2/5p2/p1p2P2/Pr1pPK2/1P1R3P/8 b - - 0 1",
+	"r1bq2rk/pp3pbp/2p1p1pQ/7P/3P4/2PB1N2/PP3PPR/2KR4 w - - 0 1",
+	"5k2/6pp/p1qN4/1p1p4/3P4/2PKP2Q/PP3r2/3R4 b - - 0 1",
+	"r4q1k/p2bR1rp/2p2Q1N/5p2/5p2/2P5/PP3PPP/R5K1 w - - 0 1",
+	"2br2k1/2q3rn/p2NppQ1/2p1P3/Pp5R/4P3/1P3PPP/3R2K1 w - - 0 1",
+	"4k1r1/2p3r1/1pR1p3/3pP2p/3P2qP/P4N2/1PQ4P/5RK1 b - - 0 1",
+	"r1bqk2r/pp2bppp/2n1pn2/3p4/3P4/2NBPN2/PP3PPP/R1BQK2R w KQkq - 0 8",
+	"rnbq1rk1/ppp1ppbp/3p1np1/8/2PPP3/2N2N2/PP2BPPP/R1BQK2R w KQ - 0 6",
+	"8/8/4kpp1/3p1b2/p6P/2B5/6P1/6K1 b - - 2 47",
+	"8/3k4/1p1p1p2/pPpPpPp1/P1P1P1Pp/7P/4K3/8 w - - 0 1",
+	"r2qkb1r/pb1n1p2/2p1p2p/4P1pn/PppP4/2N1PNB1/1P2BPPP/R2Q1RK1 w kq - 0 13",
+	"6k1/5p2/6p1/8/7p/8/6PP/6K1 b - - 0 1",
+}
+
+func TestAttackSlotOrder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("diagnostic: run explicitly")
+	}
+	bench := tapAttackOps(t, board4Fens[:4])
+	held := tapAttackOps(t, board4Heldout)
+	t.Logf("tapped bench=%d heldout=%d attacked() calls", len(bench), len(held))
+
+	freqB, hitsB := slotFreq(bench)
+	freqH, hitsH := slotFreq(held)
+	t.Logf("hits bench=%.1f%% heldout=%.1f%%",
+		100*float64(hitsB)/float64(len(bench)), 100*float64(hitsH)/float64(len(held)))
+	for s := 0; s < 2; s++ {
+		t.Logf("side %d bench freq:   %v", s, freqB[s])
+		t.Logf("side %d heldout freq: %v", s, freqH[s])
+	}
+
+	descending := make([]int, 16)
+	ascending := make([]int, 16)
+	for i := 0; i < 16; i++ {
+		descending[i] = 15 - i
+		ascending[i] = i
+	}
+	// Principled "advance" order: white pieces are FEN-assigned from the
+	// highest rank down, so LOW white slots hold the advanced pieces —
+	// scan them first, king (slot 0) last. Black's advanced pieces get
+	// HIGH slots, so black keeps descending (king already last).
+	wAdvance := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0}
+	greedyBench := greedyOrders(freqB)
+	greedyHeld := greedyOrders(freqH)
+	t.Logf("bench greedy w=%v b=%v", greedyBench[0], greedyBench[1])
+	t.Logf("held  greedy w=%v b=%v", greedyHeld[0], greedyHeld[1])
+
+	corpus := tapAttackOps(t, board4Corpus)
+	freqC, _ := slotFreq(corpus)
+	greedyCorpus := greedyOrders(freqC)
+	t.Logf("corpus (%d calls) greedy w=%v b=%v", len(corpus), greedyCorpus[0], greedyCorpus[1])
+
+	cands := map[string][2][]int{
+		"desc":         {descending, descending},
+		"asc":          {ascending, ascending},
+		"advance":      {wAdvance, descending},
+		"greedyBench":  {greedyBench[0], greedyBench[1]},
+		"greedyHeld":   {greedyHeld[0], greedyHeld[1]},
+		"greedyCorpus": {greedyCorpus[0], greedyCorpus[1]},
+	}
+	priceOrders(t, "bench", bench, cands)
+	priceOrders(t, "heldout", held, cands)
+	priceOrders(t, "corpus", corpus, cands)
+}

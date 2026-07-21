@@ -104,6 +104,13 @@ CRTMP     = $29         ; castle helpers: rook piece byte
 ATT78     = $2A         ; attacked(): ATSQ + $78 ($77 + 1 for the
                         ;  carry-clear complement-add diff trick)
 VICTIM    = $2B         ; make: captured piece byte
+ATP2      = $30         ; attacked() (deep opt r4): 16-bit ZP pointer to
+                        ;  RATTACK + $77 - ATSQ, so lda (ATP2),y with
+                        ;  y = a piece-list square reads the reversed
+                        ;  attack table at diff = ATSQ - from + $77;
+                        ;  tombstone squares ($FF) index the table's
+                        ;  zero tail and drop out with no special test.
+                        ;  $30/$31 were free; set on every attacked entry.
 KF1       = $2C         ; search passes 3/4: killer mirrors for this ply
 KT1       = $2D         ;  (KILLER1F/1T/2F/2T[PLY]; stable during a node's
 KF2       = $2E         ;  move loop, rebuilt by sloopret after recursion)

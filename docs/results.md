@@ -3,6 +3,29 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — FT_ASP SPRT: REJECTED at −21 ± 32; diagnosis of the 4th compression event underway
+
+The aspiration-windows asm SPRT (0x5f vs 0x1f, same binary, 30s
+emulated/move, 300 games): **+89 =104 −107 = 47.0% → −21 ± 32,
+llr(0,10) −0.99. REJECTED** — despite a +19–23 ± 13 mirror screen run
+at asm-matched ordering on the post-fidelity-fix mirror.
+
+This is the 4th mirror→asm compression event (history +56→−16, rook
++30→−19, LMP +39→−85-at-0x1f, aspiration +19→−21), and the most
+diagnostic: implementation drift (parity gates), ordering config
+(screened at 0x1f), per-node cost (~zero), and TT size (both 4096)
+are all eliminated. Prime remaining suspect: **budget denomination**
+— the screen ran under a NODE budget; the asm plays under a
+TIME/cycle budget. A cycle-budget re-screen of the identical
+aspiration config is running to test exactly this; if the +19
+evaporates, node-budget screens overvalue features systematically and
+the CycleBudget mode becomes the standard instrument.
+
+Disposition: FT_ASP stays in the binary gated off (feature-bit test
+only), like the FT_ROOKX precedent. The port itself is verified
+exact-parity vs the mirror, so any future re-verdict needs no new
+implementation work.
+
 ## 2026-07-21 — full TunedWeights vs shipped hybrid pawn weights: NEUTRAL, keep the hybrid
 
 The mirror-fidelity fix revealed the asm's pawn weights are a hybrid

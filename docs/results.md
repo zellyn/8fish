@@ -3,6 +3,103 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — aspiration windows — PORT: +19 to +23 Elo at asm-matched 0x1f, cheap re-search cost
+
+Added **aspiration windows** at the iterative-deepening root of the
+node-budgeted search (`internal/mirror/search.go` `aspIterate`, gated by
+`AspirationParams`, plumbed through `PlayerCfg` and `cmd/mirror match
+-aasp/-basp`). After ID iteration `d` completes with score `s`, iteration
+`d+1` opens the window `(s-Delta, s+Delta)` instead of `(-Inf, +Inf)`; a
+fail-low/high re-searches with a widened window per policy. The first
+iteration, and any iteration seeded by a mate-zone score, always use the
+full window, and any fail that returns a mate-zone score re-searches full —
+**a narrow window never clips a mate score** (proved by
+`TestAspirationMateSound` across all variants + policies). All arithmetic is
+16-bit adds/compares plus a shift-doubling of Delta: no floats, no tables
+beyond the constant Delta, so it is 6502-portable. A budget abort mid-
+re-search leaves `e.aborted` set and the whole iteration is **discarded**
+(the last completed result stands), so a re-search can never return a
+fail-soft/garbage move.
+
+**This screen is asm-matched from the start** (the lesson from LMP, which
+flipped +39→−85 when re-screened off the mirror's strong ordering): both
+sides mask **0x1f** (FtAll = null+killer+futil+pstruct+LMR, the five-pass
+`moveLoop`, NO SEE/history), recap2 QS, shipped-asm weights, corrected-guard
+RFP 120/500, **30 000 nodes/move**, aspiration-on (A) vs aspiration-off (B).
+There is no ordering-transfer risk here — this **is** the asm's ordering.
+
+**Field screen (500 games, seed 6502, ±25 Elo):**
+
+| variant   | params (delta,policy)  | +W =D −L        | node-budget Elo |
+|-----------|------------------------|-----------------|-----------------|
+| d25asym   | 25, asymmetric widen   | +197 =152 −151  | **+32 ± 26**    |
+| d25prog   | 25, progressive        | +196 =153 −151  | **+31 ± 25**    |
+| d50full   | 50, widen-to-full      | +179 =180 −141  | +26 ± 24        |
+| d25full   | 25, widen-to-full      | +195 =133 −172  | +16 ± 26        |
+| d15full   | 15, widen-to-full      | +183 =145 −172  | +8 ± 26         |
+
+Reads: within the simple **widen-to-full** policy, a **wider** delta does
+better (15→+8, 25→+16, 50→+26) — a tight window fails constantly and each
+fail costs a full re-search. **Progressive** (double + re-center, full on
+3rd fail) and **asymmetric** (open only the failing bound) at delta 25 match
+or beat the best full-widen, because both avoid over-widening: they claw
+back the node budget the eager full-widen wastes.
+
+**Promotions to 2000 games (2×1000-pair batches, seeds 11111+22222, ±13):**
+
+| variant | +W =D −L       | score | node-budget Elo |
+|---------|----------------|-------|-----------------|
+| d25prog | +759 =613 −628 | 53.3% | **+22.8 ± 12.7** |
+| d25asym | +740 =628 −632 | 52.7% | **+18.8 ± 12.6** |
+
+Both clear the bar (lower bound > 0). `prog` (+23) edges `asym` (+19) but
+they are within each other's error — a statistical tie. The point estimates
+regress from the noisy 500g screen (+31/+32 → +23/+19), the expected
+shrink, but stay solidly positive.
+
+**Re-search rate & depth probe** (`TestAspirationStats`, 40 self-play games,
+per-move `CompletedDepth` and cumulative fail counters, same 0x1f/30k config):
+
+| variant | re-search rate (of windowed iters) | re-search/move | mean depth | median |
+|---------|-----------------------------------|----------------|-----------|--------|
+| off     | —                                 | —              | 5.45      | 5      |
+| d15full | 27.1%                             | 1.29           | 5.47      | 5      |
+| d25full | 13.5%                             | 0.61           | 5.28      | 5      |
+| d50full | 4.4%                              | 0.21           | 5.40      | 5      |
+| d25prog | 17.0%                             | 0.78           | 5.31      | 5      |
+| d25asym | 13.5%                             | 0.61           | 5.28      | 5      |
+
+**The mechanism finding, stated straight: aspiration does NOT buy depth
+here.** Mean effective depth is flat-to-slightly-negative vs off (median 5
+throughout) — at a 30k budget the tree sits near a depth boundary, and the
+integer-depth granularity swallows the small node savings; the extra re-
+searches even nudge it down a hair. So the **+19 to +23 Elo is a within-
+depth accuracy/ordering effect**, not a nodes→depth conversion: the narrow
+window produces sharper fail-hard TT bounds that improve next-iteration move
+ordering, and the full re-search on a fail-high refines the root PV. The
+re-search cost is already paid **inside** the node budget (a re-search
+spends real budget nodes), so the measured Elo nets it out — the asm pays
+~0.6–0.8 extra root re-searches per move for `prog`/`asym`, and still comes
+out +20.
+
+**Port recommendation: PORT aspiration windows, delta = 25 cp.** Between the
+two tied winners, **`asym` is the better asm target**: identical delta, one
+fewer constant and no per-fail state (on a fail just open the failing bound
+to ±Inf — no delta-doubling, no fail counter), for a statistically-tied
++19 vs prog's +23. If the extra ~4 Elo point estimate is wanted and the few
+bytes of state are cheap, `prog` (delta 25, double+re-center, full on 3rd
+fail) is the alternative. Unlike LMP this transfers with confidence: it was
+screened directly under the asm's own 0x1f ordering, so there is no
+"strong-ordering artifact" to flip. A cheap, honest +20.
+
+Toggle: `AspirationParams{Delta, Policy}` (Policy = AspFull|AspProgressive|
+AspAsym); off (Delta==0) is a **byte-identical no-op** — the parity gates
+(`TestSearchMirrorParity`/`TestPStructMirrorParity`) run with it off and
+stay green. Soundness: `TestAspirationDeterminism` (same seed → identical
+move/score/nodes/fail-counts across all policies), `TestAspirationMateSound`
+(exact mate score, no clipping, every variant), `TestAspirationOffIsNoop`
+(Delta==0 identical to the pre-aspiration path, zero windows opened).
+
 ## 2026-07-21 — mirror-vs-asm divergence at 0x1f: TWO STALE MIRROR DEFAULTS, fixed; parity gates added
 
 Follow-up to the LMP investigation: the mirror's default config did

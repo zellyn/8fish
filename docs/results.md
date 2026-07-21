@@ -3,7 +3,7 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
-## 2026-07-21 — late move pruning (LMP / movecount pruning) — ADOPT 3+2d Dmax3 (task #44)
+## 2026-07-21 — late move pruning (LMP / movecount pruning) — DO NOT PORT: +39 on mirror ordering, −85 on asm ordering (task #44)
 
 Added **late-move (movecount) pruning** to the mirror's scored search
 (`internal/mirror/ordering.go` `orderedMoveLoop`, gated by `LMPParams`,
@@ -79,15 +79,40 @@ futility loses ~65 Elo that LMP only partly (+48) recovers, so keep
 **both**. This is the honest opposite of the checks-in-QS subsumption
 outcome: here the new feature is additive.
 
-**Port recommendation (candidate for a TIME-budgeted SPRT):** carry
-**LMP `3+2d`, Dmax3** — `threshold(d)=3+2d` (d1=5, d2=7, d3=9), killers
-NOT exempt, checks pruned — applied at non-PV (zero-window) nodes only.
-Expected **≈ +39 Elo** under a node budget; the asm equivalent is a
-`LEGALCNT >= 5/7/9` compare on the scout/zero-window path, skipping the
-remaining quiet passes. Keep RFP/futility unchanged (complementary).
-Skip: quadratic thresholds, Dmax≥4, killer exemption, and any base below
-3 (all measured worse). `KeepChecks` is optional/neutral — omit it (the
-6502 would pay a make/undo to evaluate it for no Elo).
+**THE ASM-MATCHED RE-SCREEN — and it FLIPS (do NOT port).** Everything
+above used mask 0x7f (SEE + history + malus ordering), which only the
+mirror carries — the real asm engine has NO SEE and NO history: its
+ordering is TT + killers + two-tier MVV (mask 0x1f, the five-pass
+`moveLoop`; SEE/history were tried in asm and rejected). LMP prunes by
+move *count*, so its value rides on ordering quality — with weaker
+ordering, late quiets more often hide a good move. Re-screened the
+recommended variant with LMP wired into the five-pass path (commit adding
+LMP to `moveLoop`), both sides mask 0x1f, recap2, RFP 120/500, 30k
+nodes/move:
+
+| config (both sides mask 0x1f) | fixed-d6 nodes | node-budget Elo (2000g) |
+|-------------------------------|----------------|-------------------------|
+| LMP 3+2d Dmax3 ON vs OFF      | **−24.4%**     | **−85 ± 14**            |
+
+**Verdict: LMP does NOT transfer. The +39 was an artifact of the mirror's
+strong ordering.** Under the asm's actual ordering the same variant is
+**−85 Elo** — a full sign flip, not a shrink. The −24.4% node saving is
+real but does not convert: the quiets LMP skips at count 5/7/9 are, under
+TT+killers+MVV ordering, still carrying enough real value that losing them
+outweighs the extra depth the saved nodes buy. This is the transfer risk
+the 0x7f screen left open, and it fired.
+
+**Port recommendation: DO NOT PORT LMP to the current asm engine.** The
+feature is a clear win only *given* SEE+history-quality move ordering,
+which the asm rejected. Two honest futures: (1) if the asm ordering is
+ever upgraded (SEE/history revisited and adopted), re-open LMP — it is
+worth +39 there; (2) otherwise LMP stays a mirror-only feature. A
+last-ditch asm variant — much larger thresholds so only truly hopeless
+tails are pruned — might claw back to neutral, but the −85 at the tested
+(already moderate) thresholds makes a net win under 0x1f-ordering
+unlikely; not worth an SPRT slot now. Recorded straight: a node-saver
+that shrinks the tree 24% and still loses 85 Elo, because move ordering,
+not node count, was doing the real work.
 
 ## 2026-07-20 — node-budgeted self-play + the conversion re-measurements (task #42)
 

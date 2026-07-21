@@ -7,23 +7,33 @@
 ;   - sliders and steppers are fully unrolled per direction with
 ;     immediate deltas: no direction table fetch, no GDIR/GCOUNT/CURPTR
 ;     bookkeeping. The running square stays in A/X and the board byte
-;     is read into Y, so an empty slider square costs 19 cycles
-;     (15 on vertical rays) instead of 28.
+;     is read into A (full copy) or Y (qs copy).
 ;   - slider ray adds keep a carry invariant instead of clc per step:
 ;     a positive delta can never carry out of an on-board add (max
 ;     $77+$21 = $98 < $100), and a negative delta always has carry set
 ;     after an on-board result (no borrow), so C stays correct with the
-;     delta pre-decremented (sec once + adc #delta-1). After a quiet
-;     emission mid-ray (full-width copy) the carry is re-established
-;     explicitly - emitmove's exit carry is not part of its contract.
+;     delta pre-decremented (sec once + adc #delta-1). The batched
+;     quiet emit (EMITQY below) touches no flags except N/Z, so the
+;     invariant survives quiet emission with no re-establishment.
+;   - BATCHED QUIET EMISSION (deep optimization review round 4): the
+;     full-width copy keeps a running move-stack byte offset in Y and
+;     writes quiet moves inline via sta (MSP),y - no jsr/rts, no
+;     per-emit MSP bump, and the quiet tier is an immediate (TIER_QUIET
+;     = TIERTAB[0]). MSP catches up at flush points: before any classic
+;     jsr emit (captures, promotions, ep, castling) and at handler end
+;     (FLUSHY / FLUSHEND in movegen.s). The bytes written and their
+;     order are identical to the old per-emit path - only WHEN MSP
+;     advances changes, which nothing observes mid-generation. The
+;     overflow trap now fires at flush granularity; see the guard-slack
+;     note at MOVESTACKTOP in defs.inc.
 ;   - vertical rays (+/-$10) never change file bits, so off-board is
-;     just "bit 7 set" (bmi) - no and #$88, and A survives as the
-;     running square across the board read.
+;     just "bit 7 set" (bmi) - no and #$88.
 ;   - pawns: the quiescence copy tests the promotion rank BEFORE
 ;     probing the push square (only promo pushes are emitted in qs),
 ;     and both copies inline the two capture probes with cpx-based
 ;     promotion (cpx #$70 / cpx #$08) and en-passant (cpx EPSQ) tests.
-;   - promoloop is unrolled (N,B,R,Q immediates; tail-jump to emitmove).
+;   - promoloop / emitmovep live in movegen.s (shared by both copies
+;     and genrecap).
 ;
 ; Emission ORDER is bit-for-bit identical to the classic table loops:
 ; slots ascending, directions in KNIGHTOFF/KINGOFF/DIAGOFF/ORTHOOFF
@@ -32,20 +42,92 @@
 ; the king steps. Search move ordering breaks score ties by stack
 ; position, so this order IS the search tree shape: do not reorder.
 ;
-; Register conventions inside the handlers: GFROM = current from
-; square; X = candidate target square; Y = BOARD[target] (the board
-; byte / victim). Emit takes both directly (task #50 emit-interface
-; fusion): quiet moves and normal captures call emitmove (X=to,
-; Y=victim, flags implicitly 0); ep/promo/double/castle call emitmovef
-; (A=flags, X=to, Y=victim). Both preserve X (the pawn/promo/genrecap
-; paths rely on it) and clobber A and Y.
+; Register conventions inside the handlers:
+;   GFROM = current from square; X = candidate target square.
+;   Full copy (QMODE = 0): Y = pending emit offset from MSP (batched
+;     quiets); the board byte is read into A. Classic emits (captures
+;     etc.) FLUSH Y into MSP first, call with X=to Y=victim, and
+;     re-zero Y after.
+;   QS copy (QMODE = 1): no quiet emissions exist, so no batching:
+;     Y = board byte / victim, emit via jsr emitmove (X=to, Y=victim).
+; emitmove/emitmovep/emitmovef and EMITQY all preserve X (the
+; pawn/promo/genrecap paths rely on it) and clobber A.
 
 .if .not .definedmacro(GSLIDEV)
+
+; EMITQY - batched quiet emit (full copy only): writes (TIER_QUIET,
+; GFROM, X, 0) at (MSP),y .. (MSP),y+3 and advances Y by 4. Preserves
+; X and the carry flag (only lda/sta/iny/txa - no arithmetic), so
+; slider ray carry invariants survive. MSP itself is bumped later at a
+; flush point (FLUSHY/FLUSHEND).
+.macro EMITQY
+        lda #TIER_QUIET
+        sta (MSP),y             ; tier
+        iny
+        lda GFROM
+        sta (MSP),y             ; from
+        iny
+        txa
+        sta (MSP),y             ; to (X preserved)
+        iny
+        lda #0
+        sta (MSP),y             ; flags = 0
+        iny
+.endmacro
+
+; EMITFY flags - batched flagged emit with a QUIET tier (full copy:
+; double pushes). Same shape as EMITQY with an immediate flags byte.
+.macro EMITFY flags
+        lda #TIER_QUIET
+        sta (MSP),y             ; tier (double push: victim 0 -> quiet)
+        iny
+        lda GFROM
+        sta (MSP),y             ; from
+        iny
+        txa
+        sta (MSP),y             ; to (X preserved)
+        iny
+        lda #flags
+        sta (MSP),y             ; flags
+        iny
+.endmacro
+
+; FLUSHY - fold the pending emit offset into MSP and re-zero Y (ready
+; for more batched emission). Page-cross/overflow handling in the
+; shared flushpage helper (movegen.s). Clobbers A and carry. No-op
+; when Y = 0.
+.macro FLUSHY
+        .local nopage, done
+        tya
+        beq done
+        clc
+        adc MSP
+        sta MSP
+        bcc nopage
+        jsr flushpage
+nopage: ldy #0
+done:
+.endmacro
+
+; FLUSHEND - flush variant for handler exits (no further batched
+; emission follows, so Y is left dirty).
+.macro FLUSHEND
+        .local done
+        tya
+        beq done
+        clc
+        adc MSP
+        sta MSP
+        bcc done
+        jsr flushpage
+done:
+.endmacro
 
 ; GSLIDEV delta - vertical slider ray (delta = +/-$10). File bits never
 ; change on a vertical ray, so off-board is exactly "bit 7 set" and the
 ; and #$88 mask is unnecessary; A keeps the running square across the
-; read because the board byte goes to Y.
+; qs-copy read (board byte to Y); the full copy reads the board byte
+; into A and restores the square with txa after a quiet emission.
 .macro GSLIDEV delta
         .local walk, occ, next
         lda GFROM
@@ -62,23 +144,29 @@ walk:
 .endif
         bmi next                ; rank underflow/overflow: off board
         tax
-        ldy BOARD,x
-        bne occ
 .if ::QMODE = 0
-        jsr emitmove            ; X=to, Y=0 victim; preserves X
+        lda BOARD,x
+        bne occ
+        EMITQY                  ; batched quiet; preserves X and carry
         txa
-.if (delta) & $80
-        sec                     ; emitmove does not preserve carry
-.else
-        clc
-.endif
-.endif
         jmp walk
-occ:    tya
-        eor SIDE                ; enemy iff color bit differs
+occ:    eor SIDE                ; enemy iff color bit differs
         and #COLORMASK
         beq next                ; own piece: stop
+        FLUSHY                  ; MSP catches up before the classic emit
+        ldy BOARD,x
         jsr emitmove            ; X=to, Y=victim; capture, then stop
+        ldy #0                  ; offset restarts for the next ray
+.else
+        ldy BOARD,x
+        bne occ
+        jmp walk                ; A still holds the running square
+occ:    tya
+        eor SIDE
+        and #COLORMASK
+        beq next
+        jsr emitmove            ; X=to, Y=victim; capture, then stop
+.endif
 next:
 .endmacro
 
@@ -101,16 +189,22 @@ walk:
         tax
         and #$88
         bne next                ; off board
+.if ::QMODE = 0
+        lda BOARD,x
+        bne occ
+        EMITQY                  ; batched quiet; preserves X and carry
+        txa
+        jmp walk
+occ:    eor SIDE
+        and #COLORMASK
+        beq next
+        FLUSHY
+        ldy BOARD,x
+        jsr emitmove            ; X=to, Y=victim; capture, then stop
+        ldy #0
+.else
         ldy BOARD,x
         bne occ
-.if ::QMODE = 0
-        jsr emitmove            ; X=to, Y=0 victim; preserves X
-.if (delta) & $80
-        sec
-.else
-        clc
-.endif
-.endif
         txa
         jmp walk
 occ:    tya
@@ -118,6 +212,7 @@ occ:    tya
         and #COLORMASK
         beq next
         jsr emitmove            ; X=to, Y=victim; capture, then stop
+.endif
 next:
 .endmacro
 
@@ -130,26 +225,35 @@ next:
         tax
         and #$88
         bne next                ; off board
-        ldy BOARD,x
-        bne occ
 .if ::QMODE = 0
-        jsr emitmove            ; X=to, Y=0 victim; preserves X
+        lda BOARD,x
+        bne occ
+        EMITQY                  ; batched quiet; preserves X
         jmp next
+occ:    eor SIDE
+        and #COLORMASK
+        beq next                ; own piece
+        FLUSHY
+        ldy BOARD,x
+        jsr emitmove            ; X=to, Y=victim
+        ldy #0
 .else
-        beq next                ; A=0 from the mask: always taken
-.endif
-occ:    tya
+        ldy BOARD,x
+        beq next                ; empty: nothing in qs
+        tya
         eor SIDE
         and #COLORMASK
         beq next                ; own piece
-        jsr emitmove            ; X=to, Y=victim; capture, then stop
+        jsr emitmove            ; X=to, Y=victim; capture
+.endif
 next:
 .endmacro
 
 ; WPAWNCAP off - one white-pawn capture probe (SIDE known 0 here, so
-; the enemy test is just the color bit). Promotion iff target rank 8
-; (cpx #$70: on-board targets are <= $77). Ep only onto an empty
-; square (cpx EPSQ; EPSQ=NOSQ=$FF never matches an on-board X).
+; the enemy test is just the color bit of the board byte). Promotion
+; iff target rank 8 (cpx #$70: on-board targets are <= $77). Ep only
+; onto an empty square (cpx EPSQ; EPSQ=NOSQ=$FF never matches an
+; on-board X).
 .macro WPAWNCAP off
         .local occ, empty, promo, next
         lda GFROM
@@ -158,21 +262,45 @@ next:
         tax
         and #$88
         bne next                ; off board
-        ldy BOARD,x
+.if ::QMODE = 0
+        lda BOARD,x
         beq empty
-        tya
         and #COLORMASK
-        beq next                ; own piece (white)
+        beq next                ; own piece (white: color bit clear)
         cpx #$70
         bcs promo               ; capture onto rank 8
+        FLUSHY
+        ldy BOARD,x
+        jsr emitmove            ; X=to, Y=victim
+        ldy #0
+        jmp next
+promo:  FLUSHY
+        jsr promoloop           ; X=to
+        ldy #0
+        jmp next
+empty:  cpx EPSQ
+        bne next
+        FLUSHY
+        lda #FL_EP
+        jsr emitmovef           ; X=to, ep
+        ldy #0
+.else
+        lda BOARD,x
+        beq empty
+        and #COLORMASK
+        beq next                ; own piece (white: color bit clear)
+        cpx #$70
+        bcs promo               ; capture onto rank 8
+        ldy BOARD,x             ; Y = victim (capture path only)
         jsr emitmove            ; X=to, Y=victim
         jmp next
-promo:  jsr promoloop           ; X=to; Y unused (promo tier)
+promo:  jsr promoloop           ; X=to
         jmp next
 empty:  cpx EPSQ
         bne next
         lda #FL_EP
-        jsr emitmovef           ; X=to, ep (Y unused)
+        jsr emitmovef           ; X=to, ep
+.endif
 next:
 .endmacro
 
@@ -186,21 +314,45 @@ next:
         tax
         and #$88
         bne next
-        ldy BOARD,x
+.if ::QMODE = 0
+        lda BOARD,x
         beq empty
-        tya
         and #COLORMASK
-        bne next                ; own piece (black)
+        bne next                ; own piece (black: color bit set)
         cpx #$08
         bcc promo               ; capture onto rank 1
+        FLUSHY
+        ldy BOARD,x
+        jsr emitmove            ; X=to, Y=victim
+        ldy #0
+        jmp next
+promo:  FLUSHY
+        jsr promoloop           ; X=to
+        ldy #0
+        jmp next
+empty:  cpx EPSQ
+        bne next
+        FLUSHY
+        lda #FL_EP
+        jsr emitmovef           ; X=to, ep
+        ldy #0
+.else
+        lda BOARD,x
+        beq empty
+        and #COLORMASK
+        bne next                ; own piece (black: color bit set)
+        cpx #$08
+        bcc promo               ; capture onto rank 1
+        ldy BOARD,x             ; Y = victim (capture path only)
         jsr emitmove            ; X=to, Y=victim
         jmp next
-promo:  jsr promoloop           ; X=to; Y unused (promo tier)
+promo:  jsr promoloop           ; X=to
         jmp next
 empty:  cpx EPSQ
         bne next
         lda #FL_EP
-        jsr emitmovef           ; X=to, ep (Y unused)
+        jsr emitmovef           ; X=to, ep
+.endif
 next:
 .endmacro
 
@@ -221,17 +373,28 @@ next:
         ; is the else case). The tombstone test STAYS: kingless test
         ; positions (e.g. the pawn-cache endgame suite) are legal
         ; inputs with slot 0 = NOSQ. Same slot order, same tree.
+        ; GLIMIT = slot-half base + $10 bounds the slot walk (replaces
+        ; the old per-slot and #$0F wrap test).
         lda SIDE
         asl
         sta GSLOT
         tay
+        adc #$10                ; C=0 from the asl (SIDE is $00/$08)
+        sta GLIMIT
         ldx PIECESQ,y
         cpx #NOSQ
         beq gennext             ; no king on the board: skip slot 0
         stx GFROM
         jmp genking
-genloop:
+gendone:
+        rts
+gennext:
         ldy GSLOT
+        iny
+        sty GSLOT
+        cpy GLIMIT
+        beq gendone
+genloop:
         ldx PIECESQ,y
         cpx #NOSQ
         beq gennext             ; tombstone
@@ -250,12 +413,6 @@ genloop:
         bne :+
         jmp genrook
 :       jmp genqueen            ; only Q left: B/R/N/P/K handled above
-gennext:
-        inc GSLOT
-        lda GSLOT
-        and #$0F
-        bne genloop
-        rts
 
 ; ---- pawns ----
 ; White moves up (+$10), promotes on rank 8; black mirrors.
@@ -267,34 +424,35 @@ genpawn:
 .if ::QMODE = 0
         ; single push, promo push, double push (order matches the
         ; classic code: push emissions precede the capture probes)
+        ldy #0                  ; batched emit offset
         lda GFROM
         clc
         adc #$10
         tax
-        ldy BOARD,x             ; push square (always on board: no
+        lda BOARD,x             ; push square (always on board: no
                                 ;  white pawn sits on rank 8)
         bne gwcaps              ; blocked: no pushes
         lda GFROM
         and #$F0
         cmp #$60
         beq gwpromopush
-        jsr emitmove            ; X=to(push sq), Y=0 victim
+        EMITQY                  ; single push (batched quiet)
         ; double push from rank 2
         lda GFROM
         and #$F0
         cmp #$10
         bne gwcaps
-        txa                     ; emitmove preserved X = from+$10
+        txa                     ; EMITQY preserved X = from+$10
         clc
         adc #$10
         tax
-        ldy BOARD,x
+        lda BOARD,x
         bne gwcaps
-        lda #FL_DOUBLE
-        jsr emitmovef           ; X=to, Y=0 victim
+        EMITFY FL_DOUBLE        ; batched (quiet tier, FL_DOUBLE flags)
         jmp gwcaps
 gwpromopush:
-        jsr promoloop           ; X=to(push sq); Y unused (promo tier)
+        jsr promoloop           ; X=to(push sq); Y=0 here (no pending)
+        ldy #0                  ; offset restarts for the capture probes
 .else
         ; quiescence: the only push emission is a promotion push, so
         ; check the rank BEFORE touching the board
@@ -308,25 +466,29 @@ gwpromopush:
         tax
         ldy BOARD,x
         bne gwcaps              ; blocked
-        jsr promoloop           ; X=to(push sq); Y unused (promo tier)
+        jsr promoloop           ; X=to(push sq)
 .endif
 gwcaps: WPAWNCAP $0F
         WPAWNCAP $11
+.if ::QMODE = 0
+        FLUSHEND
+.endif
         jmp gennext
 
 genbpawn:
 .if ::QMODE = 0
+        ldy #0                  ; batched emit offset
         lda GFROM
         sec
         sbc #$10
         tax
-        ldy BOARD,x             ; no black pawn sits on rank 1
+        lda BOARD,x             ; no black pawn sits on rank 1
         bne gbcaps              ; blocked
         lda GFROM
         and #$F0
         cmp #$10
         beq gbpromopush
-        jsr emitmove            ; X=to(push sq), Y=0 victim
+        EMITQY                  ; single push (batched quiet)
         ; double push from rank 7
         lda GFROM
         and #$F0
@@ -336,13 +498,13 @@ genbpawn:
         sec
         sbc #$10
         tax
-        ldy BOARD,x
+        lda BOARD,x
         bne gbcaps
-        lda #FL_DOUBLE
-        jsr emitmovef           ; X=to, Y=0 victim
+        EMITFY FL_DOUBLE
         jmp gbcaps
 gbpromopush:
-        jsr promoloop           ; X=to(push sq); Y unused (promo tier)
+        jsr promoloop           ; X=to(push sq); Y=0 here (no pending)
+        ldy #0
 .else
         lda GFROM
         and #$F0
@@ -354,27 +516,20 @@ gbpromopush:
         tax
         ldy BOARD,x
         bne gbcaps
-        jsr promoloop           ; X=to(push sq); Y unused (promo tier)
+        jsr promoloop           ; X=to(push sq)
 .endif
 gbcaps: BPAWNCAP $F1            ; -$0F
         BPAWNCAP $EF            ; -$11
+.if ::QMODE = 0
+        FLUSHEND
+.endif
         jmp gennext
-
-; promoloop: emit N/B/R/Q promotions for GFROM, to = X (flags = piece
-; type -> promo tier, so Y/victim is unused). Unrolled; preserves X
-; (emitmovef does); tail-jumps the last.
-promoloop:
-        lda #KNIGHT
-        jsr emitmovef
-        lda #BISHOP
-        jsr emitmovef
-        lda #ROOK
-        jsr emitmovef
-        lda #QUEEN
-        jmp emitmovef
 
 ; ---- knights / kings: 8 unrolled steps in table order ----
 genknight:
+.if ::QMODE = 0
+        ldy #0                  ; batched emit offset
+.endif
         GSTEP $DF
         GSTEP $E1
         GSTEP $EE
@@ -383,9 +538,15 @@ genknight:
         GSTEP $12
         GSTEP $1F
         GSTEP $21
+.if ::QMODE = 0
+        FLUSHEND
+.endif
         jmp gennext
 
 genking:
+.if ::QMODE = 0
+        ldy #0                  ; batched emit offset
+.endif
         GSTEP $EF
         GSTEP $F0
         GSTEP $F1
@@ -397,6 +558,7 @@ genking:
 .if ::QMODE = 0
         ; fall into castling (quiet: absent from the qs copy); the
         ; dedicated king handler replaces the old GPIECE king test
+        FLUSHEND                ; MSP correct before castle's classic emits
         jmp gencastle
 .else
         jmp gennext
@@ -404,20 +566,35 @@ genking:
 
 ; ---- sliders: unrolled rays in table order ----
 genbishop:
+.if ::QMODE = 0
+        ldy #0                  ; batched emit offset (persists across rays)
+.endif
         GSLIDED $EF
         GSLIDED $F1
         GSLIDED $0F
         GSLIDED $11
+.if ::QMODE = 0
+        FLUSHEND
+.endif
         jmp gennext
 
 genrook:
+.if ::QMODE = 0
+        ldy #0
+.endif
         GSLIDEV $F0
         GSLIDED $FF
         GSLIDED $01
         GSLIDEV $10
+.if ::QMODE = 0
+        FLUSHEND
+.endif
         jmp gennext
 
 genqueen:                       ; KINGOFF order, as the classic loop
+.if ::QMODE = 0
+        ldy #0
+.endif
         GSLIDED $EF
         GSLIDEV $F0
         GSLIDED $F1
@@ -426,12 +603,17 @@ genqueen:                       ; KINGOFF order, as the classic loop
         GSLIDED $0F
         GSLIDEV $10
         GSLIDED $11
+.if ::QMODE = 0
+        FLUSHEND
+.endif
         jmp gennext
 
 .if ::QMODE = 0
 ; ---- castling ----
 ; Emits if: rights bit set, between-squares empty, king square and the
-; square the king passes through not attacked by the enemy.
+; square the king passes through not attacked by the enemy. Reached
+; with MSP flushed (FLUSHEND above), so the classic emitmovef path is
+; correct; emitmovef ignores Y (castle tier is the quiet constant).
 gencastle:
         lda SIDE
         bne gcblack
@@ -452,7 +634,6 @@ gencastle:
         lda #$04
         sta GFROM
         ldx #$06                ; to = g1
-        ldy #0                  ; victim (empty) -> quiet tier
         lda #FL_CASTLE
         jsr emitmovef
 gcwq:   ; white queenside: e1 d1 c1 b1
@@ -475,7 +656,6 @@ gcwq:   ; white queenside: e1 d1 c1 b1
         lda #$04
         sta GFROM
         ldx #$02                ; to = c1
-        ldy #0                  ; victim (empty) -> quiet tier
         lda #FL_CASTLE
         jsr emitmovef
 gcdone: jmp gennext
@@ -498,7 +678,6 @@ gcblack:
         lda #$74
         sta GFROM
         ldx #$76                ; to = g8
-        ldy #0                  ; victim (empty) -> quiet tier
         lda #FL_CASTLE
         jsr emitmovef
 gcbq:   ; black queenside: e8 d8 c8 b8
@@ -521,7 +700,6 @@ gcbq:   ; black queenside: e8 d8 c8 b8
         lda #$74
         sta GFROM
         ldx #$72                ; to = c8
-        ldy #0                  ; victim (empty) -> quiet tier
         lda #FL_CASTLE
         jsr emitmovef
 gcbdone:
@@ -565,45 +743,97 @@ gcs2out:
 ; four promotion captures via promoloop, N/B/R/Q, same as before.)
 ;
 ; Structure mirrors attacked() in board.s: diff -> ATTACKTAB bits ->
-; TYPEATK2 piece test -> slider ray walk; same scratch, and the slot
-; half is patched into this routine's own PIECESQ operand low bytes
-; ($00/$10) exactly like attacked()'s SMC.
+; TYPEATK2 piece test -> slider ray walk. Deep opt round 4: the 16-slot
+; scan is UNROLLED per side (white slots 0-15, black slots 16-31), so
+; there is no loop counter, no SMC operand patching, and no per-slot
+; inx/cpx/bne. The diff's +1 rides a carry-SET invariant instead of the
+; old carry-clear one: ATT78 holds RECAPSQ+$77 here and every live
+; slot's adc leaves C=1 (A = $FF-from >= $88 and ATT78 >= $77, so the
+; sum always carries); tombstones branch before the adc; grproc
+; restores C=1 before rts. GRSLOT candidates dispatch to the shared
+; grproc, which re-checks the piece type and walks slider rays.
+;
+; GRSLOT n - one unrolled slot probe. diff = RECAPSQ - PIECESQ[n] + $77
+; via complement + add (see above); ATTACKTAB gates the geometric
+; relation, then grproc does the real work with A = from-square.
+.macro GRSLOT n
+        .local next
+        lda PIECESQ+n
+        eor #$FF                ; $FF-from; NOSQ tombstone -> 0
+        beq next                ; tombstone (C unchanged: still set)
+        adc ATT78               ; + RECAPSQ+$77 + C(=1) -> diff; C=1 out
+        tay
+        lda ATTACKTAB,y
+        beq next                ; no geometric relation (hot exit)
+        sta ATBITS
+        sty DIFF
+        lda PIECESQ+n           ; A = from-square for grproc
+        jsr grproc              ; emits if real; returns with C=1
+next:
+.endmacro
+
 genrecap:
         ldx RECAPSQ
         lda BOARD,x             ; RECAPSQ is a move destination: on-board
-        beq grout               ; empty: nothing to recapture (see above)
+        beq grret               ; empty: nothing to recapture (see above)
         eor SIDE
         and #COLORMASK
-        beq grout               ; own piece there: nothing to capture
-        lda SIDE
-        asl                     ; 0/$10 = slot-half base
-        sta grslot0+1
-        sta grslot1+1
-        lda RECAPSQ
-        sta GTO                 ; kept only for the grpawn promo-rank test
-                                ;  (emit now takes to=RECAPSQ in X directly)
+        bne grgo                ; enemy piece there: candidates exist
+grret:  rts                     ; empty/own piece: nothing to capture
+grgo:   lda RECAPSQ
+        sta GTO                 ; kept only for the grppawn promo-rank test
+                                ;  (emit takes to=RECAPSQ in X directly)
         clc
-        adc #$78                ; $77 + 1: absorbed by the carry-clear
-        sta ATT78               ;  adc below (eor #$FF is $FF-from)
-                                ; (RECAPSQ <= $77, so C=0 falls out)
-        ldx #0
-grloop:
-grslot0:lda PIECESQ,x           ; operand lo byte is SMC ($00/$10)
-        ; diff = RECAPSQ - from + $77, via complement + add. eor #$FF
-        ; maps a NOSQ tombstone to zero (cheaper than cmp #NOSQ), and
-        ; carry is provably CLEAR here: at first entry the adc #$78
-        ; above can't carry, and every later pass comes through the
-        ; cpx #$10 at the bottom with X < $10. The +1 it doesn't add
-        ; is baked into ATT78. Do NOT reorder these instructions.
-        eor #$FF
-        beq grnext              ; tombstone
-        adc ATT78
-        tay
-        lda ATTACKTAB,y
-        beq grnext              ; no geometric relation (hot exit)
-        sta ATBITS
-        sty DIFF                ; save diff on the hit path only
-grslot1:lda PIECESQ,x           ; reload from-square (operand SMC too)
+        adc #$77                ; ATT78 = RECAPSQ+$77 here (the +1 comes
+        sta ATT78               ;  from the carry-set invariant; attacked()
+                                ;  keeps its own +$78 value, re-derived on
+                                ;  every call - no conflict)
+        sec                     ; C=1 invariant for the GRSLOT adds
+        lda SIDE
+        beq :+
+        jmp grblack
+:       GRSLOT 0
+        GRSLOT 1
+        GRSLOT 2
+        GRSLOT 3
+        GRSLOT 4
+        GRSLOT 5
+        GRSLOT 6
+        GRSLOT 7
+        GRSLOT 8
+        GRSLOT 9
+        GRSLOT 10
+        GRSLOT 11
+        GRSLOT 12
+        GRSLOT 13
+        GRSLOT 14
+        GRSLOT 15
+grout:  rts
+grblack:
+        GRSLOT 16
+        GRSLOT 17
+        GRSLOT 18
+        GRSLOT 19
+        GRSLOT 20
+        GRSLOT 21
+        GRSLOT 22
+        GRSLOT 23
+        GRSLOT 24
+        GRSLOT 25
+        GRSLOT 26
+        GRSLOT 27
+        GRSLOT 28
+        GRSLOT 29
+        GRSLOT 30
+        GRSLOT 31
+        rts
+
+; grproc: candidate slot passed the ATTACKTAB gate. A = from-square,
+; ATBITS/DIFF set. Verify the piece attacks along this diff (TYPEATK2),
+; walk the ray for sliders, and emit the capture onto RECAPSQ (promo
+; quartet for a pawn reaching its last rank). Returns with C=1 (the
+; slot-scan invariant). Clobbers A, X, Y.
+grproc:
         sta GFROM
         tay
         lda a:BOARD,y
@@ -611,59 +841,50 @@ grslot1:lda PIECESQ,x           ; reload from-square (operand SMC too)
         tay
         lda TYPEATK2,y          ; piece's attack bit (pawns by color)
         and ATBITS
-        beq grnext              ; wrong piece for this diff, incl.
+        beq grpout              ; wrong piece for this diff, incl.
                                 ;  wrong-direction pawns
         cmp #ATK_DIAG
-        bcc grhit               ; $01/$02: knight/king, no ray to walk
+        bcc grphit              ; $01/$02: knight/king, no ray to walk
         cmp #ATK_WPAWN
-        bcs grpawn              ; $10/$20: pawn, adjacent (promo check)
+        bcs grppawn             ; $10/$20: pawn, adjacent (promo check)
         ; slider: walk the ray from attacker toward RECAPSQ
         ldy DIFF
         lda DELTATAB,y
         sta ATDELTA
         lda GFROM
-grwalk: clc
+grpwalk:clc
         adc ATDELTA
         cmp RECAPSQ
-        beq grhit
+        beq grphit
         tay
         ; UNMASKED board read: safe only because this ray walks BETWEEN two
         ; on-board squares and exits at RECAPSQ before leaving the board (every
         ; square colinear between two on-board squares is on-board). See the
         ; off-board dead-space contract at BOARD in defs.inc.
         lda a:BOARD,y
-        bne grnext              ; blocked
+        bne grpout              ; blocked
         tya
-        jmp grwalk
-        ; emit onto RECAPSQ. X holds the slot loop counter here, but
-        ; emit wants to=RECAPSQ in X and victim in Y, so stash the
-        ; counter in GSLOT (free: genrecap runs before the body sets
-        ; GSLOT) and reload it after (emit preserves X = RECAPSQ).
-grhit:  stx GSLOT
-        ldx RECAPSQ             ; X = to
+        jmp grpwalk
+grphit: ldx RECAPSQ             ; X = to
         ldy BOARD,x             ; Y = victim byte (RECAPSQ is on-board, occupied)
-        jsr emitmove            ; X=to, Y=victim; preserves X
-        ldx GSLOT               ; restore slot loop counter
-grnext: inx
-        cpx #$10                ; X < $10 on the loop path -> C=0 for
-        bne grloop              ;  the diff adc above
-grout:  rts
-grpawn: ; pawn capture onto RECAPSQ; promotes if that is its last rank
+        jsr emitmove            ; X=to, Y=victim
+grpout: sec                     ; restore the slot-scan carry invariant
+        rts
+grppawn:; pawn capture onto RECAPSQ; promotes if that is its last rank
         and #ATK_WPAWN          ; A = the matched pawn bit ($10/$20)
-        beq grbp
+        beq grpbp
         lda GTO                 ; white pawn: promotes on rank 8 ($7x)
         and #$F0
         cmp #$70
-        beq grpromo
-        bne grflat              ; always
-grbp:   lda GTO                 ; black pawn: promotes on rank 1 ($0x)
+        beq grppromo
+        bne grphit              ; always (A != $70)
+grpbp:  lda GTO                 ; black pawn: promotes on rank 1 ($0x)
         and #$F0
-        beq grpromo
-grflat: jmp grhit              ; shares the slot-stash + emit
-grpromo:
-        stx GSLOT               ; stash slot counter (see grhit)
+        beq grppromo
+        bne grphit              ; always (A != 0)
+grppromo:
         ldx RECAPSQ             ; X = to for promoloop
-        jsr promoloop           ; N,B,R,Q - as the full generator (Y unused)
-        ldx GSLOT               ; restore slot loop counter
-        jmp grnext
+        jsr promoloop           ; N,B,R,Q - as the full generator
+        sec                     ; restore the slot-scan carry invariant
+        rts
 .endif

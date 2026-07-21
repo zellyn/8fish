@@ -35,6 +35,13 @@ FL_EP     = $08
 FL_DOUBLE = $10
 FL_CASTLE = $20
 
+; Move tier constants (see MOVESTACK): fixed tiers used by the emit
+; fast paths instead of a TIERTAB lookup. TIER_QUIET must equal
+; TIERTAB[0] (empty victim -> quiet class).
+TIER_QUIET = $04                  ; quiet / double push / castle
+TIER_EPCAP = (PAWN<<4)|2          ; en passant: pawn victim, light class
+TIER_PROMO = $01                  ; promotion: heavy class, no delta filter
+
 ; ---- Castling rights bits (in CASTLE) ----
 CR_WK = $01
 CR_WQ = $02
@@ -88,7 +95,9 @@ GTMP      = $1A         ; movegen scratch
 GSLOT     = $1B         ; movegen: current slot
 GFROM     = $1C         ; movegen: current from-square
 GPIECE    = $1D         ; movegen: current piece byte
-GDIR      = $1E         ; movegen: current direction index
+GLIMIT    = $1E         ; movegen: slot-walk bound (half base + $10);
+                        ;  reuses the old GDIR slot (direction tables
+                        ;  are gone since deep opt round 3)
 GDELTA    = $1F         ; movegen: current step delta
 PROMTYPE  = $21         ; movegen: promotion loop scratch
 GTO       = $22         ; movegen scratch target square
@@ -380,7 +389,13 @@ MOVESTACK  = $0E00      ; 4 bytes/move (tier,from,to,flags); through $1FFF
                         ;  1 = heavy capture/promo (pass 1), 2 = light
                         ;  capture (pass 2), 4 = quiet (passes 3/4);
                         ;  $00 = TT move already consumed by pass 0.
-MOVESTACKTOP = $2000    ; exclusive end; generator overflow-checks this
+MOVESTACKTOP = $2000    ; exclusive end; generator overflow-checks this.
+                        ;  Batched quiet emission (deep opt round 4)
+                        ;  writes through a Y offset and flushes MSP at
+                        ;  ray/handler boundaries, so up to ~124 bytes
+                        ;  past this top can be written before the trap
+                        ;  fires: $2000-$207F is reserved guard slack
+                        ;  and must stay unallocated.
 
 ; Transposition table: 4096 x 8 bytes in AUX $0200-$81FF (see D6).
 TTBASE     = $0200

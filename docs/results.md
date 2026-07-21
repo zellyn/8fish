@@ -3,6 +3,93 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — deep optimization review round 4, movegen cluster: batched quiet emission, −2.56% total cycles at identical trees
+
+The movegen cluster (generate/generateq/genrecap + the emit interface)
+measured at **31.35%** of ALL adopted-config cycles (FEATURES 0x1F +
+FEATURES2 0x01, 2-FEN 30M-budget profile) — far above the round-3
+"~1-1.5% residual" framing, because that framing counted only the emit
+buckets, not the walks. Round-4 changes, every one proven
+tree-identical:
+
+1. **Batched quiet emission** (the headline, −2.39% total). The
+   full-width copy no longer emits quiets through a subroutine: it
+   keeps a running move-stack byte offset in Y and writes the 4-byte
+   record inline via `sta (MSP),y` (EMITQY: immediate TIER_QUIET, no
+   flags save, no per-emit MSP bump, no jsr/rts), flushing MSP into
+   place at ray/handler boundaries and before any classic emit
+   (FLUSHY/FLUSHEND + shared flushpage). The batched emit touches no
+   flags but N/Z, so the slider carry invariant survives quiet
+   emission — the old per-emit `sec`/`clc` re-establishment is gone
+   too. A quiet slider emission fell ~88→60 cycles, a step emission
+   ~89→63, a single push the same, and a double push became an inline
+   EMITFY (~78→43). Stack bytes and their order are UNCHANGED (same
+   records at the same addresses); only when MSP advances changes,
+   which nothing observes mid-generation. The overflow trap now fires
+   at flush granularity: $2000-$207F is documented guard slack.
+   Emit census on the profile workload: 42.6k of 52.8k emitmove calls
+   were full-copy (mostly quiets) — now ~3.6k classic calls remain
+   there (captures), plus 7.7k qs captures and 2.5k genrecap.
+2. **Slot-walk merge** (in change 1's measurement): gennext/genloop
+   fused — `iny/sty/cpy GLIMIT` with the bound precomputed at entry
+   (GLIMIT, reusing the dead GDIR zero-page slot) replaces
+   `inc/lda/and #$0F` + reload; the not-done path falls through into
+   the dispatch with Y already loaded (−3/slot, +5 setup, net
+   ~−43/call).
+3. **Emit-interface specialization**: emitmovef now serves only
+   ep/castle (Y ignored, fixed tiers TIER_EPCAP/TIER_QUIET — both
+   callers land on empty squares); promotions get a dedicated
+   emitmovep (fixed TIER_PROMO, no flag-bit tests); promoloop is
+   assembled once in movegen.s instead of twice.
+4. **QS micro**: GSTEP's empty/own tests restructured (board byte read
+   once, `beq next` direct: −2/empty probe, −1/occupied); pawn-cap
+   color test off A with the victim Y-load deferred to the actual
+   capture path (−2/occupied probe).
+5. **genrecap unrolled + side-split** (−0.15% total, honest recap):
+   the 16-slot scan is unrolled per side — no loop counter, no SMC
+   operand patching, no per-slot inx/cpx/bne — with the diff's +1
+   riding a carry-SET invariant (ATT78 holds RECAPSQ+$77 here; every
+   live slot's complement-add provably carries; grproc restores C=1).
+   Candidates dispatch to a shared grproc (jsr). Measured honestly:
+   the per-slot −7 is largely offset by +12 jsr/rts on the
+   ATTACKTAB-candidate path (~5/call are geometric candidates), so
+   the net is small; kept because it is positive, simpler to extend,
+   and biggest exactly where recaptures dominate (tactical FEN's
+   cluster share 30.1%→23.3%).
+
+Considered and REJECTED: full-byte pawn dispatch compares (white saves
+8/slot but black pays +3 and non-pawns +4 — a wash on average);
+inlining the remaining classic emit sites (12-18 cyc × ~14k calls ≈
+0.2-0.3% for ~1-2.5KB — poor cycles/byte); SMC absolute stack base
+(re-analyzed: abs,y stores never page-cross at stride 4, so it is a
+clean −4/emit, but it needs MSP to live in the operand = search-side
+contract change, and batching already removed the quiet-emit bump it
+would have optimized — see cross-file notes).
+
+MicroAB fixed-depth suite (18 cases, masks 1f/07/00): every
+search/make/eval/attacked/ttprobe/generate count, score, and best move
+byte-identical to baseline (7425e66); cycles 4,294,459,755 →
+4,184,587,625 = **−2.56%** (per mask: 1f −2.53%, 07 −2.42%,
+00 −2.84%). Adopted-config fingerprint (same 6 FENs,
+depth 6, FEATURES2=0x01, new TestMicroABAdopted): counts/scores/moves
+identical, cycles 1,905,559,028 → 1,858,837,508 = **−2.45%**. Cluster
+share 31.35% → 29.61%. Full non-short battery green (perft,
+RecapGenEquivalence 1280 + RecapGenTreeIdentity, LegalityTorture,
+HashConsumptionExact, PStructParity, PTCache, WAC, banked build, etc).
+engine.bin +2,048 bytes (28,174 → 30,222; ends $B60E, 2.3KB below the
+$BF00 ceiling). New diagnostics: TestMovegenClusterProfile (cluster
+share + dup-safe per-label breakdown), TestEmitSites (per-call-site
+emit census), TestMicroABAdopted.
+
+Cross-file proposals (NOT done, for the search-cluster owner):
+(a) gennode computes RECAPONLY and generateq immediately re-tests it —
+export the genrecap entry and let gennode call it directly (~6-8
+cyc/qs generate call, ~0.05%);
+(b) if the move format ever revisits, the remaining classic-emit
+residual (~1.6%) is the place: a 3-byte record (tier|flags fused)
+would shave a store per emit and a byte per scan step, but tier bits
+are full today.
+
 ## 2026-07-21 — deep optimization review round 4, search cluster: −2.1/−2.3% total cycles at identical trees
 
 Round-4 pass over asm/search.s (the five-pass move loop, node init/

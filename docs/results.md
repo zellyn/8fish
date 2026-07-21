@@ -3,6 +3,31 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — COMPRESSION ROOT-CAUSED: node budgets are systematically biased; CycleBudget is now the standard screen
+
+The diagnosis re-screen of the identical aspiration config (0x1f,
+delta 25 asym) under a CYCLE budget (143M cyc/move, 4 seed batches):
+
+**+681 =626 −693 = 49.7% ≈ −2 ± 13 over 2000 games** — versus
+**+19–23 ± 13** under the 30k NODE budget, and −21 ± 32 in the asm
+SPRT. The cycle-denominated mirror agrees with the asm; the node
+budget was the bias.
+
+Mechanism: a node budget charges every node the same price, so a
+feature whose "savings" or extra work concentrate in CHEAP nodes
+(fail-fast cutoffs, TT-hit-heavy re-searches — precisely aspiration's
+profile) converts saved nodes into extra depth at par, while the real
+engine only banks the (small) cycle value of those cheap nodes. This
+also cleanly explains the historical compression pattern (history
++56→−16, rook +30→−19, recap2 +30→+9.9): node-saving features
+disproportionately save cheap nodes.
+
+**STANDING RULE: port-deciding mirror screens use CycleBudget
+(-cbudget 143000000 at the 30s-equivalent operating point). Node
+budgets are for triage only.** The improving-heuristic verdict
+(+13 ± 9) was already cycle-budgeted and stands; its port proceeds.
+Checks-in-QS/bishop-pair re-screens switched mid-flight.
+
 ## 2026-07-21 — FT_ASP SPRT: REJECTED at −21 ± 32; diagnosis of the 4th compression event underway
 
 The aspiration-windows asm SPRT (0x5f vs 0x1f, same binary, 30s

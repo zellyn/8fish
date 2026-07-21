@@ -3,6 +3,21 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — full TunedWeights vs shipped hybrid pawn weights: NEUTRAL, keep the hybrid
+
+The mirror-fidelity fix revealed the asm's pawn weights are a hybrid
+(Texel passer/isolated; older doubled/shield/open-file) — the full
+TunedWeights set was never completely ported. Screened on the faithful
+mirror, asm-matched 0x1f, 30k nodes/move, 4 seed batches:
+
+**tuned vs hybrid: 660W 654D 686L = 49.35% ≈ −5 ± 13 over 2000 games.**
+(Batches: +4, −1, −8, −13, each ±25.)
+
+Verdict: the unported remainder of TunedWeights buys nothing; the
+shipped hybrid stands. No asm change. (Any future retune should
+regenerate the corpus from current-strength self-play first — the old
+corpus predates the last ~150 Elo of engine strength.)
+
 ## 2026-07-21 — improving heuristic — PORT (full-signal LMR only): +13 ± 9 at asm-matched 0x1f over 4000 games, +0.19% eval tax
 
 Added the **improving heuristic** to the shared search pruning block and the

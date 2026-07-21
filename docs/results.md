@@ -3,6 +3,28 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — mirror gains a calibrated CYCLE-budget mode (screens now taxed by cost)
+
+The fix for the flat-tax blind spot the rook rejection exposed: the
+mirror now maintains an estimated-6502-cycles counter, bumped per
+operation (node by type, make by move class, eval base + configurable
+per-term surcharge, TT probe), with `PlayerCfg.CycleBudget` as a
+drop-in alternative to `NodeBudget` (same soft-stop semantics; node
+budgets unchanged). Coefficients were fit against the asm's measured
+MicroAB cycles (per-mask grand-total error ≤ ~12%; full table and
+limitations in internal/mirror/cycles.md). Validation on the known
+case: a 219 cyc/call eval term reproduces a 4.17% tax vs the asm's
+measured 3.5–5%, and under a fixed cycle budget provably buys fewer
+nodes — a node budget sees zero difference, which is exactly the
+mistake this closes. Feature screens from here on: cheap features may
+still use node budgets; anything with per-node cost uses CycleBudget
+with a pessimistic cost estimate until the asm exists.
+
+Honest limitation recorded: the mirror's QS tree is 0.9–24× the asm's
+by position (full-width trees match; asm QS prunes harder), so mirror
+cycle predictions are self-consistent virtual cycles, not absolute asm
+cycles — fractions/taxes transfer, absolute totals don't.
+
 ## 2026-07-21 — FT_ROOKX post-mortem audit: NO BUG; verdict stands, cost restated 4.5–6%
 
 A pure eval-shape feature should transfer mirror→asm nearly 1:1 at

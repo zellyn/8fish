@@ -184,6 +184,10 @@ func match(args []string) {
 	bCMCost := fs.Float64("bcmcost", 0, "B per-node countermove cycle cost (cycle mode only)")
 	aImp := fs.String("aimp", "", "A improving params: mode,rfp,lmr[,rni1,rni2,futni,lmrextra] mode=1(free)|2(full) (empty = off)")
 	bImp := fs.String("bimp", "", "B improving params")
+	aSEE := fs.String("asee", "", "A SEE params: mode,margin,deferfw,pruneqs,deferqs mode=1(pawn)|2(attacked)|3(full-bool) (empty = off)")
+	bSEE := fs.String("bsee", "", "B SEE params")
+	aSEECost := fs.String("aseecost", "", "A SEE cycle costs: gate,call,rescanitem (cycle mode only)")
+	bSEECost := fs.String("bseecost", "", "B SEE cycle costs")
 	fs.Parse(args)
 
 	lines, err := mirror.GenOpenings(sprt.Openings, *pairs, *seed)
@@ -191,11 +195,13 @@ func match(args []string) {
 	a := mirror.PlayerCfg{Features: byte(*aMask), Weights: parseWeights(*aw), Depth: *depth,
 		FixFutility: *aFix, LMR: parseLMR(*aLMR), QS: parseQS(*aQS), KB: loadKB(*aKB), Fut: parseFut(*aFut), Ord: parseOrd(*aOrd),
 		LMP: parseLMP(*aLMP), Asp: parseAsp(*aAsp), CM: parseCM(*aCM), CMCost: *aCMCost, Improving: parseImp(*aImp),
+		SEE: parseSEE(*aSEE), SEECosts: parseSEECost(*aSEECost),
 		Extra: parseExtra(*aExtra), EvalTermsCost: *aExtraCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	b := mirror.PlayerCfg{Features: byte(*bMask), Weights: parseWeights(*bw), Depth: *depth,
 		FixFutility: *bFix, LMR: parseLMR(*bLMR), QS: parseQS(*bQS), KB: loadKB(*bKB), Fut: parseFut(*bFut), Ord: parseOrd(*bOrd),
 		LMP: parseLMP(*bLMP), Asp: parseAsp(*bAsp), CM: parseCM(*bCM), CMCost: *bCMCost, Improving: parseImp(*bImp),
+		SEE: parseSEE(*bSEE), SEECosts: parseSEECost(*bSEECost),
 		Extra: parseExtra(*bExtra), EvalTermsCost: *bExtraCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	start := time.Now()
@@ -208,8 +214,8 @@ func match(args []string) {
 	if *cbudget > 0 {
 		mode = fmt.Sprintf("budget %d cycles/move (maxiters %d)", *cbudget, *maxiters)
 	}
-	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q extra=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q extra=%q) %s: %s (%v)\n",
-		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aImp, *aExtra, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bImp, *bExtra,
+	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q extra=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q extra=%q) %s: %s (%v)\n",
+		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aImp, *aSEE, *aExtra, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bImp, *bSEE, *bExtra,
 		mode, res, time.Since(start).Round(time.Second))
 }
 
@@ -413,6 +419,37 @@ func parseImp(s string) mirror.ImprovingParams {
 		LMR:      lmr != 0,
 		LMRExtra: lmrextra,
 	}
+}
+
+// parseSEE parses "mode,margin,deferfw,pruneqs,deferqs" into an
+// SEEParams; empty means off (zero value).
+func parseSEE(s string) mirror.SEEParams {
+	if s == "" {
+		return mirror.SEEParams{}
+	}
+	var mode, margin, dfw, pqs, dqs int
+	n, err := fmt.Sscanf(s, "%d,%d,%d,%d,%d", &mode, &margin, &dfw, &pqs, &dqs)
+	if err != nil || n != 5 {
+		fmt.Fprintf(os.Stderr, "bad SEE params %q (want mode,margin,deferfw,pruneqs,deferqs)\n", s)
+		os.Exit(2)
+	}
+	return mirror.SEEParams{Mode: mode, Margin: margin,
+		DeferFW: dfw != 0, PruneQS: pqs != 0, DeferQS: dqs != 0}
+}
+
+// parseSEECost parses "gate,call,rescanitem" into the SEE cost triple;
+// empty means untaxed (zeros).
+func parseSEECost(s string) [3]float64 {
+	if s == "" {
+		return [3]float64{}
+	}
+	var g, c, r float64
+	n, err := fmt.Sscanf(s, "%g,%g,%g", &g, &c, &r)
+	if err != nil || n != 3 {
+		fmt.Fprintf(os.Stderr, "bad SEE costs %q (want gate,call,rescanitem)\n", s)
+		os.Exit(2)
+	}
+	return [3]float64{g, c, r}
 }
 
 // parseAsp parses "delta[,policy]" into an AspirationParams; empty means

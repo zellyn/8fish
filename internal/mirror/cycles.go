@@ -77,6 +77,17 @@ type CycleCosts struct {
 	// is the marginal cost per pseudo-legal move it emits.
 	Generate   float64
 	MovePerGen float64
+	// SEE-classification costs (see.go), NOT part of the calibration fit
+	// (default 0 = untaxed node-budget behavior; a cycle screen sets them
+	// via PlayerCfg.SEECosts to the measured asm numbers).
+	//   SEEGate: per capture reaching the victim-vs-attacker gate in the
+	//     capture passes (asm: a type compare or one 64-byte table load).
+	//   SEE: per classification call (the defended test / swap) — the
+	//     per-variant headline number.
+	//   SEERescan: per move-list item rescanned by the deferred
+	//     losing-capture pass (asm: one more tier-filtered stack scan,
+	//     charged per item, only when the pass actually runs).
+	SEEGate, SEE, SEERescan float64
 	// Countermove is the per-operation cost of the countermove heuristic:
 	// one indexed table load + 2-byte compare on the probe (once per
 	// full-width node where CM is active), and the 2-byte store on a quiet
@@ -157,6 +168,13 @@ type CycleAccount struct {
 
 	CounterProbes uint64 // countermove table probes (per full-width CM node)
 	CounterStores uint64 // countermove table stores (quiet beta cutoffs)
+
+	// SEE classification counters (see.go). SEEGates counts captures that
+	// reached the gate compare; SEECalls the classifications actually run
+	// (gate passed), SEECallsQS the subset at quiescence nodes; SEELosing
+	// the losing verdicts; SEERescans the move-list items rescanned by
+	// deferred passes.
+	SEEGates, SEECalls, SEECallsQS, SEELosing, SEERescans uint64
 }
 
 // EvalTermsCost returns a conservative estimated per-eval-call cost, in
@@ -268,6 +286,30 @@ func (e *Engine) chargeTTProbe() {
 func (e *Engine) chargeTTStore() {
 	e.Cyc.TTStores++
 	e.Cyc.Est += uint64(e.Costs.TTStore)
+}
+
+// chargeSEEGate books one victim-vs-attacker gate compare in a capture
+// pass; passed reports whether it triggered a classification call, and qs
+// whether at a quiescence node.
+func (e *Engine) chargeSEEGate(passed, qs bool) {
+	c := &e.Cyc
+	c.SEEGates++
+	c.Est += uint64(e.Costs.SEEGate)
+	if passed {
+		c.SEECalls++
+		if qs {
+			c.SEECallsQS++
+		}
+		c.Est += uint64(e.Costs.SEE)
+	}
+}
+
+// chargeSEERescan books n move-list items rescanned by a deferred
+// losing-capture pass.
+func (e *Engine) chargeSEERescan(n int) {
+	c := &e.Cyc
+	c.SEERescans += uint64(n)
+	c.Est += uint64(n) * uint64(e.Costs.SEERescan)
 }
 
 func (e *Engine) chargeCounterProbe() {

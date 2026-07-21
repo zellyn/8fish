@@ -58,6 +58,23 @@ type Engine struct {
 	// CM configures the countermove heuristic in the five-pass moveLoop
 	// (zero value = off: a byte-identical no-op). See countermove.go.
 	CM CountermoveParams
+
+	// SEE configures portable losing-capture classification in the
+	// five-pass moveLoop (zero value = off: a byte-identical no-op). See
+	// see.go. seeDefer holds each ply's deferred losing captures (list
+	// order); seeScan suppresses the asm-op attacked() charge during a
+	// mode-2 defended scan (its cost is charged via Costs.SEE instead);
+	// seeAudit, when set by a test, tallies [fullSEE<0][variant-losing]
+	// classification agreement.
+	SEE      SEEParams
+	seeDefer [MaxPly][]Move
+	seeScan  bool
+	seeAudit *[2][2]uint64
+	// SEEProbeHook, when set (tests/measurement only), is called with every
+	// gate-passing capture just before its classification runs — the tap the
+	// asm cycle models use to price a design on the true operand
+	// distribution. nil (the default) is a byte-identical no-op.
+	SEEProbeHook func(m Move)
 	// counter is the countermove table [prev-piece-type][prev-to-square] ->
 	// refuting (from,to) move. Variant 1 uses only slot [0][to]; variant 2
 	// uses [pieceType][to]. Cleared per root move (or kept, per CM.Persist).
@@ -392,7 +409,9 @@ func (e *Engine) attacked(sq byte, bySide byte) bool {
 	if e.cyc {
 		// The in-make gives-check scan is the asm's difference-table update
 		// inside make(), not an asm attacked() call; don't charge it here.
-		e.chargeAttacked(!e.attackInMake)
+		// A SEE mode-2 defended scan is likewise priced via Costs.SEE, not
+		// as an asm attacked() op.
+		e.chargeAttacked(!e.attackInMake && !e.seeScan)
 	}
 	p := &e.Pos
 	base := int(bySide) << 1 // 0 or 16

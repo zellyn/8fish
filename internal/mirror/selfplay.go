@@ -29,6 +29,15 @@ type PlayerCfg struct {
 	// (Costs.Countermove). 0 leaves it untaxed (node-budget behavior).
 	CMCost float64
 
+	// SEE enables portable losing-capture classification in the five-pass
+	// moveLoop (zero value = off). Pair it with SEECosts so cycle-budgeted
+	// screens pay the variant's real per-call 6502 tax.
+	SEE SEEParams
+	// SEECosts is the estimated 6502 cost triple {gate, call, rescan-item}
+	// of the SEE classification (Costs.SEEGate/SEE/SEERescan), charged only
+	// in CycleBudget mode. Zeros leave it untaxed (node-budget behavior).
+	SEECosts [3]float64
+
 	// Improving enables the improving heuristic (zero value = off). The
 	// full-signal design (Mode==2) forces an extra eval() at every full-width
 	// node that lacks one; that eval's real cost (Costs.Eval) is charged
@@ -85,6 +94,8 @@ func (c *PlayerCfg) engine() *Engine {
 	if c.CMCost != 0 {
 		e.Costs.Countermove = c.CMCost
 	}
+	e.SEE = c.SEE
+	e.Costs.SEEGate, e.Costs.SEE, e.Costs.SEERescan = c.SEECosts[0], c.SEECosts[1], c.SEECosts[2]
 	e.Improving = c.Improving
 	return e
 }

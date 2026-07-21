@@ -169,6 +169,9 @@ func (e *Engine) generate(genCaps bool) []Move {
 		}
 	}
 	e.moves[p.Ply] = list
+	if e.cyc {
+		e.chargeGenerate(len(list))
+	}
 	return list
 }
 

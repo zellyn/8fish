@@ -1,0 +1,268 @@
+package mirror
+
+// This file adds a calibrated 6502 CYCLE-cost model to the mirror engine.
+//
+// WHY. The mirror screens features by node-budgeted self-play before they
+// are ported to asm. A node budget charges every feature ZERO
+// implementation cost, so a term that is cheap in nodes but expensive in
+// cycles (e.g. the FT_ROOKX rook set, ~219 cycles/eval-call, ~4% of all
+// cycles) screens far too favorably. A cycle budget taxes each feature by
+// its real per-node cost, so its measured Elo is automatically discounted.
+//
+// HOW. The engine keeps a running estimate of emulated 6502 cycles
+// (Cyc.Est), bumped at each accountable operation by a calibrated cost.
+// The costs (CycleCosts) are fit by least squares against the asm
+// differential harness (internal/chesstest TestMicroAB): 18 fixed-depth
+// searches across feature masks 0x1f/0x07/0x00, for which the harness
+// reports the TRUE emulated-6502 cycle total plus operation-entry counts
+// (search/make/eval/attacked/ttprobe/generate). The mirror replays the
+// SAME 18 searches (identical trees, so identical operation counts) and
+// its counts are regressed onto the asm cycle totals. See cycles_test.go
+// for the fit and the predicted-vs-actual validation, and cycles.md for
+// the coefficient table and known limitations.
+//
+// The whole apparatus is inert unless accounting is active for the search
+// (CycleBudget != 0 or CycleTrack), so the existing NodeBudget path is
+// byte-for-byte unchanged.
+
+// CycleCosts is the calibrated cost, in emulated 6502 cycles, of each
+// accountable mirror operation. Est accumulates count*cost as the search
+// runs. The coefficients are effective asm costs: they price the mirror's
+// OWN operations (as the mirror counts them) so that their weighted sum
+// reproduces the asm's measured cycle total. Where a mirror operation does
+// not correspond 1:1 to an asm routine (see the attacked() note below),
+// the fitted coefficient absorbs the difference; it is not a pure
+// per-routine cost.
+type CycleCosts struct {
+	// Node is the per-search()-entry overhead NOT already attributed to the
+	// node's TT probe / eval / move generation / makes (bookkeeping,
+	// repetition/50-move checks, sprep dispatch, pass sequencing).
+	Node float64
+	// Make is charged once per real make() and covers the paired unmake()
+	// as well (every make has exactly one matching unmake, so the two are
+	// perfectly collinear and cannot be separated by the fit). It also
+	// carries the asm's in-make "gives-check" difference-table update,
+	// which in the asm lives inside make() (the mirror computes the same
+	// bit with a full attacked() scan; that scan is deliberately NOT
+	// charged to Attacked — see below).
+	Make float64
+	// MakeNull is charged per makenull()/unmakenull() pair. makenull is a
+	// separate asm routine, so it is not part of the make() count.
+	MakeNull float64
+	// Eval is the base cost of one eval() call (taper + pstruct + tempo).
+	Eval float64
+	// EvalTerm is the ADDITIONAL cost of one eval() call when experimental
+	// EvalTerms are enabled — the configurable feature tax. The asm
+	// FT_ROOKX extraterm measured 219 cycles/call; a future term with no
+	// asm implementation yet should set a deliberately pessimistic value.
+	// This is not part of the calibration fit (the calibration masks have
+	// no extra terms); it is a knob a feature screen sets. See
+	// EvalTermsCost.
+	EvalTerm float64
+	// Attacked is charged per attacked() scan that corresponds to an asm
+	// attacked() call: legality (mover's king safe), castle safety, and the
+	// root in-check test. The gives-check scan the mirror does inside
+	// make() is NOT charged here (the asm does that via difference tables
+	// inside make(); its cost lives in Make). See chargeAttacked.
+	Attacked float64
+	// TTProbe is charged once per FULL-WIDTH node (the mirror probes the TT
+	// exactly once per full-width node). In the fitted reduced model it
+	// therefore doubles as the full-width-node premium: it bundles the TT
+	// probe/store plus the sprep dispatch (null-move, RFP/futility) that
+	// only full-width nodes run. TTStore is a separate counter, priced 0 by
+	// default (its cost is inside TTProbe).
+	TTProbe float64
+	TTStore float64
+	// Generate is the fixed per-call cost of the move generator; MovePerGen
+	// is the marginal cost per pseudo-legal move it emits.
+	Generate   float64
+	MovePerGen float64
+}
+
+// DefaultCycleCosts is the ridge-regularized fit against TestMicroAB's 18
+// searches (masks 0x1f/0x07/0x00), reduced to the [node,make,eval,ttprobe]
+// regressors so the costs transfer to the mirror's (QS-inflated) counts
+// without distortion. Applied to the asm operation counts it predicts each
+// per-mask GRAND TOTAL within ~12% and each middlegame search within ~20%
+// (the 7-piece endgame is a documented outlier). Applied to the mirror's
+// own counts it reproduces the ~4-6% rook-term cycle fraction the asm shows
+// (TestEvalTermTax) — the property that makes a cycle budget discount a
+// feature's Elo by its real cost. Derived in TestCycleModelFit; see
+// cycles.md. EvalTerm defaults to 0 (no experimental term); a screen sets
+// it via PlayerCfg.EvalTermsCost.
+var DefaultCycleCosts = CycleCosts{
+	Node:     fittedNode,
+	Make:     fittedMake,
+	Eval:     fittedEval,
+	TTProbe:  fittedTTProbe,
+	EvalTerm: 0,
+	// Attacked / Generate / MovePerGen / MakeNull / TTStore are folded into
+	// the four fitted coefficients above (their asm cost is absorbed via
+	// correlation with node/make counts) and default to 0. They exist so a
+	// future recalibration can price them separately. See cycles.md.
+}
+
+// Fitted coefficients (emulated 6502 cycles) for the reduced
+// [node,make,eval,ttprobe] model, from TestCycleModelFit (regressing the
+// asm cycle total onto the asm operation counts over the 18 microAB
+// searches). These four ops have the closest mirror/asm per-node frequency
+// so the costs transfer to mirror counts with least distortion. fittedConst
+// is the per-search intercept (reported/validated, not charged at runtime).
+// See cycles.md for the table, residuals, and known limitations.
+const (
+	fittedNode    = 1013.0 // per node entry (all nodes; bundles QS overhead)
+	fittedMake    = 1137.0 // per make()+unmake() pair
+	fittedEval    = 872.0  // per eval() base call
+	fittedTTProbe = 9637.0 // per full-width node (TT probe + sprep/null/futility dispatch)
+	fittedConst   = 0.0    // through-origin fit (zero ops = zero cycles)
+)
+
+// CycleAccount holds the live cycle estimate plus per-operation counters.
+// The counters double as the calibration regressors and as diagnostics;
+// they are exact deterministic functions of the search tree.
+type CycleAccount struct {
+	Est uint64 // running estimated 6502 cycles (the budget quantity)
+
+	Nodes        uint64 // search() entries (== the asm "search" probe)
+	NodesFull    uint64 // ... at ply < MaxDepth (TT-probing full-width nodes)
+	NodesQS      uint64 // ... at ply >= MaxDepth, not in check (stand-pat QS)
+	NodesEvasion uint64 // ... at ply >= MaxDepth, in check (full evasion node)
+
+	Makes    uint64 // real make() calls (== the asm "make" probe)
+	Unmakes  uint64 // unmake() calls (== Makes; folded into Make cost)
+	MakeNull uint64 // makenull() calls (separate asm routine)
+
+	// Make count broken out by move class (all priced at Costs.Make today;
+	// exposed for transparency and future per-class calibration).
+	MakeQuiet, MakeCap, MakePromo, MakeCastle, MakeEP uint64
+
+	Evals      uint64 // eval() calls (== the asm "eval" probe)
+	EvalsExtra uint64 // ... of which computed an EvalTerms (extra) sum
+
+	Attacked    uint64 // attacked() scans charged at Costs.Attacked
+	AttackedAll uint64 // ALL attacked() scans incl. in-make gives-check
+
+	TTProbes uint64 // ttprobe() calls (== the asm "ttprobe" probe)
+	TTStores uint64 // ttstore() calls
+
+	Generates uint64 // generate() calls (== the asm "generate" probe)
+	MovesGen  uint64 // pseudo-legal moves emitted across all generate() calls
+}
+
+// EvalTermsCost returns a conservative estimated per-eval-call cost, in
+// emulated 6502 cycles, for an experimental EvalTerms set that has NO asm
+// implementation yet. It is deliberately pessimistic: the asm's ported
+// FT_ROOKX subset (RookTermsAsm) measured 219 cycles/call doing rook
+// open/semi-open/doubled + blockade scans; a term set doing comparable
+// per-slot work should be taxed at least that much, and a richer set more.
+// A screen that has a real asm cost should use the measured number
+// instead. The rule of thumb baked in: ~219 cycles per "piece-list pass"
+// the term needs, floored at 219 so nothing screens cheaper than the
+// cheapest thing we have actually measured.
+func EvalTermsCost(pieceListPasses int) float64 {
+	const perPass = RookTermCost
+	if pieceListPasses < 1 {
+		pieceListPasses = 1
+	}
+	return perPass * float64(pieceListPasses)
+}
+
+// RookTermCost is the measured asm cost of the FT_ROOKX extraterm
+// (RookTermsAsm), 219 cycles per eval call. Use it (via
+// PlayerCfg.EvalTermsCost) to reproduce the real cycle tax of the rook set.
+const RookTermCost = 219.0
+
+// cycleActive reports whether cycle accounting runs for the current
+// search. Kept off the hot NodeBudget path so that mode is untouched.
+func (e *Engine) cycleActive() bool { return e.cyc }
+
+// resetCycles zeroes the account and computes whether accounting is active
+// for this search. Called at the top of every search entry point.
+func (e *Engine) resetCycles() {
+	e.Cyc = CycleAccount{}
+	e.cyc = e.CycleBudget != 0 || e.CycleTrack
+	if e.Costs == (CycleCosts{}) {
+		e.Costs = DefaultCycleCosts
+	}
+}
+
+// chargeNode books one search() entry at the given node type.
+func (e *Engine) chargeNode(qs, evasion bool) {
+	c := &e.Cyc
+	c.Nodes++
+	switch {
+	case !qs:
+		c.NodesFull++
+	case evasion:
+		c.NodesEvasion++
+	default:
+		c.NodesQS++
+	}
+	c.Est += uint64(e.Costs.Node)
+}
+
+// chargeMake books one real make()+unmake() pair, classified by move.
+func (e *Engine) chargeMake(m Move, victim byte) {
+	c := &e.Cyc
+	c.Makes++
+	switch {
+	case m.Flags&FlCastle != 0:
+		c.MakeCastle++
+	case m.Flags&FlEP != 0:
+		c.MakeEP++
+	case m.Flags&FlPromo != 0:
+		c.MakePromo++
+	case victim != 0:
+		c.MakeCap++
+	default:
+		c.MakeQuiet++
+	}
+	c.Est += uint64(e.Costs.Make)
+}
+
+func (e *Engine) chargeMakeNull() {
+	e.Cyc.MakeNull++
+	e.Cyc.Est += uint64(e.Costs.MakeNull)
+}
+
+// chargeEval books one eval() call. extra reports whether an EvalTerms sum
+// was computed (adds the configurable feature tax).
+func (e *Engine) chargeEval(extra bool) {
+	c := &e.Cyc
+	c.Evals++
+	c.Est += uint64(e.Costs.Eval)
+	if extra {
+		c.EvalsExtra++
+		c.Est += uint64(e.Costs.EvalTerm)
+	}
+}
+
+// chargeAttacked books an attacked() scan. countedAgainstAsm is false for
+// the in-make gives-check scan, which the asm does via difference tables
+// inside make() (its cost is in Costs.Make): that scan bumps AttackedAll
+// for diagnostics but is not priced or counted as the asm "attacked" op.
+func (e *Engine) chargeAttacked(countedAgainstAsm bool) {
+	c := &e.Cyc
+	c.AttackedAll++
+	if countedAgainstAsm {
+		c.Attacked++
+		c.Est += uint64(e.Costs.Attacked)
+	}
+}
+
+func (e *Engine) chargeTTProbe() {
+	e.Cyc.TTProbes++
+	e.Cyc.Est += uint64(e.Costs.TTProbe)
+}
+
+func (e *Engine) chargeTTStore() {
+	e.Cyc.TTStores++
+	e.Cyc.Est += uint64(e.Costs.TTStore)
+}
+
+func (e *Engine) chargeGenerate(nMoves int) {
+	c := &e.Cyc
+	c.Generates++
+	c.MovesGen += uint64(nMoves)
+	c.Est += uint64(e.Costs.Generate) + uint64(nMoves)*uint64(e.Costs.MovePerGen)
+}

@@ -20,13 +20,31 @@ type PlayerCfg struct {
 	KB          *KBTables
 	Ord         OrderParams
 
+	// Extra enables the experimental cheap eval terms (task #18/#51) for
+	// this side. Zero = off (the asm's current eval). Pair it with
+	// EvalTermsCost so cycle-budgeted screens pay the term's real 6502 tax.
+	Extra EvalTerms
+	// EvalTermsCost is the estimated per-eval-call 6502 cost of the Extra
+	// terms, charged only in CycleBudget mode (Costs.EvalTerm). 0 leaves the
+	// terms untaxed (node-budget behavior). For the ported rook set use
+	// RookTermCost (219); for an unimplemented term use EvalTermsCost(passes)
+	// for a deliberately pessimistic estimate. This is the lever that makes
+	// a feature's measured Elo automatically discount its cycle cost.
+	EvalTermsCost float64
+
 	// NodeBudget selects the node-budgeted iterative-deepening mode: when
 	// > 0, each move runs SearchBudget(NodeBudget, MaxIters) instead of
 	// the fixed-depth SearchFixed(Depth). This is the mode that lets node-
 	// saving features (ordering, QS shaping, LMR) convert their savings
 	// into extra search depth, which fixed-depth self-play cannot see.
 	NodeBudget uint64
-	MaxIters   int // ID depth ceiling for budgeted mode (0 => MaxPly-1)
+	// CycleBudget selects the CYCLE-budgeted iterative-deepening mode: when
+	// > 0 (and NodeBudget == 0), each move runs SearchCycleBudget(CycleBudget,
+	// MaxIters), stopping on estimated 6502 cycles instead of nodes. This is
+	// the mode that taxes each feature by its real per-node cost. Takes
+	// precedence over NodeBudget if both are set.
+	CycleBudget uint64
+	MaxIters    int // ID depth ceiling for budgeted mode (0 => MaxPly-1)
 }
 
 func (c *PlayerCfg) engine() *Engine {
@@ -42,6 +60,10 @@ func (c *PlayerCfg) engine() *Engine {
 	}
 	e.KB = c.KB
 	e.Ord = c.Ord
+	e.Extra = c.Extra
+	if c.EvalTermsCost != 0 {
+		e.Costs.EvalTerm = c.EvalTermsCost
+	}
 	return e
 }
 
@@ -133,13 +155,20 @@ func PlayGame(white, black PlayerCfg, opening []string, rnd *rand.Rand, collect 
 		eng.Seed = byte(rnd.IntN(255)) + 1 // dither on
 		var best Move
 		var score int
-		if cfg.NodeBudget > 0 {
+		switch {
+		case cfg.CycleBudget > 0:
+			maxIters := cfg.MaxIters
+			if maxIters <= 0 {
+				maxIters = MaxPly - 1
+			}
+			best, score = eng.SearchCycleBudget(cfg.CycleBudget, maxIters)
+		case cfg.NodeBudget > 0:
 			maxIters := cfg.MaxIters
 			if maxIters <= 0 {
 				maxIters = MaxPly - 1
 			}
 			best, score = eng.SearchBudget(cfg.NodeBudget, maxIters)
-		} else {
+		default:
 			best, score = eng.SearchFixed(cfg.Depth)
 		}
 		if best.From == NoSq {

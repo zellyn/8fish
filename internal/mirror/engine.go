@@ -18,6 +18,22 @@ type Engine struct {
 	NodeBudget uint64
 	aborted    bool
 
+	// CycleBudget is the per-move hard cap on ESTIMATED 6502 cycles for
+	// SearchCycleBudget's iterative deepening (0 = off). It is the cycle-
+	// denominated analogue of NodeBudget: when Cyc.Est reaches it mid-
+	// iteration, aborted is set and the iteration's partial result is
+	// discarded. See cycles.go for the calibrated cost model.
+	CycleBudget uint64
+	// CycleTrack forces cycle accounting on even without a budget (for
+	// calibration/diagnostics); it never changes search behavior.
+	CycleTrack bool
+	cyc        bool // accounting active this search (CycleBudget!=0||CycleTrack)
+	// Costs is the per-operation cycle cost table (defaults to
+	// DefaultCycleCosts at NewEngine); Cyc holds the live estimate+counters.
+	Costs        CycleCosts
+	Cyc          CycleAccount
+	attackInMake bool // true while make() computes the child gives-check scan
+
 	// FixFutilityGuard forces the signed-aware RFP/futility guard on
 	// (equivalent to Fut.CorrectGuard). Kept for the original guard A/B;
 	// prefer Fut for margin experiments.
@@ -164,7 +180,7 @@ type QSParams struct {
 // NewEngine returns an engine with all features on and the asm's
 // current pstruct weights and LMR rules.
 func NewEngine() *Engine {
-	e := &Engine{Features: FtAll, Weights: DefaultWeights, LMR: DefaultLMR, Fut: DefaultFutility}
+	e := &Engine{Features: FtAll, Weights: DefaultWeights, LMR: DefaultLMR, Fut: DefaultFutility, Costs: DefaultCycleCosts}
 	for i := range e.moves {
 		e.moves[i] = make([]Move, 0, 128)
 	}
@@ -250,6 +266,11 @@ func (e *Engine) remPiece(piece, sq byte) {
 // attacked reports whether sq is attacked by any piece of side
 // bySide (0/8), mirroring asm attacked().
 func (e *Engine) attacked(sq byte, bySide byte) bool {
+	if e.cyc {
+		// The in-make gives-check scan is the asm's difference-table update
+		// inside make(), not an asm attacked() call; don't charge it here.
+		e.chargeAttacked(!e.attackInMake)
+	}
 	p := &e.Pos
 	base := int(bySide) << 1 // 0 or 16
 	for slot := base; slot < base+16; slot++ {
@@ -359,6 +380,9 @@ func (e *Engine) make(m Move) {
 	u.capSq = capSq
 	victim := p.Board[capSq]
 	u.cap = victim
+	if e.cyc {
+		e.chargeMake(m, victim)
+	}
 	if victim != 0 {
 		e.hashPiece(victim, capSq)
 		e.remPiece(victim, capSq)
@@ -417,8 +441,11 @@ func (e *Engine) make(m Move) {
 
 	// Gives-check for the child ply. The asm propagates this from
 	// difference tables (F2, verified node-exact against a full scan by
-	// FT_CKVERIFY); the full scan is semantically identical.
+	// FT_CKVERIFY); the full scan is semantically identical. Its cost is
+	// booked to make() (attackInMake suppresses the attacked() charge).
+	e.attackInMake = true
 	e.inChk[p.Ply] = e.curInCheck()
+	e.attackInMake = false
 
 	if p.PDirty && e.Features&FtPstruct != 0 {
 		e.pawnterm()
@@ -453,6 +480,9 @@ func (e *Engine) castleRook(to byte) {
 
 // unmake undoes the move recorded at Ply-1.
 func (e *Engine) unmake() {
+	if e.cyc {
+		e.Cyc.Unmakes++ // cost folded into chargeMake's paired cost
+	}
 	p := &e.Pos
 	p.Ply--
 	u := &e.undo[p.Ply]
@@ -500,6 +530,9 @@ func (e *Engine) uncastleRook(to byte) {
 // change. The child is never in check (null is only tried when not in
 // check).
 func (e *Engine) makenull() {
+	if e.cyc {
+		e.chargeMakeNull()
+	}
 	p := &e.Pos
 	u := &e.undo[p.Ply]
 	u.from = NoSq // marks this ply's move as a null

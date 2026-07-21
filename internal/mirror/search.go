@@ -5,6 +5,7 @@ package mirror
 // best move (NoMove if no legal moves) and the root score.
 func (e *Engine) SearchFixed(depth int) (Move, int) {
 	e.NodeBudget = 0
+	e.resetCycles() // accounting active only if CycleBudget/CycleTrack set
 	e.newMove()
 	e.iterate(depth)
 	return e.Best, e.RootScore
@@ -29,6 +30,7 @@ func (e *Engine) SearchFixed(depth int) (Move, int) {
 // time, so an A/B replay is bit-identical.
 func (e *Engine) SearchBudget(budget uint64, maxDepth int) (Move, int) {
 	e.Nodes = 0 // per-move node accounting for the budget
+	e.resetCycles()
 	e.newMove()
 	best, bestScore := NoMove, 0
 	for d := 1; d <= maxDepth; d++ {
@@ -51,6 +53,48 @@ func (e *Engine) SearchBudget(budget uint64, maxDepth int) (Move, int) {
 		}
 	}
 	e.NodeBudget = 0
+	return best, bestScore
+}
+
+// SearchCycleBudget is the CYCLE-denominated analogue of SearchBudget: it
+// runs iterative deepening under a per-move budget of ESTIMATED 6502
+// cycles (Cyc.Est, see cycles.go) instead of raw nodes, with identical
+// soft-stop semantics — begin a new iteration only while under ~50% of the
+// budget, hard-cap aborts an in-progress iteration and DISCARDS its
+// partial result, depth 1 always completes. Deterministic given
+// (position, budget, features, dither seed): the cycle estimate is a pure
+// function of the tree, so an A/B replay is bit-identical, exactly like
+// the node-budgeted mode. This is the mode that taxes a feature by its
+// real 6502 cost, so a cheap-in-nodes/expensive-in-cycles term (e.g. an
+// eval term costed via Costs.EvalTerm) converts fewer of its node savings
+// into extra depth than a node budget would grant it.
+func (e *Engine) SearchCycleBudget(budget uint64, maxDepth int) (Move, int) {
+	e.Nodes = 0
+	e.CycleBudget = budget // enables accounting for the whole move
+	e.CycleTrack = false
+	e.resetCycles() // cyc=true (budget!=0); zero Est and the counters
+	e.newMove()
+	best, bestScore := NoMove, 0
+	for d := 1; d <= maxDepth; d++ {
+		if d > 1 {
+			// Soft start gate: skip a new iteration past the halfway mark.
+			if e.Cyc.Est*2 >= budget {
+				break
+			}
+			e.CycleBudget = budget // hard cap for this (and later) iterations
+		} else {
+			e.CycleBudget = 0 // depth 1 always completes (cyc stays on)
+		}
+		e.iterate(d)
+		if e.aborted {
+			break // incomplete iteration: keep the last completed result
+		}
+		best, bestScore = e.Best, e.RootScore
+		if best.From == NoSq {
+			break // no legal moves (mate/stalemate): deeper won't help
+		}
+	}
+	e.CycleBudget = 0
 	return best, bestScore
 }
 
@@ -100,6 +144,16 @@ func (e *Engine) search() int {
 	}
 	p := &e.Pos
 	ply := p.Ply
+	if e.cyc {
+		// Book this node's base cost (by type), then apply the cycle budget
+		// soft-stop, mirroring the node-budget hard abort above.
+		qsNode := ply >= e.MaxDepth
+		e.chargeNode(qsNode, qsNode && e.inChk[ply])
+		if e.CycleBudget != 0 && e.Cyc.Est >= e.CycleBudget {
+			e.aborted = true
+			return 0
+		}
+	}
 
 	if ply >= MaxPly-1 {
 		return e.eval() // hard ply cap: static eval
@@ -512,6 +566,9 @@ func ttIndex(hash uint32) int {
 
 // ttprobe returns the entry and its ply-adjusted score on a hit.
 func (e *Engine) ttprobe() (*ttEntry, int, bool) {
+	if e.cyc {
+		e.chargeTTProbe()
+	}
 	p := &e.Pos
 	ent := &e.tt[ttIndex(p.Hash)]
 	if ent.depthBound&3 == 0 || ent.verify != p.Hash>>8 {
@@ -532,6 +589,9 @@ func (e *Engine) ttprobe() (*ttEntry, int, bool) {
 func (e *Engine) ttstore(bound int, from, to byte, score int) {
 	if e.aborted {
 		return // don't poison the TT with garbage scores while unwinding
+	}
+	if e.cyc {
+		e.chargeTTStore()
 	}
 	p := &e.Pos
 	depth := e.MaxDepth - p.Ply

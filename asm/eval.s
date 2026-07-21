@@ -1435,18 +1435,5 @@ evseed: ; dither: 0-3cp of seeded noise breaks deterministic move
         inc SCORE+1
 evdone: rts
 
-; everec: record SCORE as this ply's improving static eval and mark it
-; recorded (improving.go: eval() writes evalStack[ply]/evalValid[ply]).
-; Kept OUT of eval itself so the hot QS stand-pat eval path is byte-
-; identical when the feature is off; the full-width callers (null / RFP /
-; the forced full-signal eval in search.s) invoke it under the FT2_IMPROV
-; gate. Clobbers A, Y.
-everec:
-        ldy PLY
-        lda SCORE
-        sta EVALSTKL,y
-        lda SCORE+1
-        sta EVALSTKH,y
-        lda #1
-        sta EVALVALID,y
-        rts
+; (everec was removed in deep opt r4: search.s inlined the eval-record at
+; its three call sites, and EVALVALID became a single ZP byte.)

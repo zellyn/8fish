@@ -146,7 +146,7 @@ func TestBoardClusterFine(t *testing.T) {
 	}
 }
 
-func TestMicroABAdopted(t *testing.T) {
+func TestMicroABAdoptedProbes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("diagnostic: run explicitly")
 	}

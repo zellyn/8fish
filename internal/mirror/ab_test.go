@@ -177,6 +177,41 @@ func TestLMPSweepNodes(t *testing.T) {
 	}
 }
 
+// TestLMPNodesASM: depth-6 node reduction of the recommended LMP variant
+// (3+2d Dmax3) under the ASM-MATCHED ordering config (mask 0x1f: TT +
+// killers + two-tier MVV, NO SEE, NO history — the real asm engine's
+// ordering, which routes through the five-pass moveLoop, not the scored
+// loop). Confirms LMP is wired into that path and quantifies the tree cut
+// the asm port would see.
+func TestLMPNodesASM(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow")
+	}
+	rec := LMPParams{Dmax: 3, Base: 3, Mult: 2} // recommended variant
+	var offTotal, onTotal uint64
+	for _, fen := range benchFENs(t) {
+		pos, err := ParseFEN(fen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, lmp := range []LMPParams{{}, rec} {
+			eng := NewEngine()
+			eng.Features = FtAll // 0x1f: asm-matched, five-pass ordering
+			eng.QS = QSParams{RecapAfter: 2}
+			eng.LMP = lmp
+			eng.SetPosition(pos)
+			eng.SearchFixed(6)
+			if lmp.Dmax == 0 {
+				offTotal += eng.Nodes
+			} else {
+				onTotal += eng.Nodes
+			}
+		}
+	}
+	t.Logf("asm-matched 0x1f: off %d -> on %d nodes (%+.1f%%)",
+		offTotal, onTotal, 100*(float64(onTotal)/float64(offTotal)-1))
+}
+
 // TestQSShapeNodes: depth-6 total and QS node counts across QS-shape
 // variants (phase A; the interesting frontier is 30-50% cheaper QS at
 // small fixed-depth Elo cost).

@@ -317,6 +317,13 @@ func (e *Engine) moveLoop() int {
 		pass = 0
 	}
 
+	// Late-move pruning arming (same rule as orderedMoveLoop): quiets are
+	// passes 3 (killers) and 4 (non-killer), so once the node qualifies the
+	// per-move test is a pure count compare. Never armed at qs nodes
+	// (rem <= 0 there, so lmpNodeOK already returns false).
+	rem := e.MaxDepth - ply
+	lmpOn := !qs && e.lmpNodeOK(ply, rem)
+
 	for {
 		for i := range list {
 			m := list[i]
@@ -388,6 +395,16 @@ func (e *Engine) moveLoop() int {
 				}
 			}
 
+			// Late-move (movecount) pruning: quiets in passes 3/4 past
+			// threshold(rem) legal moves are skipped. Killers (pass 3) are
+			// spared only with ExemptKillers; checks are spared only with
+			// KeepChecks (which needs the move made to be known).
+			lmpQuiet := pass == 4 || (pass == 3 && !e.LMP.ExemptKillers)
+			lmpCand := lmpOn && lmpQuiet && e.legal[ply] >= e.LMP.lmpThreshold(rem)
+			if lmpCand && !e.LMP.KeepChecks {
+				continue
+			}
+
 			// Make + legality: the mover must not leave their king
 			// attacked. (The asm's lazy-legality fast path is a pure
 			// optimization with identical results.)
@@ -395,6 +412,10 @@ func (e *Engine) moveLoop() int {
 			moverKing := p.PieceSq[int(p.Side^ColorMask)<<1]
 			if e.attacked(moverKing, p.Side) {
 				e.unmake()
+				continue
+			}
+			if lmpCand && !e.inChk[ply+1] {
+				e.unmake() // KeepChecks: legal quiet past the count, not a check
 				continue
 			}
 			// QS quiet-checks pass: only search moves that give check.

@@ -55,6 +55,14 @@ type Engine struct {
 	// loop (zero value = off).
 	LMP LMPParams
 
+	// CM configures the countermove heuristic in the five-pass moveLoop
+	// (zero value = off: a byte-identical no-op). See countermove.go.
+	CM CountermoveParams
+	// counter is the countermove table [prev-piece-type][prev-to-square] ->
+	// refuting (from,to) move. Variant 1 uses only slot [0][to]; variant 2
+	// uses [pieceType][to]. Cleared per root move (or kept, per CM.Persist).
+	counter [8][128]Move
+
 	// Asp configures aspiration windows at the iterative-deepening root
 	// (zero value = off: every ID iteration searches the full window, a
 	// byte-identical no-op).

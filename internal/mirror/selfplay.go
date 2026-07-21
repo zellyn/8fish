@@ -21,6 +21,13 @@ type PlayerCfg struct {
 	Ord         OrderParams
 	LMP         LMPParams
 	Asp         AspirationParams
+	// CM enables the countermove heuristic (zero value = off). Pair it with
+	// CMCost so cycle-budgeted screens pay its real per-node 6502 tax.
+	CM CountermoveParams
+	// CMCost is the estimated per-probe/per-store 6502 cost of the
+	// countermove heuristic, charged only in CycleBudget mode
+	// (Costs.Countermove). 0 leaves it untaxed (node-budget behavior).
+	CMCost float64
 
 	// Extra enables the experimental cheap eval terms (task #18/#51) for
 	// this side. Zero = off (the asm's current eval). Pair it with
@@ -68,6 +75,10 @@ func (c *PlayerCfg) engine() *Engine {
 	}
 	e.LMP = c.LMP
 	e.Asp = c.Asp
+	e.CM = c.CM
+	if c.CMCost != 0 {
+		e.Costs.Countermove = c.CMCost
+	}
 	return e
 }
 

@@ -172,16 +172,23 @@ func match(args []string) {
 	bLMP := fs.String("blmp", "", "B LMP params")
 	aAsp := fs.String("aasp", "", "A aspiration params: delta[,policy] policy=full|prog|asym (empty = off)")
 	bAsp := fs.String("basp", "", "B aspiration params")
+	aCM := fs.String("acm", "", "A countermove params: indexing[,beforekillers[,persist]] indexing=1(to)|2(piece,to) (empty = off)")
+	bCM := fs.String("bcm", "", "B countermove params")
+	cbudget := fs.Uint64("cbudget", 0, "per-move CYCLE budget (>0 selects cycle-budgeted mode, both sides; overrides -budget)")
+	aCMCost := fs.Float64("acmcost", 0, "A per-node countermove cycle cost (cycle mode only)")
+	bCMCost := fs.Float64("bcmcost", 0, "B per-node countermove cycle cost (cycle mode only)")
 	fs.Parse(args)
 
 	lines, err := mirror.GenOpenings(sprt.Openings, *pairs, *seed)
 	check(err)
 	a := mirror.PlayerCfg{Features: byte(*aMask), Weights: parseWeights(*aw), Depth: *depth,
 		FixFutility: *aFix, LMR: parseLMR(*aLMR), QS: parseQS(*aQS), KB: loadKB(*aKB), Fut: parseFut(*aFut), Ord: parseOrd(*aOrd),
-		LMP: parseLMP(*aLMP), Asp: parseAsp(*aAsp), NodeBudget: *budget, MaxIters: *maxiters}
+		LMP: parseLMP(*aLMP), Asp: parseAsp(*aAsp), CM: parseCM(*aCM), CMCost: *aCMCost,
+		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	b := mirror.PlayerCfg{Features: byte(*bMask), Weights: parseWeights(*bw), Depth: *depth,
 		FixFutility: *bFix, LMR: parseLMR(*bLMR), QS: parseQS(*bQS), KB: loadKB(*bKB), Fut: parseFut(*bFut), Ord: parseOrd(*bOrd),
-		LMP: parseLMP(*bLMP), Asp: parseAsp(*bAsp), NodeBudget: *budget, MaxIters: *maxiters}
+		LMP: parseLMP(*bLMP), Asp: parseAsp(*bAsp), CM: parseCM(*bCM), CMCost: *bCMCost,
+		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	start := time.Now()
 	res, err := mirror.Match(a, b, lines, *pairs, *workers, *seed)
 	check(err)
@@ -189,8 +196,11 @@ func match(args []string) {
 	if *budget > 0 {
 		mode = fmt.Sprintf("budget %d nodes/move (maxiters %d)", *budget, *maxiters)
 	}
-	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q) %s: %s (%v)\n",
-		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp,
+	if *cbudget > 0 {
+		mode = fmt.Sprintf("budget %d cycles/move (maxiters %d)", *cbudget, *maxiters)
+	}
+	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q) %s: %s (%v)\n",
+		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM,
 		mode, res, time.Since(start).Round(time.Second))
 }
 
@@ -348,6 +358,22 @@ func parseLMP(s string) mirror.LMPParams {
 	}
 	return mirror.LMPParams{Dmax: dmax, Base: base, Mult: mult, Quad: quad,
 		ExemptKillers: ek != 0, KeepChecks: kc != 0}
+}
+
+// parseCM parses "indexing[,beforekillers[,persist]]" into a
+// CountermoveParams; empty means off (zero value). indexing: 1 = [to],
+// 2 = [piece-type][to].
+func parseCM(s string) mirror.CountermoveParams {
+	if s == "" {
+		return mirror.CountermoveParams{}
+	}
+	var indexing, bk, persist int
+	n, err := fmt.Sscanf(s, "%d,%d,%d", &indexing, &bk, &persist)
+	if (err != nil && n < 1) || n < 1 {
+		fmt.Fprintf(os.Stderr, "bad countermove params %q (want indexing[,beforekillers[,persist]])\n", s)
+		os.Exit(2)
+	}
+	return mirror.CountermoveParams{Indexing: indexing, BeforeKillers: bk != 0, Persist: persist != 0}
 }
 
 // parseAsp parses "delta[,policy]" into an AspirationParams; empty means

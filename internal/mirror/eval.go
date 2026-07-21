@@ -262,6 +262,9 @@ func taper(mg, eg, phase int) int {
 // eval returns the score from the side to move's POV including the
 // pstruct term, tempo, and dither, mirroring asm eval.
 func (e *Engine) eval() int {
+	if e.cyc {
+		e.chargeEval(e.Extra.anyOn())
+	}
 	p := &e.Pos
 	score := p.taperedWhite()
 	if e.KB != nil {

@@ -3,6 +3,70 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — deep optimization review round 4, board cluster: −2.46% total cycles at identical trees
+
+Board cluster (board.s make/unmake/attacked + tt.s), measured share
+27.35% of adopted-config cycles before the pass, 25.91% after. Every
+change proven tree-identical: MicroAB fingerprints (18 cases,
+masks 1f/07/00) and the new adopted-config fingerprint (0x1F +
+FT2_IMPROV, depth 6) byte-identical in every entry count, score and
+best move; only cycles moved.
+
+**attacked(): reversed-attack-table slot filter + measured scan order
+(−12.9% of attacked's cycles).** New 375-byte RATTACK table (TABLES
+segment, page-aligned): ATTACKTAB with the difference axis reversed
+plus a zero tail, so with ZP pointer ATP2 = RATTACK+$77−ATSQ the whole
+per-slot filter is ldy PIECESQ+n / lda (ATP2),y / beq next — 12 cycles
+per live slot vs 17, no carry discipline, and tombstones (NOSQ indexes
+the zero tail) cost 13 with NO separate test. atgeo now takes Y = the
+from-square directly (it used to reconstruct it from the diff).
+Scan order measured on 336K tapped attacked() operands across three
+position sets: greedy frequency-fitted orders do NOT transfer between
+sets (bench-fit −26% in-sample but only −17% held-out; corpus-fit −22%
+in-sample, −10% on bench), so the adopted order is the principled
+"advance" order — white slots 1..15 then king, black 15..0 — which is
+stable at −13.3%..−14.1% modeled on every set (FEN slot assignment
+scans rank 8 down, so white's low/black's high slots hold the advanced
+pieces, the likely attackers). TestRATTackTable (short suite) pins
+RATTACK[j] == ATTACKTAB[$EE−j] byte-for-byte against the engine's own
+table; attackdiff/attackdist stay green.
+
+**Piece-list liveness metadata: evaluated, honest NULL.** On the
+measured distribution dead slots are just too rare and captures too
+frequent: tombs/call = 1.86 × 13 cyc ≈ 24 cyc/call ceiling, while slot
+compaction costs ~120 cyc per capture make/unmake pair (≈56M over the
+suite vs ≈14M recoverable) and a liveness bitmask can't beat the RATT
+filter's 5-cycle liveness-included test. The RATT zero tail already
+absorbs the old per-slot tombstone branch; nothing cheaper exists to
+skip 1.86 slots/call.
+
+**make/unmake micro-batch (−0.78%):** fused the side-to-move hash xor
+into the two fast-path HASHSTK saves (kills jsr hashstm, −28/make);
+CASTLE==0 skip of the castling-rights mask lookups in both fast movers
+(−20/−14 per make once both sides castled, +5 else); UNDOCAPSQ written
+only by capture branches; removed the dead BOARD[TO]=0 victim clear
+(mover placement overwrites it; takepiece never reads the board);
+unmake fast captures write the victim straight onto TO instead of
+clear-then-restore; PHASE save/restore moved off the quiet fast path
+(only captures/promos change it); ttaddr inlined into ttprobe/ttstore
+(−12 each).
+
+**PSTRUCT save/restore made PDIRTY-conditional (−0.35%):** make saves
+UNDOPSL/H only when this move set PDIRTY (pawn/king mover or pawn
+victim — the only moves that can change PSTRUCT), in the tail right
+before pawnterm; unmake mirrors the exact condition from the undo
+record (pawn-victim branch, pawn/king-mover branch, all slow moves).
+PStructParity (4045) + PTCacheIdenticalTree/RandomWalk green.
+
+MicroAB: 4,294,459,755 → 4,188,647,016 cycles (−2.46%; the three
+steps alone: micros −0.78%, attacked −1.33%, PSTRUCT −0.35%).
+Adopted config (0x1F + FT2_IMPROV): 1,905,559,028 → 1,862,305,445
+(−2.27%). Full battery green: Perft, LegalityTorture, HashConsumption
+Exact, HashElisionCoverage, HashConsistency, PStructParity, PTCache,
+RecapGen, GiveCheckVerify, AttackedDiff/Distribution, WAC, MicroAB,
+banked build. New ZP claim: ATP2 = $30/$31 (was free). engine.bin md5
+1338316e99b8b7b038324195309e58cf.
+
 ## 2026-07-21 — SEE feasibility design: cheap SEE IS 6502-affordable (1.9% tax) but buys NOTHING — DO NOT PORT; SEE+LMP bundle decisively dead
 
 Full design pass on the long-open SEE question, replacing the old

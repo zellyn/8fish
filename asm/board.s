@@ -7,95 +7,94 @@ TYPEATKTAB:
 
 ; ---------------------------------------------------------------
 ; attacked: is ATSQ attacked by any piece of side ATSIDE (0/$08)?
-; Out: carry set if attacked. Clobbers A,X,Y, ATTMP/ATBITS/DIFF/
-; ATDELTA (ATT78 is no longer touched; genrecap still uses it).
+; Out: carry set if attacked. Clobbers A,X,Y, ATP2, ATTMP/ATBITS/
+; DIFF/ATDELTA (ATT78 is no longer touched; genrecap still uses it).
 ;
-; Deep-opt round 3: fully unrolled per-side bodies (no SMC, no dex/bpl
-; loop, no zp ATT78 reload) scanning slots high-to-low like the old
-; loop. X holds ATSQ+$77 for the whole scan and the per-slot filter is
+; Deep-opt round 4: reversed-attack-table slot filter. RATTACK (below)
+; is ATTACKTAB with the difference axis reversed plus a zero tail:
 ;
-;         txa                   ; A = ATSQ+$77
-;         sbc PIECESQ+n         ; diff = ATSQ-from+$77; carry doubles
-;         bcc next_tomb         ;  as the tombstone test: a live square
-;         tay                   ;  (<= $77 <= ATSQ+$77) never borrows,
-;         lda ATTACKTAB,y       ;  NOSQ ($FF > $EE >= ATSQ+$77) always
-;         beq next              ;  does
+;   RATTACK[($77 - ATSQ) + from] = ATTACKTAB[ATSQ - from + $77]
+;   RATTACK[j] = 0 for j >= $EF  (from = NOSQ tombstones land here)
 ;
-; The sbc needs carry SET on entry; every arithmetic path preserves it
-; (tay/lda/beq/jsr don't touch C), and the two paths that break it -
-; a tombstone's bcc and atgeo's carry-clear miss return - re-enter the
-; next slot at its next_tomb entry, which is a sec prefix. Geometric
-; relations (~2 per call) take a jsr to the shared atgeo tail, which
-; reconstructs the from-square as (ATSQ+$77)-diff instead of reloading
-; the piece list, and returns carry = "this slot attacks ATSQ".
+; so with ATP2 = RATTACK + $77 - ATSQ (page-aligned base: the low byte
+; is just $77-ATSQ), the whole per-slot filter is
+;
+;         ldy PIECESQ+n         ; the slot's square, or NOSQ
+;         lda (ATP2),y          ; attack bits for ATSQ-from+$77
+;         beq next              ; no relation / tombstone: next slot
+;
+; - three instructions, no carry discipline, and tombstones need no
+; separate test (they read the zero tail, +1 cycle for the page cross).
+; Geometric relations (~2 per call) jsr the shared atgeo tail with
+; Y = from-square, A = attack bits, X = ATSQ+$77; carry = "this slot
+; attacks ATSQ".
+;
+; Scan order (measured on real operand distributions, task r4): white
+; slots ascending 1..15 then king (slot 0) last, black descending
+; 15..0. FEN slot assignment scans rank 8 downward, so white's LOW
+; slots and black's HIGH slots hold its advanced pieces - the likely
+; attackers. This "advance" order is within 0.8pp of every greedy
+; frequency-fitted order ON HELD-OUT positions (fitted orders do not
+; transfer between position sets) and is stable at -13.3%..-14.1%
+; modeled cost vs the r3 scan across bench/held-out/corpus taps.
 ; ---------------------------------------------------------------
 
-; One 16-slot body. prefix names the per-slot labels (atwNN/atbNN, with
-; NN_t the carry-repairing tombstone entries); base is the side's
-; PIECESQ half. Slot 0 ends the chain: its tombstone bcc lands on a
-; plain rts with carry already clear, its no-relation beq on clc/rts,
-; and after its jsr atgeo the carry IS the answer, so it just rts's.
-.macro ATBODY prefix, base
-        .local missclc, rtsonly
-.repeat 15, i
-.ident(.sprintf("%s%02d_t", prefix, 15-i)):
-        sec
-.ident(.sprintf("%s%02d", prefix, 15-i)):
-        txa
-        sbc base+15-i
-        bcc .ident(.sprintf("%s%02d_t", prefix, 14-i))
-        tay
-        lda ATTACKTAB,y
-        beq .ident(.sprintf("%s%02d", prefix, 14-i))
+; One slot of the scan. base+slot is the PIECESQ entry; next is where
+; both "no relation" and atgeo's miss return continue.
+.macro ATSLOT base, slot, next
+        ldy base+slot
+        lda (ATP2),y
+        beq next
         jsr atgeo
-        bcc .ident(.sprintf("%s%02d_t", prefix, 14-i))
-        rts
-.endrepeat
-.ident(.sprintf("%s00_t", prefix)):
-        sec
-.ident(.sprintf("%s00", prefix)):
-        txa
-        sbc base
-        bcc rtsonly             ; tombstone: carry already clear
-        tay
-        lda ATTACKTAB,y
-        beq missclc
-        jsr atgeo               ; carry = answer
-rtsonly:
-        rts
-missclc:
-        clc
+        bcc next
         rts
 .endmacro
 
 attacked:
+        lda #$77
+        sec
+        sbc ATSQ                ; $77 - ATSQ (ATSQ <= $77: no borrow)
+        sta ATP2
+        lda #>RATTACK
+        sta ATP2+1
+        lda ATSQ
+        adc #$76                ; carry still set: A = ATSQ + $77
+        tax
         lda ATSIDE
         beq atwentry
-        lda ATSQ
-        clc
-        adc #$77                ; never carries: ATSQ <= $77
-        tax
-        jmp atb15_t
+        jmp atbentry            ; (black body is out of branch reach)
 atwentry:
-        lda ATSQ
+; ---- white body: slots 1..15, king (0) last ----
+.repeat 15, i
+.ident(.sprintf("atw%02d", i+1)):
+        ATSLOT PIECESQ, i+1, .ident(.sprintf("atw%02d", (i+2)*((i+2)<16)))
+.endrepeat
+atw00:  ATSLOT PIECESQ, 0, atwmiss
+atwmiss:
         clc
-        adc #$77
-        tax
-        ; fall through into the white body's sec entry
-ATBODY "atw", PIECESQ
-ATBODY "atb", PIECESQ+16
+        rts
+; ---- black body: slots 15..0 ----
+atbentry:
+.repeat 15, i
+.ident(.sprintf("atb%02d", 15-i)):
+        ATSLOT PIECESQ+16, 15-i, .ident(.sprintf("atb%02d", 14-i))
+.endrepeat
+atb00:  ATSLOT PIECESQ+16, 0, atbmiss
+atbmiss:
+        clc
+        rts
 
-; atgeo: shared geometric tail. In: A = ATTACKTAB bits (nonzero),
-; Y = diff, X = ATSQ+$77 (preserved), carry SET. Out: carry set iff
-; this slot's piece attacks ATSQ. Clobbers A,Y, ATTMP/ATBITS/DIFF/
-; ATDELTA.
-atgeo:  sty DIFF
-        sta ATBITS
+; atgeo: shared geometric tail. In: A = attack-table bits (nonzero),
+; Y = the candidate from-square, X = ATSQ+$77 (preserved). Out: carry
+; set iff this slot's piece attacks ATSQ. Clobbers A,Y, ATTMP/ATBITS/
+; DIFF/ATDELTA.
+atgeo:  sta ATBITS
+        sty ATTMP               ; from-square
         txa
-        sbc DIFF                ; carry set: A = from = ATSQ+$77-diff
-        sta ATTMP
-        tay
-        lda a:BOARD,y
+        sec
+        sbc ATTMP               ; diff = ATSQ - from + $77
+        sta DIFF
+        lda a:BOARD,y           ; Y = from-square
         and #TYPEMASK|COLORMASK
         tay
         lda TYPEATK2,y          ; piece's attack bit (pawns by color)
@@ -156,16 +155,17 @@ make:
         sta UNDOEGLO,x
         lda EGSCORE+1
         sta UNDOEGHI,x
-        lda PHASE
-        sta UNDOPHASE,x
+        ; (UNDOPHASE is no longer saved unconditionally: PHASE only
+        ;  changes on captures and promotions, so the fast capture
+        ;  branch and mkslow save it, and unmake restores it only on
+        ;  those same paths - deep opt r4)
         lda HALFMOVE
         sta UNDOHALF,x
         ; (HASHSTK is no longer saved unconditionally here: each path
-        ;  below saves it exactly when it keeps the hash - see HVALID)
-        lda PSTRUCT
-        sta UNDOPSL,x
-        lda PSTRUCT+1
-        sta UNDOPSH,x
+        ;  below saves it exactly when it keeps the hash - see HVALID.
+        ;  UNDOPSL/H likewise moved to the PDIRTY-gated tail: PSTRUCT
+        ;  can only change when a pawn or king event set PDIRTY, and
+        ;  unmake mirrors that condition from the undo record - r4)
 .endif
         ldy FROM
         lda a:BOARD,y           ; force absolute: no lda zp,y mode exists
@@ -183,19 +183,21 @@ make:
 ; consumes no hash (no TT probe/store, no repetition scan), so those
 ; makes skip HASHSTK save + all Zobrist xors; the gives-check case is
 ; repaired by the deferred upgrade after ckdone.
+; (deep opt r4 fast-path shaves: UNDOCAPSQ is written only by the
+; capture branch - nothing reads it for quiet moves; the BOARD[TO]=0
+; victim clear is dead - the mover placement in mkfmvon/mkfmvoff
+; overwrites TO before any read, and takepiece/takepieceq never read
+; the board; UNDOPHASE is saved here rather than in the prologue.)
 mkfast:
-        lda TO
-        sta UNDOCAPSQ,x
-        tay
+        ldy TO
         lda a:BOARD,y           ; victim byte (0 if quiet move)
         sta UNDOCAP,x
         beq mkfquiet
-        ; capture: remove victim, clear square, tombstone list slot
+        ; capture: remove victim, tombstone list slot
         sta VICTIM
+        lda TO
+        sta UNDOCAPSQ,x
 .ifdef NOEVAL
-        ldy TO
-        lda #0
-        sta a:BOARD,y
         ldy VICTIM
         lda SLOTTAB,y
         tay
@@ -203,28 +205,38 @@ mkfast:
         sta PIECESQ,y
         jmp mkfmvoff
 .else
+        lda PHASE
+        sta UNDOPHASE,x
         lda #0
         sta HALFMOVE            ; capture: 50-move clock resets (child<4)
         inx                     ; child ply = PLY+1: quiescence?
         cpx MAXDEPTH
         dex
         bcs mkfcapoff           ; qs capture: hash provably unconsumed
-        ; hash-on capture: save the pre-move hash, advance the watermark
+        ; hash-on capture: save the pre-move hash, advance the watermark.
+        ; The side-to-move xor is fused into the save (HASHSTK gets the
+        ; pre-move hash, HASH gets the stm flip; all later hash updates
+        ; are commutative xors), replacing the old jsr hashstm.
         lda HASH0
         sta HASHSTK0,x
+        eor STMKEY+0
+        sta HASH0
         lda HASH1
         sta HASHSTK1,x
+        eor STMKEY+1
+        sta HASH1
         lda HASH2
         sta HASHSTK2,x
+        eor STMKEY+2
+        sta HASH2
         lda HASH3
         sta HASHSTK3,x
+        eor STMKEY+3
+        sta HASH3
         inx
         stx HVALID
         lda VICTIM              ; Y = TO (capture square) throughout
         jsr takepiece           ; fused hash+phase+psqt
-        ldy TO
-        lda #0
-        sta a:BOARD,y
         ldy VICTIM
         lda SLOTTAB,y
         tay
@@ -234,9 +246,6 @@ mkfast:
 mkfcapoff:
         lda VICTIM              ; Y = TO (capture square)
         jsr takepieceq          ; phase+psqt+pawn-bits only
-        ldy TO
-        lda #0
-        sta a:BOARD,y
         ldy VICTIM
         lda SLOTTAB,y
         tay
@@ -274,14 +283,22 @@ mkfqnp: inc HALFMOVE            ; bounded: root value + MAXPLY < 256
         beq mkfqon
         jsr hashcatchup
         ldx PLY
-mkfqon: lda HASH0               ; save pre-move hash; watermark = child
-        sta HASHSTK0,x
+mkfqon: lda HASH0               ; save pre-move hash; watermark = child.
+        sta HASHSTK0,x          ; The stm xor is fused into the save
+        eor STMKEY+0            ; (see the capture-path comment).
+        sta HASH0
         lda HASH1
         sta HASHSTK1,x
+        eor STMKEY+1
+        sta HASH1
         lda HASH2
         sta HASHSTK2,x
+        eor STMKEY+2
+        sta HASH2
         lda HASH3
         sta HASHSTK3,x
+        eor STMKEY+3
+        sta HASH3
         inx
         stx HVALID
 mkfmvon:
@@ -299,14 +316,17 @@ mkfmvon:
         lda TO
         sta PIECESQ,y
         ; castling rights: CASTLE &= CASTLEMASK[FROM] & CASTLEMASK[TO];
-        ; cmp-before-sta leaves Z = "rights unchanged" (sta keeps flags)
+        ; with no rights left (the common case once both sides have
+        ; castled) nothing can change - skip the mask lookups entirely
+        ldx PLY
+        lda CASTLE
+        beq mkfnocch
         ldy FROM
         lda CASTLEMASK,y
         ldy TO
         and CASTLEMASK,y
         and CASTLE
-        ldx PLY
-        cmp CASTLE
+        cmp CASTLE              ; Z = "rights unchanged" (sta keeps flags)
         sta CASTLE
         beq mkfnocch
         lda UNDOCASTLE,x
@@ -322,8 +342,7 @@ mkfnocch:
 mkfnoep:
         lda #NOSQ
         sta EPSQ
-        jsr hashstm
-        lda SIDE
+        lda SIDE                ; (stm hash already applied at the save)
         eor #COLORMASK
         sta SIDE
         inc PLY
@@ -345,12 +364,15 @@ mkfmvoff:
         tay
         lda TO
         sta PIECESQ,y
+        lda CASTLE              ; no rights left: skip the mask lookups
+        beq mkfoffnc
         ldy FROM
         lda CASTLEMASK,y
         ldy TO
         and CASTLEMASK,y
         and CASTLE
         sta CASTLE
+mkfoffnc:
         lda #NOSQ
         sta EPSQ
         lda SIDE
@@ -366,6 +388,8 @@ mkfmvoff:
 ; ---- slow path: en passant, double push, promotion, castle ----
 mkslow:
 .ifndef NOEVAL
+        lda PHASE               ; slow path always saves PHASE (promos
+        sta UNDOPHASE,x         ;  and ep captures may change it)
         ; rare move kinds always keep the hash exact: catch up any stale
         ; qs suffix, save the pre-move hash, advance the watermark. (The
         ; upgrade tail and hashcatchup can then assume replayed plies
@@ -673,6 +697,19 @@ ckdone:
         beq :+                  ; hash already current for the child
         jsr hashcatchup
 :
+        ; PDIRTY set means this move touched a pawn or king, i.e. the
+        ; only kind of move that can change PSTRUCT: save the pre-move
+        ; value into this move's undo slot (deep opt r4; clean moves
+        ; skip both the save here and the restore in unmake), then
+        ; refresh the term.
+        lda PDIRTY
+        beq mkpdone             ; clean: no save, no recompute
+        ldx PLY
+        dex                     ; the undo slot for THIS move
+        lda PSTRUCT
+        sta UNDOPSL,x
+        lda PSTRUCT+1
+        sta UNDOPSH,x
 .ifdef PTNOCACHE
         ; measurement baseline (task #47): disable the incremental
         ; pawn-structure cache. make never recomputes; eval recomputes
@@ -681,17 +718,14 @@ ckdone:
         lda #0
         sta PDIRTY
 .else
-        ; refresh the pawn/king structure term if a pawn or king moved
-        lda PDIRTY
-        beq mkpdone             ; already clean: skip the redundant clear
         lda FEATURES
         and #FT_PSTRUCT
         beq :+
         jmp pawnterm            ; clears PDIRTY; rts returns to caller
 :       lda #0
         sta PDIRTY
-mkpdone:
 .endif
+mkpdone:
 .endif
         rts
 
@@ -900,8 +934,9 @@ unmake:
         sta EGSCORE
         lda UNDOEGHI,x
         sta EGSCORE+1
-        lda UNDOPHASE,x
-        sta PHASE
+        ; (PHASE is restored only on the capture/slow paths below: quiet
+        ;  flag-free moves never change it and their makes never save
+        ;  it - deep opt r4)
         lda UNDOHALF,x
         sta HALFMOVE
         ; hash: restore only when this ply's HASHSTK entry is valid
@@ -920,46 +955,35 @@ unmake:
         sta HASH3
         stx HVALID              ; clamp the watermark to this ply
 umnohash:
-        lda UNDOPSL,x
-        sta PSTRUCT
-        lda UNDOPSH,x
-        sta PSTRUCT+1
+        ; (PSTRUCT is restored only on the pawn/king paths below,
+        ;  mirroring make's PDIRTY-gated save - deep opt r4)
 .endif
-        ; clear TO, put the original piece byte back on FROM
-        ldy UNDOTO,x
-        lda #0
-        sta a:BOARD,y
-        lda UNDOPIECE,x
-        ldy UNDOFROM,x
-        sta a:BOARD,y
-        tay                     ; piece byte -> mover's slot
-        lda SLOTTAB,y
-        tay
-        lda UNDOFROM,x
-        sta PIECESQ,y
         lda UNDOFLAGS,x
-        bne umslow              ; castle rook / promo handling: rare
-; ---- fast path: flags == 0, no castle, no promo ----
-        ; restore any captured piece
+        bne umtramp             ; castle rook / promo handling: rare
+; ---- fast path: flags == 0, no castle, no promo, capsq == TO ----
         lda UNDOCAP,x
-        beq umfnocap
-        ldy UNDOCAPSQ,x
+        beq umfquiet
+        ; capture: the victim goes straight back onto TO (no dead
+        ; clear-then-restore; deep opt r4), and PHASE returns
+        ldy UNDOTO,x
         sta a:BOARD,y
         tay                     ; victim byte -> its slot
         lda SLOTTAB,y
         tay
-        lda UNDOCAPSQ,x
+        lda UNDOTO,x
         sta PIECESQ,y
 .ifndef NOEVAL
+        lda UNDOPHASE,x
+        sta PHASE
         ; pawn victim: its file bit returns (inlined self-inverse toggle)
         lda UNDOCAP,x
         and #TYPEMASK
         cmp #PAWN
-        bne umfnocap
+        bne umfmover
         lda UNDOCAP,x
         and #COLORMASK
         sta GTMP
-        lda UNDOCAPSQ,x
+        lda UNDOTO,x
         tay
         and #$07
         ora GTMP
@@ -968,14 +992,50 @@ umnohash:
         eor PWBITS,x
         sta PWBITS,x
         ldx PLY
+        lda UNDOPSL,x           ; pawn event: PSTRUCT returns (make saved
+        sta PSTRUCT             ;  it under the same condition)
+        lda UNDOPSH,x
+        sta PSTRUCT+1
 .endif
-umfnocap:
+        jmp umfmover
+umtramp:
+        jmp umslow2             ; (bne range trampoline)
+umfquiet:
+        ; quiet: clear TO
+        ldy UNDOTO,x
+        lda #0
+        sta a:BOARD,y
+umfmover:
+        ; put the original piece byte back on FROM
+        lda UNDOPIECE,x
+        ldy UNDOFROM,x
+        sta a:BOARD,y
+        tay                     ; piece byte -> mover's slot
+        lda SLOTTAB,y
+        tay
+        lda UNDOFROM,x
+        sta PIECESQ,y
 .ifndef NOEVAL
-        ; pawn mover: FROM and TO file bits re-toggle (never a promo here)
+        ; pawn mover: FROM and TO file bits re-toggle (never a promo
+        ; here) and PSTRUCT returns; a king mover restores PSTRUCT only
+        ; (the shield term). Other movers leave both alone, mirroring
+        ; make's PDIRTY-gated save.
         lda UNDOPIECE,x
         and #TYPEMASK
         cmp #PAWN
+        beq umfpawn
+        cmp #KING
         bne umfdone
+        lda UNDOPSL,x           ; king mover: PSTRUCT returns
+        sta PSTRUCT
+        lda UNDOPSH,x
+        sta PSTRUCT+1
+        rts
+umfpawn:
+        lda UNDOPSL,x           ; pawn mover: PSTRUCT returns
+        sta PSTRUCT
+        lda UNDOPSH,x
+        sta PSTRUCT+1
         lda UNDOPIECE,x
         and #COLORMASK
         sta GTMP
@@ -1001,7 +1061,29 @@ umfdone:
         rts
 
 ; ---- slow path: castle / promo / ep flags set ----
-umslow:
+umslow2:
+        ; common board restore (the fast path specializes this): clear
+        ; TO, put the original piece byte back on FROM
+        ldy UNDOTO,x
+        lda #0
+        sta a:BOARD,y
+        lda UNDOPIECE,x
+        ldy UNDOFROM,x
+        sta a:BOARD,y
+        tay                     ; piece byte -> mover's slot
+        lda SLOTTAB,y
+        tay
+        lda UNDOFROM,x
+        sta PIECESQ,y
+.ifndef NOEVAL
+        lda UNDOPHASE,x
+        sta PHASE
+        lda UNDOPSL,x           ; every slow move is a pawn/king event:
+        sta PSTRUCT             ;  make always saved PSTRUCT (promo/ep =
+        lda UNDOPSH,x           ;  pawn, castle = king, double = pawn)
+        sta PSTRUCT+1
+.endif
+        lda UNDOFLAGS,x
         and #FL_CASTLE
         beq umnocastle
         jsr uncastlerook
@@ -1055,3 +1137,43 @@ umpmover:
         ldx PLY
         jmp umpvictim
 .endif
+
+; ---------------------------------------------------------------
+; RATTACK (deep opt r4): the reversed attack table used by attacked()'s
+; slot filter. RATTACK[j] = ATTACKTAB[$EE - j] for j = 0..$EE, then a
+; zero tail through j = $176 so tombstone squares (NOSQ = $FF) indexed
+; as ($77-ATSQ)+$FF always read 0. Literal bytes (a ca65 closed-form
+; .repeat generator proved impractically slow to assemble); the layout
+; is just ATTACKTAB reversed, and TestRATTackTable (board4_test.go, in
+; the short suite) proves RATTACK[j] == ATTACKTAB[$EE-j] plus the zero
+; tail against the engine's own gentables-emitted table byte-for-byte,
+; so the two can never drift apart unnoticed.
+; ---------------------------------------------------------------
+.segment "TABLES"
+.align 256
+RATTACK:
+        .byte $04,$00,$00,$00,$00,$00,$00,$08,$00,$00,$00,$00,$00,$00,$04,$00
+        .byte $00,$04,$00,$00,$00,$00,$00,$08,$00,$00,$00,$00,$00,$04,$00,$00
+        .byte $00,$00,$04,$00,$00,$00,$00,$08,$00,$00,$00,$00,$04,$00,$00,$00
+        .byte $00,$00,$00,$04,$00,$00,$00,$08,$00,$00,$00,$04,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$04,$00,$00,$08,$00,$00,$04,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$04,$01,$08,$01,$04,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$01,$16,$0A,$16,$01,$00,$00,$00,$00,$00,$00
+        .byte $08,$08,$08,$08,$08,$08,$0A,$00,$0A,$08,$08,$08,$08,$08,$08,$00
+        .byte $00,$00,$00,$00,$00,$01,$26,$0A,$26,$01,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$04,$01,$08,$01,$04,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$04,$00,$00,$08,$00,$00,$04,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$04,$00,$00,$00,$08,$00,$00,$00,$04,$00,$00,$00,$00
+        .byte $00,$00,$04,$00,$00,$00,$00,$08,$00,$00,$00,$00,$04,$00,$00,$00
+        .byte $00,$04,$00,$00,$00,$00,$00,$08,$00,$00,$00,$00,$00,$04,$00,$00
+        .byte $04,$00,$00,$00,$00,$00,$00,$08,$00,$00,$00,$00,$00,$00,$04,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
+        .byte $00,$00,$00,$00,$00,$00,$00
+.segment "CODE"

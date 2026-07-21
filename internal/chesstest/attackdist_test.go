@@ -24,7 +24,9 @@ import (
 // (entry-to-exit, within 5%) so the comparison is grounded, not vibes.
 // NOTE: the "ACTUAL measured" line only equals model A when run against
 // the round-2 baseline binary; on the current binary it measures the
-// adopted design (compare it to model B, minus the caller-side jsr).
+// adopted design (round 4: the RATTACK reversed-table slot filter with
+// the "advance" scan order — see costRATT in board4_test.go, which
+// prices that design; models A/B/C remain the historical yardsticks).
 func TestAttackedDistribution(t *testing.T) {
 	if testing.Short() {
 		t.Skip("diagnostic: run explicitly")

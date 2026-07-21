@@ -3,6 +3,98 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — SEE feasibility design: cheap SEE IS 6502-affordable (1.9% tax) but buys NOTHING — DO NOT PORT; SEE+LMP bundle decisively dead
+
+Full design pass on the long-open SEE question, replacing the old
+cost-guess rejection with measured numbers. Key result: **the cost
+objection to SEE was wrong, but so was the value hypothesis** — a
+losing-capture classifier costing only 1.9% of the cycle budget is
+buildable, and it still delivers ~0 Elo, because the nodes it saves are
+cheap ones (the same compression that killed node-budget screening).
+
+**Portable design (implemented in the mirror, `internal/mirror/see.go`):**
+losing-capture classification in the FIVE-PASS moveLoop (the asm-matched
+path), not the orderedMoveLoop sort. A capture reached in capture passes
+1/2 is classified at most once; losing ones are deferred to a new pass 7
+after the quiets (full-width) or pruned/deferred at QS. Asm shape: rewrite
+the move-stack tier class bits to a new class 8 = "losing capture", plus
+one more tier-filtered rescan pass (flagged MOVESTACK/PASSNO contract
+extension). Classification gate exploits the SEE theorem *victim >=
+attacker => SEE >= 0*: only victim < attacker captures (vicVal monotone in
+type, so a type compare) are ever classified.
+
+**Variants and measured 6502 costs** (cycle models on the TRUE operand
+distribution — 68k gate-passing classifications tapped from asm-matched d6
+searches via `SEEProbeHook`; fragment prices from the attacked()-redesign
+models, whose adopted modelB matches the emulator within 0.6%:
+`internal/chesstest/seecost_test.go`; attacked() re-measured on the current
+binary at 388 cyc/call):
+
+| variant | test | cyc/call avg | agreement vs full SEE |
+|---------|------|-------------:|----------------------|
+| 1 pawn-defended | 2 masked probes | 61 | 62.5% (misses 36% of losers) |
+| 2 attacked-defended | 1 attacked(to,enemy) call | 419 (max 1019) | **96.0%** (false-losing 4.0%, missed 0.1%) |
+| 3 full boolean SEE | superpiece enum + byte swap | 728 (max 1327) | 100% (verdict = seeValue sign, 0.09% model rounding) |
+
+Gate 30 cyc, rescan 10 cyc/item. **Mode 2 dominates mode 3**: half the
+price, same classification quality in practice (its d6 tree is even
+slightly smaller). Attacker-enumeration answer (design Q2): the winning
+variant needs NO new enumerator — it IS the existing attacked(); genrecap's
+slot-scan is the same machinery. A value-ordered enumerator (only needed
+for mode 3) would be new superpiece code, and mode 3 is dominated anyway.
+
+**Fixed-depth d6 trees** (asm-matched 0x1f, `TestSEESweepNodes`): atk-fw
+(defer at full-width only) **−22.0%** nodes; atk-fw+pruneQS **−49.3%**;
+pawn variants −14/−22%. Calls/node ≈ 0.23 (fw-only) to 0.54 (fw+qs).
+
+**Operating point** (143M cyc/move, `TestSEEOperatingPoint`): 4 748
+calls/move + 5 875 gates + 19 454 rescan items = 2.36M cyc/move = **1.9%
+of spent cycles (1.7% of the 143M budget)** for atk-fw. Affordability was
+never the problem.
+
+**Cycle-budgeted screens** (143M cyc/move, tax charged via new
+`Costs.SEEGate/SEE/SEERescan`, `mirror match -asee/-aseecost`):
+
+Field, 500 games, seed 6502, ±25: atk-fw **+19**, full-fw +11, pawn-fw+pq
++7, pawn-fw −3, atk-fw+dq −10, atk-fw+pq **−25**, atk-pq **−43**. Every
+QS-prune/defer variant is ≤ 0 — the recap2+delta-shaped QS over-prunes
+further; SEE-in-QS is dead on arrival.
+
+atk-fw deciding run, 12 × 500-game batches (seeds 11111…99999, 13131,
+24242, 35353): +17 +10 +7 +13 +8 +6 +13 −10 −10 +8 −15 −29 →
+**+2092 =1844 −2064 over 6000 games = 50.2% ≈ +2 ± 7. NEUTRAL.** (The +19
+field and +12-at-2000 were the usual upward flukes; same pattern as
+countermove.)
+
+**Untaxed control** (same config, costs 0/0/0, 2000 games, seeds
+11111-44444): +698 =620 −682 = **+3 ± 13**. Even a FREE SEE buys nothing:
+the −22% fixed-depth node saving is concentrated in cheap nodes (deferred
+losing captures spawn quick stand-pat QS children), so a cycle budget
+converts almost none of it into depth. **No implementation-cost
+breakthrough can reopen this variant — the value side is zero, not the
+cost side.**
+
+**Bundle screen (the real prize): atk-fw + LMP(3+2d, Dmax3) vs baseline:
++139 =128 −233 = 40.6% → −66 ± 27 over 500 games. DECISIVELY NEGATIVE.**
+LMP at 0x1f was −85; SEE capture-deferral recovers almost none of it. The
+LMP enabler in the task-#44 mirror config was HISTORY (quiet ordering),
+not SEE (capture ordering) — with quiets still in generation order, LMP
+prunes the same good quiets regardless of where losing captures sit.
+
+**Port recommendation: DO NOT PORT — with the strong form of the negative:
+SEE is affordable (1.9%) and worthless (+2 ± 7), and it does not unlock
+LMP (−66).** What would reopen the ordering-upgrade line is a viable
+QUIET-ordering signal (history-class) on the asm, not a cheaper SEE; the
+896-byte [piece-type][to] history remains the only untested enabler for
+the LMP/LMR pruning stack.
+
+Toggle: `SEEParams{Mode, Margin, DeferFW, PruneQS, DeferQS}`; off (Mode==0)
+is a **byte-identical no-op** — the parity gates
+(`TestSearchMirrorParity`/`TestSearchMirrorParityImproving`) stay green.
+Soundness: `TestSEEOffIsNoop`, `TestSEEDeterminism` (node AND cycle
+budgets), `TestSEEMateSound`, `TestSEESweepNodes`, `TestSEEAgreement`,
+`TestSEEOperatingPoint`, `TestSEEVariantCost` (chesstest cycle models).
+
 ## 2026-07-21 — re-screens under the honest instrument: checks-in-QS CONFIRMED DEAD, bishop pair flips sign but lands neutral
 
 Both pre-fidelity-fix verdicts re-tested at asm-matched 0x1f on the

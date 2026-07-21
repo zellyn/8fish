@@ -454,6 +454,15 @@ func (e *Engine) moveLoop() int {
 		e.chargeCounterProbe()
 	}
 
+	// SEE losing-capture classification (see.go): armed once per node.
+	// The per-ply deferred list collects losing captures skipped in the
+	// capture passes; pass 7 searches them after the quiets (full-width)
+	// or after the winning captures (QS defer). Off = untouched state.
+	seeOn := e.seeNodeActive(qs)
+	if seeOn {
+		e.seeDefer[ply] = e.seeDefer[ply][:0]
+	}
+
 	for {
 		for i := range list {
 			m := list[i]
@@ -464,10 +473,14 @@ func (e *Engine) moveLoop() int {
 				if m.From != e.ttFrom[ply] || m.To != e.ttTo[ply] {
 					continue
 				}
-			} else if e.ttFrom[ply] != NoSq && m.From == e.ttFrom[ply] && m.To == e.ttTo[ply] {
+			} else if pass != 7 && e.ttFrom[ply] != NoSq && m.From == e.ttFrom[ply] && m.To == e.ttTo[ply] {
 				continue
 			}
-			if pass != 0 {
+			// Pass 7 iterates the already-classified deferred losing
+			// captures (list swapped below): no filters re-run, matching
+			// the asm's rewritten-tier rescan (classification happens at
+			// most once per capture per node).
+			if pass != 0 && pass != 7 {
 				isCap := p.Board[m.To] != 0 || m.Flags&(FlEP|FlPromo) != 0
 				if !isCap {
 					switch pass {
@@ -537,6 +550,28 @@ func (e *Engine) moveLoop() int {
 						// stand-pat to alpha.
 						if vicVal[victim] < e.deltaT[ply] {
 							continue
+						}
+						// SEE gate + classification (see.go): only
+						// victim < attacker (minus margin) captures are
+						// ever classified; losing ones are deferred to
+						// pass 7 (or pruned outright at QS with PruneQS).
+						if seeOn {
+							attacker := int(p.Board[m.From] & TypeMask)
+							passed := e.seeGate(attacker, victim)
+							if e.cyc {
+								e.chargeSEEGate(passed, qs)
+							}
+							if passed && e.seeLosing(m) {
+								if e.cyc {
+									e.Cyc.SEELosing++
+								}
+								if !qs {
+									e.seeDefer[ply] = append(e.seeDefer[ply], m)
+								} else if e.SEE.DeferQS && !e.SEE.PruneQS {
+									e.seeDefer[ply] = append(e.seeDefer[ply], m)
+								}
+								continue
+							}
 						}
 					}
 				}
@@ -671,7 +706,21 @@ func (e *Engine) moveLoop() int {
 			}
 		}
 
-		// End of list: advance the pass.
+		// End of list: advance the pass. seePass7 enters the deferred
+		// losing-capture pass when any capture was deferred (asm: one more
+		// tier-filtered rescan of the move stack, charged per item), else
+		// the node is done.
+		seePass7 := func() bool {
+			if !seeOn || len(e.seeDefer[ply]) == 0 {
+				return false
+			}
+			if e.cyc {
+				e.chargeSEERescan(len(list))
+			}
+			list = e.seeDefer[ply]
+			pass = 7
+			return true
+		}
 		switch pass {
 		case 0, 1:
 			pass++
@@ -679,11 +728,15 @@ func (e *Engine) moveLoop() int {
 			if qs {
 				if genChecks {
 					pass = 5 // QS quiet-checks pass after the captures
-				} else {
+				} else if !seePass7() {
 					return e.done()
 				}
 			} else if e.futile[ply] {
-				return e.done()
+				// Futile node: quiets are pruned but captures are still
+				// searched — deferred losing captures included.
+				if !seePass7() {
+					return e.done()
+				}
 			} else {
 				pass = e.firstQuietPass()
 			}
@@ -699,8 +752,12 @@ func (e *Engine) moveLoop() int {
 			} else {
 				pass = 4
 			}
-		default: // pass 4 (full-width final) or pass 5 (QS quiet-checks)
+		case 7:
 			return e.done()
+		default: // pass 4 (full-width final) or pass 5 (QS quiet-checks)
+			if !seePass7() {
+				return e.done()
+			}
 		}
 	}
 }

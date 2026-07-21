@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/zellyn/chess6502/internal/mirror"
@@ -174,6 +175,10 @@ func match(args []string) {
 	bAsp := fs.String("basp", "", "B aspiration params")
 	aCM := fs.String("acm", "", "A countermove params: indexing[,beforekillers[,persist]] indexing=1(to)|2(piece,to) (empty = off)")
 	bCM := fs.String("bcm", "", "B countermove params")
+	aExtra := fs.String("aextra", "", "A experimental eval terms: key:val,... keys ropen,rsemi,bishop,rook7,drook,block,tropism (empty = off)")
+	bExtra := fs.String("bextra", "", "B experimental eval terms")
+	aExtraCost := fs.Float64("aextracost", 0, "A per-eval-call cycle cost of the extra terms (cycle mode only)")
+	bExtraCost := fs.Float64("bextracost", 0, "B per-eval-call cycle cost of the extra terms (cycle mode only)")
 	cbudget := fs.Uint64("cbudget", 0, "per-move CYCLE budget (>0 selects cycle-budgeted mode, both sides; overrides -budget)")
 	aCMCost := fs.Float64("acmcost", 0, "A per-node countermove cycle cost (cycle mode only)")
 	bCMCost := fs.Float64("bcmcost", 0, "B per-node countermove cycle cost (cycle mode only)")
@@ -184,10 +189,12 @@ func match(args []string) {
 	a := mirror.PlayerCfg{Features: byte(*aMask), Weights: parseWeights(*aw), Depth: *depth,
 		FixFutility: *aFix, LMR: parseLMR(*aLMR), QS: parseQS(*aQS), KB: loadKB(*aKB), Fut: parseFut(*aFut), Ord: parseOrd(*aOrd),
 		LMP: parseLMP(*aLMP), Asp: parseAsp(*aAsp), CM: parseCM(*aCM), CMCost: *aCMCost,
+		Extra: parseExtra(*aExtra), EvalTermsCost: *aExtraCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	b := mirror.PlayerCfg{Features: byte(*bMask), Weights: parseWeights(*bw), Depth: *depth,
 		FixFutility: *bFix, LMR: parseLMR(*bLMR), QS: parseQS(*bQS), KB: loadKB(*bKB), Fut: parseFut(*bFut), Ord: parseOrd(*bOrd),
 		LMP: parseLMP(*bLMP), Asp: parseAsp(*bAsp), CM: parseCM(*bCM), CMCost: *bCMCost,
+		Extra: parseExtra(*bExtra), EvalTermsCost: *bExtraCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	start := time.Now()
 	res, err := mirror.Match(a, b, lines, *pairs, *workers, *seed)
@@ -199,8 +206,8 @@ func match(args []string) {
 	if *cbudget > 0 {
 		mode = fmt.Sprintf("budget %d cycles/move (maxiters %d)", *cbudget, *maxiters)
 	}
-	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q) %s: %s (%v)\n",
-		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM,
+	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q extra=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q extra=%q) %s: %s (%v)\n",
+		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aExtra, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bExtra,
 		mode, res, time.Since(start).Round(time.Second))
 }
 
@@ -402,6 +409,46 @@ func parseAsp(s string) mirror.AspirationParams {
 		os.Exit(2)
 	}
 	return mirror.AspirationParams{Delta: delta, Policy: policy}
+}
+
+// parseExtra parses the experimental cheap eval terms (task #18/#51) as a
+// comma-separated list of key:value pairs, e.g. "bishop:30" or
+// "ropen:25,rsemi:12,drook:15,block:18". An empty string leaves every term
+// zero (off), a byte-identical no-op vs the shipped eval. Weights are in
+// centipawns (pawn ~= 100).
+func parseExtra(s string) mirror.EvalTerms {
+	var t mirror.EvalTerms
+	if s == "" {
+		return t
+	}
+	for _, kv := range strings.Split(s, ",") {
+		k, v, ok := strings.Cut(kv, ":")
+		var val int
+		if !ok || func() bool { _, e := fmt.Sscanf(v, "%d", &val); return e != nil }() {
+			fmt.Fprintf(os.Stderr, "bad extra term %q (want key:val)\n", kv)
+			os.Exit(2)
+		}
+		switch k {
+		case "ropen":
+			t.RookOpen = val
+		case "rsemi":
+			t.RookSemi = val
+		case "bishop", "bishoppair":
+			t.BishopPair = val
+		case "rook7":
+			t.Rook7th = val
+		case "drook":
+			t.DoubledRk = val
+		case "block":
+			t.Blockade = val
+		case "tropism":
+			t.Tropism = val
+		default:
+			fmt.Fprintf(os.Stderr, "unknown extra term key %q (want ropen,rsemi,bishop,rook7,drook,block,tropism)\n", k)
+			os.Exit(2)
+		}
+	}
+	return t
 }
 
 // parseQS parses "plycap,recapafter[,checks[,safechecks]]". The last two

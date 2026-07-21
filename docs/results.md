@@ -3,6 +3,30 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-21 — re-screens under the honest instrument: checks-in-QS CONFIRMED DEAD, bishop pair flips sign but lands neutral
+
+Both pre-fidelity-fix verdicts re-tested at asm-matched 0x1f on the
+faithful mirror, deciding runs cycle-budgeted (143M cyc/move):
+
+**Checks-in-QS: DO NOT PORT, strengthened.** Node-budget re-screen
+looked deceptively neutral (checks1+safe field +16, promo ≈ −1) but
+the cycle budget is decisive: **checks1 −32 ± 13, checks1+safe
+−40 ± 13** (2000g each). Mechanism: quiet checks spawn full-width
+evasion children — cheap in nodes, expensive in cycles; the node
+budget under-counted exactly them. The weak-ordering-revival
+hypothesis is rejected.
+
+**Bishop pair: old sign flips, still no port.** Task #18's −12 ± 21
+(fixed-depth, pre-faithful mirror) becomes weakly POSITIVE on the
+faithful mirror (+11 to +25 untaxed node-budget) but honestly taxed
+(25 cyc/eval) and cycle-budgeted over 4000 games: **+3 ± 9 — neutral,
+spans zero** (the countermove outcome again). Weight 20 is the target
+if ever revisited; ~25 cyc/eval means the cost side is a non-issue.
+
+Also merged: `mirror match -aextra/-bextra` (EvalTerms key:val) and
+`-aextracost/-bextracost` (per-eval-call cycle surcharge) — eval-term
+screens are now first-class CLI experiments.
+
 ## 2026-07-21 — COMPRESSION ROOT-CAUSED: node budgets are systematically biased; CycleBudget is now the standard screen
 
 The diagnosis re-screen of the identical aspiration config (0x1f,

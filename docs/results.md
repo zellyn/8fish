@@ -3,6 +3,28 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-20 — FT_ROOKX verdict: REJECTED at −19 ± 33 (the process working as intended)
+
+The rook-file/blockade eval set got the full escalation ladder before
+its verdict: mirror screen (+26±14 FD / +30±18 NB as a set), exact-
+parity asm port (task #51, ~34% whole-search cost), incremental rook
+bitmasks (task #52, →16.8%), then a deep-optimization pass on the
+blockade term (task #52b: cached passer-file masks, blockade 737→30
+cyc/call, extraterm 930→219, feature cost →+3.97%; OFF-path tax +1.19%
+combined). Only THEN the deciding asm time-budget SPRT (300 games,
+FT_ROOKX on vs off, same binary, 30s emulated/move):
+
+**+97 =90 −113 = 47.3% → −19 ± 33 Elo, llr(0,10) −0.84. REJECTED.**
+
+The mirror's node-budget number was once again an optimistic upper
+bound (history +56→−16, LMR +15→−5, now rook terms +30→−19): even
+eval-shape features compress against the asm's time-budget dynamics.
+Disposition: task51's gated-off scan port stays on main (costs only
+the feature-bit test; #31 feature audit may strip it); the task52/52b
+maintenance layers (+1.19% OFF-path tax) stay UNMERGED on their
+branches, which hold the full verified implementation + oracles for
+any future weight-retune revisit.
+
 ## 2026-07-20 — Sargon III gauntlet #2 (post-optimization): PARITY at 1.5× time
 
 Same fair conditions as the morning's −117 gauntlet — 40 games, varied

@@ -3,6 +3,26 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-22 — deep opt r4 integration pass (partial): −3.67% masks / −4.84% adopted, on top of the union
+
+Cross-file wins the clusters proposed but couldn't build across
+boundaries. Built (items 1-3 + 6): per-file pawn-term cache with a
+dirty-file mask (the biggest item, over-delivered vs its −2/−3%
+estimate), emit-side class-presence byte (search skips empty capture
+passes), lazy pawnterm (deferred PSTRUCT recompute for subtrees that
+never eval), gennode→genrecap direct entry. Union 3,964,939,714 →
+3,819,525,749 masks; adopted 1,750,861,350 → **1,666,146,144
+(−4.84%)** — every fingerprint identical at both configs.
+
+Not built (Fable budget exhausted mid-pass): the king-shield validity
+cache that completes item 1, the MG/(MG−EG) accumulator pair (item 4,
+~0.3%), and color-specialized PSQT pages (item 5, ~0.3-0.4% but +3KB —
+needs a memory-map check against the post-movegen $B60E top first).
+Carried to a follow-up.
+
+Running r4 total (union + this pass) vs the round-3 baseline 7425e66:
+adopted config 1,905,559,028 → 1,666,146,144 = **−12.6%**.
+
 ## 2026-07-21 — deep optimization review round 4 UNION: −7.67% masks / −8.12% adopted config
 
 All four clusters merged (board 6f97dac, search 214152f, eval e88bcb8,

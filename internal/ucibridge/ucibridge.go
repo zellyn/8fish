@@ -189,10 +189,13 @@ func (b *Bridge) think(args []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Adopted gameplay config: FEATURES stays the NewMachine 0x1F default;
-	// FT2_IMPROV (improving-LMR, SPRT 2026-07-21) plays ON. Tests keep the
-	// FEATURES2=0 default so stored fingerprints remain baseline-exact.
-	chesstest.SetFeatures2(m, b.Defs, 0x01)
+	// Gameplay config: FEATURES stays the NewMachine 0x1F default.
+	// FT2_IMPROV (improving-LMR) was adopted 2026-07-21 on a +13 ± 9 cycle
+	// screen, then RETRACTED 2026-07-22: a 4200-game confirmation SPRT
+	// landed at −1.8 ± 8.6 (no demonstrable benefit; screen's +13 outside
+	// the CI). FEATURES2 now stays 0 in gameplay. The asm implementation
+	// remains gated behind FT2_IMPROV for re-test; excising it (to reclaim
+	// its ~0.19% feature-off gate-check tax) is a deferred search.s cleanup.
 	depth := byte(maxDepthCap)
 	budget := b.budgetCycles(args)
 	if d, ok := goDepth(args); ok {

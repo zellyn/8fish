@@ -71,6 +71,28 @@ cost more than they save — the surrounding fast paths and the cheapness
 of the terms leave no slack. The pawn-cache stack and its oracle remain
 the verified backbone.
 
+## 2026-07-22 — improving-LMR confirmation series COMPLETE: −1.8 ± 8.6 over 4200 games — the cycle screen over-promised
+
+The rolling SPRT confirmation of the adopted improving-LMR feature
+(FT2_IMPROV) ran to its 12-batch cap (fresh open-seeds per batch,
+pinned engine at 7425e66). Rolling total, newest last: +3.5(600) →
+−2.3(1500) → −4.6(3000) → −3.5(3600) → **−1.8 ± 8.6 (4200)**. Final:
++1408 =1362 −1430 = 49.7%.
+
+The full evidence ladder for this feature:
+- cycle-budget mirror screen: **+13 ± 9** (4000 games)
+- asm SPRT, 4200 games: **−1.8 ± 8.6** — indistinguishable from zero,
+  point estimate slightly negative, and **the screen's +13 is outside
+  the CI [−10.4, +6.8].**
+
+So even the CYCLE budget — our best screen instrument — carried
+residual mirror-to-asm optimism here, the same direction aspiration
+showed (cycle −2 → SPRT −21). The methodology ladder holds: the asm
+time-budget SPRT is the only truth; every mirror instrument, node OR
+cycle, is an upper bound. The feature is statistically neutral and
+carries a +0.19% feature-off cycle tax plus code — pending the
+adopt/retract decision.
+
 ## 2026-07-22 — deep opt r4 integration pass (partial): −3.67% masks / −4.84% adopted, on top of the union
 
 Cross-file wins the clusters proposed but couldn't build across

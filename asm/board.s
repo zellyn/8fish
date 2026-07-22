@@ -697,15 +697,24 @@ ckdone:
         beq :+                  ; hash already current for the child
         jsr hashcatchup
 :
-        ; PDIRTY set means this move touched a pawn or king, i.e. the
-        ; only kind of move that can change PSTRUCT: save the pre-move
-        ; value into this move's undo slot (deep opt r4; clean moves
-        ; skip both the save here and the restore in unmake), then
-        ; refresh the term.
+        ; PDIRTY bit 0 (the DIRTYTAB transient) set means THIS move
+        ; touched a pawn or king, i.e. the only kind of move that can
+        ; change PSTRUCT: save the pre-move value into this move's undo
+        ; slot (clean moves skip both the save here and the restore in
+        ; unmake). The pawnterm dispatch lives HERE (r4 integration),
+        ; and it is LAZY: only king-only dirt on a valid base takes the
+        ; eager ptkonly shield delta; everything else marks its changed
+        ; files into FDIRTY and leaves a stale marker in PDIRTY for the
+        ; first eval below to consume (pawntermfull) — makes whose
+        ; subtree never evals skip the recompute entirely.
         lda PDIRTY
-        beq mkpdone             ; clean: no save, no recompute
+        beq mkpdone             ; clean move, nothing inherited
+        lsr                     ; C = bit 0: did THIS make dirty it?
+        bcc mkpdone             ; no: an inherited deferral rides along
         ldx PLY
         dex                     ; the undo slot for THIS move
+        tay                     ; Y = PDIRTY>>1: 1 iff king-only fresh
+                                ;  dirt on a clean base ($03 >> 1)
         lda PSTRUCT
         sta UNDOPSL,x
         lda PSTRUCT+1
@@ -717,13 +726,58 @@ ckdone:
         ; identical search trees — only cycles differ.
         lda #0
         sta PDIRTY
+        sta UNDOPD,x
 .else
         lda FEATURES
         and #FT_PSTRUCT
-        beq :+
-        jmp pawnterm            ; clears PDIRTY; rts returns to caller
-:       lda #0
+        beq mkptoff
+        cpy #1
+        beq mkkonly
+        ; defer: the stale marker is the constant $40 — a bit DIRTYTAB
+        ; never sets, so the pre-make value is recoverable here as
+        ; PDIRTY's bit 6 and unmake can restore it EXACTLY (a
+        ; conservative "restore the marker wholesale" measured a
+        ; regression: an unmade deferred pawn move left its parent
+        ; falsely stale and every sibling subtree re-consumed).
+        tya
+        and #$20                ; bit 6 >> 1: was the base already stale?
+        asl                     ; A = pre-make PDIRTY ($00 or $40)
+        sta UNDOPD,x
+        lda #$40
+        sta PDIRTY              ; deferred stale marker
+        lda MVPIECE             ; mark this move's changed files (the
+        and #TYPEMASK           ;  per-file cache, item 1)
+        cmp #PAWN
+        bne mknpm
+        ldy FROM                ; pawn mover: FROM/TO files change (an ep
+        lda FILEBIT,y           ;  victim shares TO's file; a promotion
+        ldy TO                  ;  marks TO conservatively)
+        ora FILEBIT,y
+        bne mkfd                ; always (file bits are nonzero)
+mknpm:  lda UNDOCAP,x           ; non-pawn mover: only a pawn victim
+        beq mknofd              ;  changes files (a king move deferred on
+        and #TYPEMASK           ;  an inherited stale base may capture
+        cmp #PAWN               ;  nothing, or a non-pawn)
+        bne mknofd
+        ldy UNDOCAPSQ,x
+        lda FILEBIT,y
+mkfd:   sta UNDOFD,x            ; unmake's re-dirty mask: THIS move's
+        ora FDIRTY              ;  files ONLY (an accumulated mask here
+        sta FDIRTY              ;  measured a net regression)
+        rts                     ; DEFERRED: no recompute now
+mknofd: lda #0
+        sta UNDOFD,x
+        rts                     ; deferred, no file changes
+mkkonly:
+        lda #0                  ; king-only on a valid base: no pawn
+        sta UNDOFD,x            ;  placement changed, and ptkonly leaves
+        sta UNDOPD,x            ;  PSTRUCT valid again (restore marker 0)
+        jmp ptkonly             ; eager shield delta; clears PDIRTY,
+                                ;  rts returns to caller
+mkptoff:
+        lda #0
         sta PDIRTY
+        sta UNDOPD,x
 .endif
 mkpdone:
 .endif
@@ -992,6 +1046,11 @@ umnohash:
         eor PWBITS,x
         sta PWBITS,x
         ldx PLY
+        lda UNDOFD,x            ; the re-toggled file's cached term goes
+        ora FDIRTY              ;  stale again: OR back this move's
+        sta FDIRTY              ;  make-time dirty-file mask (r4)
+        lda UNDOPD,x            ; the lazy-pawnterm stale marker returns
+        sta PDIRTY              ;  with PSTRUCT (same save condition)
         lda UNDOPSL,x           ; pawn event: PSTRUCT returns (make saved
         sta PSTRUCT             ;  it under the same condition)
         lda UNDOPSH,x
@@ -1026,12 +1085,19 @@ umfmover:
         beq umfpawn
         cmp #KING
         bne umfdone
+        lda UNDOPD,x            ; the lazy-pawnterm stale marker returns
+        sta PDIRTY              ;  (0 after an eager ptkonly make)
         lda UNDOPSL,x           ; king mover: PSTRUCT returns
         sta PSTRUCT
         lda UNDOPSH,x
         sta PSTRUCT+1
         rts
 umfpawn:
+        lda UNDOFD,x            ; re-toggled files' cached terms go stale:
+        ora FDIRTY              ;  OR back this move's dirty-file mask (r4)
+        sta FDIRTY
+        lda UNDOPD,x            ; the lazy-pawnterm stale marker returns
+        sta PDIRTY
         lda UNDOPSL,x           ; pawn mover: PSTRUCT returns
         sta PSTRUCT
         lda UNDOPSH,x
@@ -1082,6 +1148,11 @@ umslow2:
         sta PSTRUCT             ;  make always saved PSTRUCT (promo/ep =
         lda UNDOPSH,x           ;  pawn, castle = king, double = pawn)
         sta PSTRUCT+1
+        lda UNDOFD,x            ; re-toggled files' cached terms go stale:
+        ora FDIRTY              ;  OR back this move's dirty-file mask
+        sta FDIRTY              ;  (castle saved it on the king-only path)
+        lda UNDOPD,x            ; the lazy-pawnterm stale marker returns
+        sta PDIRTY
 .endif
         lda UNDOFLAGS,x
         and #FL_CASTLE

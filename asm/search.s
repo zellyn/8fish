@@ -30,6 +30,7 @@ gennodeq:
         ; qs depth = PLY - MAXDEPTH (>= 0 here; MAXDEPTH is constant
         ; through a qs subtree - qs does no null/LMR reductions).
         lda #0
+        sta CLSP                ; class-presence accumulator (r4)
         sta RECAPONLY
         lda PLY
         sec
@@ -41,7 +42,9 @@ gennodeq:
         lda UNDOTO,x            ; square the previous move landed on
         sta RECAPSQ
         lda #1
-        sta RECAPONLY
+        sta RECAPONLY           ; (kept current: diagnostics key on it)
+        jsr genrecapent         ; direct entry (r4): skip generateq's
+        jmp gennd2              ;  RECAPONLY re-dispatch
 genq:   jsr generateq
         jmp gennd2
 gennodef:
@@ -50,6 +53,8 @@ gennodef:
         sta PLYBASELO,y
         lda MSP+1
         sta PLYBASEHI,y
+        lda #0
+        sta CLSP                ; class-presence accumulator (r4)
         jsr generate
 gennd2: ldy PLY
         lda MSP
@@ -62,6 +67,8 @@ gennd2: ldy PLY
         sta CURPTR
         lda PLYBASEHI,y
         sta CURPTR+1
+        lda CLSP                ; latch class presence for this node's
+        sta CLSPRES,y           ;  pass-entry skips (survives recursion)
         rts
 
 ; ---------------------------------------------------------------
@@ -745,14 +752,20 @@ unmakenull:
 ; ---------------------------------------------------------------
 snodeq: jsr gennodeq            ; qs capture node: no TT pass
         ldy PLY
-        lda CURPTR              ; empty capture list (common for qs):
-        cmp SENDL               ;  straight to the alpha return instead
-        bne stop1               ;  of two no-op pass scans (deep opt r4)
-        lda CURPTR+1
-        cmp SENDH
-        bne stop1
-        jmp sdone
-stop1:  lda #1
+        ; class-presence pass entry (deep opt r4 integration): CLSPRES
+        ; bit 0 = a heavy capture/promo was emitted, bit 1 = a light
+        ; capture. Quiets are batched and never OR the byte, so 0 means
+        ; "empty list" ONLY for qs capture nodes (their generator emits
+        ; captures/promos exclusively) - full-width nodes always fall
+        ; through to the killer/quiet passes via p1done/p2done.
+        lda CLSPRES,y
+        bne stop1               ; captures exist: presence dispatch
+        jmp sdone               ; qs: nothing scannable (empty list)
+stop0:  lda CLSPRES,y           ; full-width entry (TT move absent)
+stop1:  lsr                     ; C = heavy capture/promo present
+        bcs stoph
+        jmp p1done              ; no heavies: pass-2 presence decides
+stoph:  lda #1
         sta PASSNO,y
         ldy #0
         beq p1loop              ; always
@@ -760,7 +773,7 @@ snode:  jsr gennodef            ; CURPTR = base, SENDL/H = end
         ldy PLY
         lda TTFROMA,y
         cmp #NOSQ
-        beq stop1
+        beq stop0
         sta TTF0                ; pass 0: hunt the TT move
         lda TTTOA,y
         sta TTT0
@@ -818,7 +831,11 @@ sload:  ldy #1                  ; searched: fetch from/to and go
         sta TO
         jmp sgo
 p1done: ldy PLY                 ; -> pass 2 over the same list
-        lda #2
+        lda CLSPRES,y           ; class presence: skip an empty pass 2
+        and #$02                ;  scan outright (bit 1 = light present)
+        bne p1lgt
+        jmp p2done              ; (p2done re-loads Y = PLY itself)
+p1lgt:  lda #2
         sta PASSNO,y
         lda PLYBASELO,y
         sta CURPTR
@@ -921,7 +938,11 @@ p0go:   ldy #1
         sta (CURPTR),y          ; consume: passes 1-4 skip it by tier
         jmp sgo
 p0done: ldy PLY                 ; TT pass done: captures next
-        lda #1
+        lda CLSPRES,y           ; class presence: skip an empty pass 1
+        lsr                     ;  scan outright (bit 0 = heavy present)
+        bcs p0hvy
+        jmp p1done              ; no heavies: pass-2 presence decides
+p0hvy:  lda #1
         sta PASSNO,y
         lda PLYBASELO,y
         sta CURPTR

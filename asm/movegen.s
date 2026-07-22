@@ -53,6 +53,8 @@ emitmove:
         lda TIERTAB,y           ; victim byte -> victimtype<<4 | class
         ldy #0
         sta (MSP),y             ; tier
+        ora CLSP                ; class presence (r4): bit 0/1 tell the
+        sta CLSP                ;  search a pass 1/2 scan has work
         lda GFROM
         iny
         sta (MSP),y             ; from
@@ -75,6 +77,9 @@ emitmovep:
         lda #TIER_PROMO         ; heavy class, no delta filter
 emtier: ldy #0
         sta (MSP),y             ; tier
+        ora CLSP                ; class presence: promo $01 / ep $12 set
+        sta CLSP                ;  their class bit (castle's $04 is never
+                                ;  tested - harmless)
         lda GFROM
         iny
         sta (MSP),y             ; from
@@ -164,3 +169,9 @@ QMODE   .set 1
 .proc generateq
         .include "movegenbody.inc"
 .endproc
+
+; Direct recapture-generator entry for gennodeq (deep opt r4
+; integration): the caller already knows RECAPONLY is set, so it skips
+; generateq's re-dispatch. (A plain alias: search.s is assembled before
+; this scope exists, so it can't name generateq::genrecap itself.)
+genrecapent := generateq::genrecap

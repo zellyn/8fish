@@ -3,6 +3,74 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-22 — deep optimization review r4 follow-up: the three carried items ALL measure null/blocked — nothing shipped
+
+The r4 integration pass carried three unbuilt cross-file items. All
+three were built and measured here; none clears the tree-identity
+"cycles only drop per-search at both configs" bar, so the tree is
+UNCHANGED (engine.bin md5 3fb25f1b1b546ea84e82b34dd535acd7 == the r4
+integration baseline). Honest nulls; each analyzed to root cause below.
+Baselines held: MicroAB masks 3,819,525,749; adopted (0x1F+FT2_IMPROV)
+1,666,146,144.
+
+**Item 4 — MG/(MG−EG) accumulator pair: MEASURED-NEGATIVE (built,
+verified bit-exact, reverted).** Replaced EGSCORE with DSCORE = MG−EG
+(gentables emits a D = MG−EG table plane in place of EG; add/rem/move/
+take accumulate it identically). Taper reworked to the exact algebraic
+identity `score_w = MG − sign(D)·(|D| − (|D|·w>>5))` (proven bit-for-bit:
+for D≥0, MG−R = EG+P; for D<0, MG+R = EG−P, R = |D|−P). Every fingerprint
+stayed byte-identical (all 24 searches — counts, score, move), confirming
+the refactor is correct. But cycles ROSE: masks 3,819,525,749 →
+3,826,093,607 (+0.17%), adopted 1,666,146,144 → 1,669,049,886 (+0.17%);
+20 of 24 fingerprinted searches regressed (+0.10%..+0.31%), only 4
+endgame-heavy ones improved (−0.02%..−0.08%). Root cause: the premise
+("the taper subtracts MG−EG every eval") predates the w=32/w=0 fast paths
+that already own the majority of evals (w=32 is pure MG, no subtract).
+On the taper path, storing D instead of EG does not save: the single
+MG−EG subtract that produces D ALSO lands it straight in the multiply
+operands, and the common positive-D case then needs no reapply-sign and
+gets EG for free (1 post-multiply op). Reconstructing from MG+D always
+costs one MORE 16-bit op (R = |D|−P, then MG∓R), and the w=0 pure-endgame
+path must now compute EG = MG−D (~15 cyc it did not pay before). The
+EG-accumulator form is genuinely optimal; item 4 is dead.
+
+**Item 1 completion — king-shield validity cache: CORRECT but
+MEASURED-NEGATIVE (built, all oracles green, reverted).** Cached each
+side's king-shield term (a single signed SHLDW/SHLDB byte) keyed on
+(king square, the three shield-file dirty bits): pawntermfull recomputes
+the shield only when the king moved (square != cached) or a shield file
+(kf−1..kf+1) appears in the raw FDIRTY captured at entry (FDSAVE), else
+adds the cached byte. Content-addressed (needs no unmake save/restore;
+the PTNOCACHE oracle forces FDIRTY=$FF ⇒ always recomputes). Correctness
+FULLY verified: TestPStructParity (4045 pos), TestPTCacheIdenticalTree
+(identical node counts vs the fresh-recompute build), TestPTCacheRandomWalk
+(4060 pos, all scores identical), TestSearchMirrorParity(+Improving) —
+all green. But cycles ROSE: masks 3,819,525,749 → 3,819,695,539 (+0.004%),
+adopted 1,666,146,144 → 1,666,694,971 (+0.033%). Root cause: the shield
+term is too CHEAP to cache. Recompute is ~39 cyc/side (SHIDX ~20 + table
+lookup + signed add). A *correct* validity check is ~26 cyc/side (king
+compare + FILEBIT→SPREADTAB→&FDSAVE mask test) on top of the same signed
+add — so the reuse path is not cheaper than just recomputing, and every
+miss pays the check as pure overhead. The shield-file test cannot be
+dropped (pawn moves genuinely change shield inputs), so no cheaper
+correct variant exists. Design is sound and reusable; the economics are
+not.
+
+**Item 5 — color-specialized PSQT pages: BLOCKED on space (not built).**
+Pre-flipped+negated black tables (drop the per-op sq^$70 + sign-flip in
+add/rem/move) need +3,072 bytes in MAIN (a second 6×512-byte PSQT set).
+Current engine.bin is 31,758 bytes: loads $4000, image ends $BC0E, MAIN
+ceiling $BF00 → **754 bytes headroom, need 3,072**. Does not fit; not
+shrinking other things to force it. BLOCKED.
+
+Net: r4 follow-up ships zero code. The r4 cluster+integration line stands
+at adopted 1,666,146,144 (−12.6% vs round-3 7425e66). Take-away for the
+next optimizer: eval's taper and king-shield are already at the point
+where the obvious "store the difference / cache the sub-result" moves
+cost more than they save — the surrounding fast paths and the cheapness
+of the terms leave no slack. The pawn-cache stack and its oracle remain
+the verified backbone.
+
 ## 2026-07-22 — deep opt r4 integration pass (partial): −3.67% masks / −4.84% adopted, on top of the union
 
 Cross-file wins the clusters proposed but couldn't build across

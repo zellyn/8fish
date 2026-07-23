@@ -139,6 +139,22 @@ type Bridge struct {
 	ponderTotal   int      // ponder intervals this game
 	ponderHitsAll int      // ponder hits over the whole session
 	ponderTotAll  int      // ponder intervals over the whole session
+
+	// Time-budget audit bookkeeping (only touched when b.Log != nil). Own-move
+	// cycles are our REAL search cost (think -> runEngine, m.Cycles); ponder
+	// cycles are opponent-time (ponder -> runEngine) and are kept SEPARATE so
+	// the two are never conflated. The per-game own-move total is compared
+	// against income*moves (the intended per-game budget) — the bank conserves
+	// total, so the ratio should sit at ~1.0.
+	gameIncome    uint64 // per-move income (operating budget) in force this game
+	ownMoveCyc    uint64 // sum of own-move (real search) cycles this game
+	ownMoveCount  int    // own moves searched this game
+	ponderCyc     uint64 // sum of ponder-search cycles this game
+	ownMoveCycAll uint64 // own-move cycles over the whole session
+	ownMoveCntAll int    // own moves over the whole session
+	ponderCycAll  uint64 // ponder cycles over the whole session
+	intendedAll   uint64 // sum of income*moves across games (session intended budget)
+	timeFlushed   bool   // guards TIME-SESSION-SUMMARY against the quit-then-EOF double flush
 }
 
 // logf writes one out-of-band measurement line to b.Log (no-op if unset).
@@ -183,6 +199,7 @@ func (b *Bridge) Run(r io.Reader, w io.Writer) error {
 					b.gameNo, b.ponderHits, b.ponderTotal,
 					float64(b.ponderHits)/float64(b.ponderTotal))
 			}
+			b.flushGameTime() // TIME-GAME-SUMMARY for the game just finished
 			b.gameNo++
 			b.ponderHits, b.ponderTotal = 0, 0
 			b.posBase, b.posMoves = nil, nil
@@ -249,23 +266,54 @@ func (b *Bridge) Run(r io.Reader, w io.Writer) error {
 	return sc.Err()
 }
 
-// flushSessionSummary logs the final game's per-game summary (if unflushed) and
-// the whole-session ponder-hit rate. Called on quit and at EOF.
-func (b *Bridge) flushSessionSummary() {
-	if !b.PonderSelf {
+// flushGameTime emits the per-game time-budget audit line (own-move total vs the
+// intended income*moves, plus the ratio and the separate ponder total) and rolls
+// the per-game figures into the session accumulators, then zeroes the per-game
+// counters. No-op when time auditing is off or the game had no timed own move
+// (guards the quit-then-EOF double flush).
+func (b *Bridge) flushGameTime() {
+	if b.Log == nil || b.ownMoveCount == 0 {
 		return
 	}
-	if b.ponderTotal > 0 {
+	intended := b.gameIncome * uint64(b.ownMoveCount)
+	ratio := 0.0
+	if intended > 0 {
+		ratio = float64(b.ownMoveCyc) / float64(intended)
+	}
+	b.logf("TIME-GAME-SUMMARY game=%d moves=%d income=%d total=%d intended=%d ratio=%.4f ponder=%d",
+		b.gameNo, b.ownMoveCount, b.gameIncome, b.ownMoveCyc, intended, ratio, b.ponderCyc)
+	b.ownMoveCycAll += b.ownMoveCyc
+	b.ownMoveCntAll += b.ownMoveCount
+	b.ponderCycAll += b.ponderCyc
+	b.intendedAll += intended
+	b.ownMoveCyc, b.ownMoveCount, b.ponderCyc = 0, 0, 0
+}
+
+// flushSessionSummary logs the final game's per-game summaries (if unflushed) and
+// the whole-session ponder-hit rate and time-budget adherence. Called on quit and
+// at EOF; each section self-guards against the resulting double invocation.
+func (b *Bridge) flushSessionSummary() {
+	if b.PonderSelf && b.ponderTotal > 0 {
 		b.logf("PONDER-GAME-SUMMARY game=%d hits=%d total=%d rate=%.3f",
 			b.gameNo, b.ponderHits, b.ponderTotal,
 			float64(b.ponderHits)/float64(b.ponderTotal))
 		b.ponderTotal = 0 // avoid double-flush (quit then EOF)
 	}
-	if b.ponderTotAll > 0 {
+	b.flushGameTime() // TIME-GAME-SUMMARY for the final game
+	if b.PonderSelf && b.ponderTotAll > 0 {
 		b.logf("PONDER-SESSION-SUMMARY games=%d hits=%d total=%d rate=%.3f",
 			b.gameNo, b.ponderHitsAll, b.ponderTotAll,
 			float64(b.ponderHitsAll)/float64(b.ponderTotAll))
 		b.ponderTotAll = 0
+	}
+	if b.Log != nil && !b.timeFlushed && b.ownMoveCntAll > 0 {
+		ratio := 0.0
+		if b.intendedAll > 0 {
+			ratio = float64(b.ownMoveCycAll) / float64(b.intendedAll)
+		}
+		b.logf("TIME-SESSION-SUMMARY games=%d moves=%d own_total=%d own_intended=%d ratio=%.4f ponder_total=%d",
+			b.gameNo, b.ownMoveCntAll, b.ownMoveCycAll, b.intendedAll, ratio, b.ponderCycAll)
+		b.timeFlushed = true
 	}
 }
 
@@ -511,9 +559,12 @@ func (b *Bridge) think(args []string) (string, error) {
 	if d, ok := goDepth(args); ok {
 		depth, budget = d, 0 // fixed-depth mode
 	}
+	// income is this move's operating budget (== the per-game bank's per-move
+	// income) — captured for the time-budget audit before the bank/adaptive
+	// logic reassigns budget to the actual allocation. 0 in fixed-depth mode.
+	income := budget
 	var adapt *adaptiveAlloc
 	if (b.Banked || b.Adaptive) && budget != 0 {
-		income := budget
 		if b.clock == nil || b.clock.Base != income {
 			b.clock = &chesstest.BankedClock{Base: income}
 		}
@@ -551,6 +602,23 @@ func (b *Bridge) think(args []string) (string, error) {
 	}
 	if b.clock != nil && budget != 0 {
 		b.clock.Settle(res.nodes)
+	}
+	// Time-budget audit: log this move's ACTUAL own-move cycles (res.nodes, the
+	// real search — never the ponder search) against its income, the allocation
+	// it drew from the bank, and the per-move spent/income ratio (which visibly
+	// extends on hard positions and shortens on easy ones under -adaptive). The
+	// bank carries the residual forward so the per-game total settles near
+	// income*moves. Accumulated for the per-game/session adherence lines.
+	if b.Log != nil && income != 0 {
+		bank := uint64(0)
+		if b.clock != nil {
+			bank = b.clock.Bank()
+		}
+		b.gameIncome = income
+		b.ownMoveCyc += res.nodes
+		b.ownMoveCount++
+		b.logf("TIME-MOVE game=%d move=%d income=%d alloc=%d spent=%d ratio=%.3f bank=%d",
+			b.gameNo, b.ownMoveCount, income, budget, res.nodes, float64(res.nodes)/float64(income), bank)
 	}
 
 	if res.code == 2 {
@@ -671,6 +739,13 @@ func (b *Bridge) ponder() error {
 		b.ponderBest = ""
 	}
 	b.info = fmt.Sprintf("info string pondering depth %d nodes %d", res.depth, res.nodes)
+	// Time-budget audit: ponder cycles are OPPONENT-time (spent during Sargon's
+	// turn on the predicted position), not part of our own-move budget — record
+	// them SEPARATELY so the two are never conflated in the adherence numbers.
+	if b.Log != nil {
+		b.ponderCyc += res.nodes
+		b.logf("TIME-PONDER game=%d spent=%d", b.gameNo, res.nodes)
+	}
 	return nil
 }
 

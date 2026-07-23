@@ -1088,3 +1088,8 @@ EPKEYS:
         .byte $BF,$52,$DD,$3B
         .byte $64,$25,$0D,$A4
         .byte $E0,$EF,$5A,$9F
+
+MOPMATLO:
+        .byte $00,$64,$40,$4A,$F4,$CF,$00,$00
+MOPMATHI:
+        .byte $00,$00,$01,$01,$01,$03,$00,$00

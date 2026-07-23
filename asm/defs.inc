@@ -315,6 +315,26 @@ FT2_IMPROV = $01        ; improving heuristic, full-signal LMR application
                         ;  comparison is always available. RFP application NOT
                         ;  ported (measured neutral). Zero tree effect when
                         ;  clear; only the LMR reduction depth changes when set.
+FT2_MOPUP = $02         ; phase-gated endgame mop-up eval term (mirror
+                        ;  DefaultMopup{Edge:10, Close:4, MatThreshold:450,
+                        ;  PhaseMax:6}). White-POV bonus added to SCORE beside
+                        ;  PSTRUCT/extraterm, BEFORE the side-to-move negation.
+                        ;  Fires only at PHASE <= 6 (endgame) AND a signed
+                        ;  material edge >= 450 (a rook): drives the losing
+                        ;  king to a corner (Edge*cornerDist(losingKing),
+                        ;  computed inline as cornerdist(file)+cornerdist(rank)
+                        ;  since the tight image left no room for a 64-byte
+                        ;  table; reproduces the mirror mopupCMD values; max 60)
+                        ;  and pulls the winning king in (Close*(14-manhattan
+                        ;  (kings)), max 56); combined < a minor, so it breaks
+                        ;  the won-endgame shuffling draw without ever trading
+                        ;  material. Winning-side material is a single piece-
+                        ;  list pass (endgames only, so cheaper than a
+                        ;  maintained accumulator that would tax every make);
+                        ;  values match mirror mopMatVal (MOPMATLO/HI). Zero
+                        ;  cost / byte-identical eval instruction stream when
+                        ;  clear (mopupterm never runs). Computed live in eval
+                        ;  by mopupterm (CODE tail). A/B via FEATURES2 0x02.
 
 ; TT bound codes (in entry byte 7, low 2 bits; 0 = empty entry)
 TT_UPPER = 1

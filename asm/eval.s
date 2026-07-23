@@ -1497,6 +1497,16 @@ evrookx: ; experimental rook/blockade terms (white POV), FT_ROOKX-gated
         lda SCORE+1
         adc T3
         sta SCORE+1
+:       ; FT2_MOPUP endgame mop-up term (white POV): drive the losing king
+        ; to a corner + pull the winning king in, gated on low phase and a
+        ; >= rook material edge. Added here — after pstruct/extraterm, before
+        ; the side-to-move negation — so its white-POV sign matches the other
+        ; terms. mopupterm (CODE tail) adds straight into SCORE; when the bit
+        ; is clear it never runs and the eval instruction stream is unchanged.
+        lda FEATURES2
+        and #FT2_MOPUP
+        beq :+
+        jsr mopupterm
 :       ; side-to-move POV + tempo. Black fuses the negate with the
         ; tempo add: TEMPO - SCORE == (0 - SCORE) + TEMPO exactly in
         ; 16-bit two's complement (deep opt r4).

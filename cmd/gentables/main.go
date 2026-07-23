@@ -248,11 +248,38 @@ func main() {
 	emitInts(&b, "ORTHOOFF", orthoOffs)
 	emitPSQT(&b)
 	emitZobrist(&b)
+	emitMopup(&b)
 
 	if err := os.WriteFile("asm/tables.s", []byte(b.String()), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// emitMopup writes the FT2_MOPUP endgame mop-up material table (appended
+// at the TABLES tail so no existing table shifts).
+//
+// MOPMATLO/MOPMATHI[8]: material value per piece type (index 0 empty,
+// 1..6 = P N B R Q K, 7 unused) as a 16-bit little-endian pair, exactly
+// mirror mopMatVal / vicVal {0,100,320,330,500,975,0,0}. Drives the signed
+// material-edge gate (winning side leads by >= a rook = 450).
+//
+// The centre-manhattan corner-distance (mirror mopupCMD: 0 centre .. 6
+// corner) is NOT a table here: this image has only ~240 free bytes and a
+// 64-byte table plus the routine overflows MAIN, so mopupterm computes it
+// inline as cornerdist(file)+cornerdist(rank) with cornerdist(c in 0..7) =
+// (c>=4)? c&3 : (~c)&3 -> {3,2,1,0,0,1,2,3}. That reproduces mopupCMD's
+// values exactly; TestMopupEvalParity verifies the resulting eval to the
+// centipawn over the endgame positions where the term fires.
+func emitMopup(b *strings.Builder) {
+	mat := [8]int{0, 100, 320, 330, 500, 975, 0, 0}
+	var lo, hi [8]byte
+	for i, v := range mat {
+		lo[i], hi[i] = byte(v), byte(v>>8)
+	}
+	b.WriteString("\n")
+	emit(b, "MOPMATLO", lo[:])
+	emit(b, "MOPMATHI", hi[:])
 }
 
 func emit(b *strings.Builder, name string, data []byte) {

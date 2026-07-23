@@ -1,0 +1,95 @@
+package book
+
+// Line is one curated opening variation: an ECO code, a short human name
+// ("Sicilian, Najdorf"), and the main-line moves in UCI. Every line is
+// validated legal move-by-move through refchess by the generator, which
+// REFUSES to emit an illegal line. Sound theory only — no dubious gambits.
+type Line struct {
+	ECO   string
+	Name  string
+	Moves []string
+}
+
+// Lines is the hand-curated source, expanded from sprt.Openings. Breadth
+// of common, sound openings is preferred over depth of any one line;
+// depths run ~8-16 plies. Where several lines share an opening move the
+// shared prefix positions naturally get several book replies, which the
+// weighted-random pick turns into opening variety.
+var Lines = []Line{
+	// --- 1.e4 e5 (open games) ---
+	{"C78", "Ruy Lopez, Morphy", split("e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 e1g1 f8e7 f1e1 b7b5 a4b3 d7d6")},
+	{"C88", "Ruy Lopez, Closed", split("e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 e1g1 f8e7 f1e1 b7b5 a4b3 e8g8 c2c3 d7d6")},
+	{"C89", "Ruy Lopez, Marshall", split("e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 e1g1 f8e7 f1e1 b7b5 a4b3 e8g8 c2c3 d7d5")},
+	{"C67", "Ruy Lopez, Berlin", split("e2e4 e7e5 g1f3 b8c6 f1b5 g8f6 e1g1 f6e4 d2d4 f8e7 d1e2 e4d6")},
+	{"C65", "Ruy Lopez, Berlin (d3)", split("e2e4 e7e5 g1f3 b8c6 f1b5 g8f6 d2d3 f8c5 c2c3 e8g8")},
+	{"C50", "Italian, Giuoco Pianissimo", split("e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 c2c3 g8f6 d2d3 d7d6 e1g1 e8g8")},
+	{"C55", "Italian, Two Knights", split("e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 d2d3 f8c5 c2c3 d7d6")},
+	{"C45", "Scotch Game", split("e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 g8f6 b1c3 f8b4")},
+	{"C42", "Petrov Defence", split("e2e4 e7e5 g1f3 g8f6 f3e5 d7d6 e5f3 f6e4 d2d4 d6d5 f1d3 b8c6")},
+	{"C48", "Four Knights", split("e2e4 e7e5 g1f3 b8c6 b1c3 g8f6 f1b5 f8b4 e1g1 e8g8")},
+
+	// --- 1.e4 c5 (Sicilian) ---
+	{"B90", "Sicilian, Najdorf", split("e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6")},
+	{"B70", "Sicilian, Dragon", split("e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 g7g6")},
+	{"B80", "Sicilian, Scheveningen", split("e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 e7e6")},
+	{"B56", "Sicilian, Classical", split("e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 b8c6")},
+	{"B33", "Sicilian, Sveshnikov", split("e2e4 c7c5 g1f3 b8c6 d2d4 c5d4 f3d4 g8f6 b1c3 e7e5")},
+	{"B47", "Sicilian, Taimanov", split("e2e4 c7c5 g1f3 e7e6 d2d4 c5d4 f3d4 b8c6 b1c3 d8c7")},
+	{"B41", "Sicilian, Kan", split("e2e4 c7c5 g1f3 e7e6 d2d4 c5d4 f3d4 a7a6 b1c3 d8c7")},
+	{"B34", "Sicilian, Accelerated Dragon", split("e2e4 c7c5 g1f3 b8c6 d2d4 c5d4 f3d4 g7g6 b1c3 f8g7")},
+	{"B31", "Sicilian, Rossolimo", split("e2e4 c7c5 g1f3 b8c6 f1b5 g7g6 e1g1 f8g7 f1e1 e7e5")},
+	{"B22", "Sicilian, Alapin", split("e2e4 c7c5 c2c3 g8f6 e4e5 f6d5 d2d4 c5d4 g1f3 b8c6")},
+
+	// --- 1.e4 e6 / c6 / d5 / d6 / g6 / Nf6 ---
+	{"C18", "French, Winawer", split("e2e4 e7e6 d2d4 d7d5 b1c3 f8b4 e4e5 c7c5 a2a3 b4c3")},
+	{"C11", "French, Classical", split("e2e4 e7e6 d2d4 d7d5 b1c3 g8f6 c1g5 f8e7 e4e5 f6d7")},
+	{"C03", "French, Tarrasch", split("e2e4 e7e6 d2d4 d7d5 b1d2 g8f6 e4e5 f6d7 f1d3 c7c5")},
+	{"C02", "French, Advance", split("e2e4 e7e6 d2d4 d7d5 e4e5 c7c5 c2c3 b8c6 g1f3 d8b6")},
+	{"B18", "Caro-Kann, Classical", split("e2e4 c7c6 d2d4 d7d5 b1c3 d5e4 c3e4 c8f5 e4g3 f5g6")},
+	{"B12", "Caro-Kann, Advance", split("e2e4 c7c6 d2d4 d7d5 e4e5 c8f5 g1f3 e7e6 f1e2 c6c5")},
+	{"B13", "Caro-Kann, Exchange", split("e2e4 c7c6 d2d4 d7d5 e4d5 c6d5 f1d3 b8c6 c2c3 g8f6")},
+	{"B01", "Scandinavian", split("e2e4 d7d5 e4d5 d8d5 b1c3 d5a5 d2d4 g8f6 g1f3 c7c6")},
+	{"B07", "Pirc Defence", split("e2e4 d7d6 d2d4 g8f6 b1c3 g7g6 g1f3 f8g7 f1e2 e8g8")},
+	{"B06", "Modern Defence", split("e2e4 g7g6 d2d4 f8g7 b1c3 d7d6 f2f4 g8f6 g1f3 e8g8")},
+	{"B03", "Alekhine Defence", split("e2e4 g8f6 e4e5 f6d5 d2d4 d7d6 g1f3 g7g6 f1e2 f8g7")},
+
+	// --- 1.d4 d5 (Queen's pawn, closed) ---
+	{"D37", "Queen's Gambit Declined", split("d2d4 d7d5 c2c4 e7e6 b1c3 g8f6 g1f3 f8e7 c1f4 e8g8")},
+	{"D20", "Queen's Gambit Accepted", split("d2d4 d7d5 c2c4 d5c4 g1f3 g8f6 e2e3 e7e6 f1c4 c7c5")},
+	{"D15", "Slav Defence", split("d2d4 d7d5 c2c4 c7c6 g1f3 g8f6 b1c3 d5c4 a2a4 c8f5")},
+	{"D45", "Semi-Slav", split("d2d4 d7d5 c2c4 c7c6 g1f3 g8f6 b1c3 e7e6 e2e3 b8d7")},
+	{"D02", "London System", split("d2d4 d7d5 g1f3 g8f6 c1f4 c7c5 e2e3 b8c6 c2c3 d8b6")},
+
+	// --- 1.d4 Nf6 (Indian defences) ---
+	{"E32", "Nimzo-Indian, Classical", split("d2d4 g8f6 c2c4 e7e6 b1c3 f8b4 d1c2 e8g8 a2a3 b4c3")},
+	{"E15", "Queen's Indian", split("d2d4 g8f6 c2c4 e7e6 g1f3 b7b6 g2g3 c8a6 b2b3 f8b4")},
+	{"E11", "Bogo-Indian", split("d2d4 g8f6 c2c4 e7e6 g1f3 f8b4 c1d2 d8e7")},
+	{"E90", "King's Indian", split("d2d4 g8f6 c2c4 g7g6 b1c3 f8g7 e2e4 d7d6 g1f3 e8g8")},
+	{"D85", "Grünfeld", split("d2d4 g8f6 c2c4 g7g6 b1c3 d7d5 c4d5 f6d5 e2e4 d5c3")},
+	{"E06", "Catalan", split("d2d4 g8f6 c2c4 e7e6 g2g3 d7d5 f1g2 f8e7 g1f3 e8g8")},
+
+	// --- 1.c4 / 1.Nf3 / 1.f4 (flank) ---
+	{"A30", "English, Symmetrical", split("c2c4 c7c5 g1f3 g8f6 b1c3 b8c6 g2g3 g7g6 f1g2 f8g7")},
+	{"A28", "English, Four Knights", split("c2c4 e7e5 b1c3 g8f6 g1f3 b8c6 g2g3 f8b4")},
+	{"A21", "English, Reversed Sicilian", split("c2c4 e7e5 b1c3 b8c6 g1f3 g8f6 g2g3 d7d5 c4d5 f6d5")},
+	{"A09", "Réti Opening", split("g1f3 d7d5 c2c4 e7e6 g2g3 g8f6 f1g2 f8e7 e1g1 e8g8")},
+	{"A07", "King's Indian Attack", split("g1f3 d7d5 g2g3 g8f6 f1g2 e7e6 e1g1 f8e7 d2d3 e8g8")},
+	{"A90", "Dutch, Classical", split("d2d4 f7f5 g2g3 g8f6 f1g2 e7e6 g1f3 f8e7 e1g1 e8g8")},
+}
+
+// split turns a space-separated UCI move list into a slice.
+func split(s string) []string {
+	var out []string
+	start := -1
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ' ' {
+			if start >= 0 {
+				out = append(out, s[start:i])
+				start = -1
+			}
+		} else if start < 0 {
+			start = i
+		}
+	}
+	return out
+}

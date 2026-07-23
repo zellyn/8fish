@@ -3,8 +3,10 @@
 A hand-curated opening book, compiled to a compact binary blob laid out
 **exactly** as it will sit resident at `$2000-$3FFF` (the verified-free
 hi-res page-1 hole, which the engine never uses — it displays via the
-text screen). v1 is Go-side only: data + generator + bridge probe. No asm
-or `engine.bin` changes.
+text screen). The engine now probes it **on-device**: the 6502 driver
+binary-searches the resident blob and plays book moves itself (see
+"Resident asm probe" below). The original Go-side bridge probe remains as
+the reference the asm probe is proven byte-for-byte equal to.
 
 ## Files
 
@@ -100,24 +102,80 @@ sectors, ~4 KB) and never touches it again. It is independent of the
 transposition table, which lives in the aux bank. `asm/book.inc` gives the
 resident base and field offsets the loader and probe share.
 
-## Future asm probe (design note)
+## Resident asm probe (implemented)
 
-A read-only addition to the move loop, before search:
+`asm/book.s` (included at the end of engine.s's CODE segment) is the
+on-device probe. The 6502 engine now plays book moves **itself** — the Go
+bridge only supplies the random value and reads back the engine's choice.
 
-1. **Key**: `HASH0-3` are already maintained incrementally by the engine;
-   no recompute needed at the root.
-2. **Binary search** over `BOOK_ENTRIES` (`BOOK_COUNT` entries, stride
-   `BOOK_STRIDE`) comparing the 4-byte little-endian key (compare high
-   byte first for an early out). `lo`/`hi` are entry indices; the midpoint
-   address is `BOOK_ENTRIES + mid*9`.
-3. On a hit, **scan** left/right for the contiguous run of equal-key
-   entries (multiple book moves / transpositions), sum `BOOK_E_WEIGHT`,
-   draw a byte from the engine's existing dither/seed source, take
-   `pick = r mod total`, and walk the run subtracting weights to select.
-4. **Play** `BOOK_E_FROM/TO/FLAGS` directly (already engine move
-   encoding); copy `BOOK_E_NAMEID` to the current-opening byte for the
-   status display. No node search runs.
-5. **Miss** → normal search, unchanged.
+Entry point `bookentry` (a standalone harness/bridge entry, NOT the normal
+`$4000` search entry) does:
+
+1. **Key**: `jsr evalinit` recomputes `HASH0-3` for the root exactly as the
+   search entry does (byte-identical key).
+2. **Binary search** (`bookprobe`): unsigned 4-byte-LE lower-bound over
+   `BOOK_ENTRIES` (`BOOK_COUNT` entries, stride 9); midpoint address =
+   `BOOK_ENTRIES + mid*9`.
+3. On a hit, **scan** the contiguous equal-key run summing `BOOK_E_WEIGHT`,
+   compute `pick = BOOKRND mod total` (32-bit r ÷ 16-bit total, MSB-first
+   shift/subtract — byte-for-byte the Go `r % total`), and walk the run
+   subtracting weights to select.
+4. **Play** `BOOK_E_FROM/TO/FLAGS` directly into `BESTFROM/TO/FLAGS`
+   (already engine move encoding); copy `BOOK_E_NAMEID` to `CUROPENING`,
+   the "which opening am I in" byte. `BOOKHIT`=1. No node search runs.
+5. **Miss** (no `BK` magic at `$2000`, or key not found) → `BOOKHIT`=0; the
+   caller runs the normal search, unchanged.
 
 312 entries → at most 9 key comparisons per probe; trivial against a
 search. The book is consulted only until the first out-of-book position.
+
+### Claimed memory (asm/defs.inc)
+
+| Symbol | Addr | Role |
+|--------|------|------|
+| `CUROPENING` | `$3D` (ZP) | selected move's `NAMEID` — current-opening state |
+| `RUNPTR` | `$3E-$3F` (ZP) | probe's equal-key-run / weighted-pick pointer |
+| `BOOKRND` | `$0222-$0225` | 32-bit LE random r, poked by the loader/harness; **consumed** by the modulo |
+| `BOOKHIT` | `$0226` | 1 = book move played, 0 = miss |
+
+All other probe scratch is borrowed search/eval ZP (`T0-T3`, `MUL*`,
+`PSP*`, `CURPTR`), all dead at the root before the first search node; the
+probe never writes `HASH0-3`.
+
+### Zero-cost for the bookless engine
+
+`book.s` is appended at the very end of CODE, so it moves nothing before it
+and shifts the page-aligned `TABLES`/`LCCODE` only by whole pages (low
+bytes unchanged → no page-crossing cycle changes). The normal `$4000`
+search entry is not modified and never branches into book code. With no
+book loaded (`$2000` has no magic — the state for every existing test) the
+search path is byte-identical: `TestMicroAB`/`Improving`/`Adopted` grand
+totals are unchanged.
+
+### Blob delivery
+
+On real hardware the loader reads the ~3.9 KB blob once from disk into
+`$2000-$3FFF` (e.g. 8×512-byte sectors) and never touches it again;
+independent of the aux-bank TT. In the harness, `chesstest.LoadBook(m,
+blob)` pokes the identical bytes; `chesstest.AsmBookProbe` drives one probe
+pass. Existing tests never call `LoadBook`, so `$2000` stays clear.
+
+### Correctness gate (asm == Go)
+
+`chesstest.TestBookProbeParityASMvsGo` walks every in-book position (264,
+30 multi-move) and, over a full residue period of r plus wide edge values
+(4194 probes), asserts the asm probe's `FROM/TO/FLAGS` and `NAMEID` equal
+`Book.Probe(key, r)` byte-for-byte; `TestBookProbeWeightedDistribution`
+confirms the pick frequencies equal the weights; `TestBookProbeOutOfBook`
+confirms misses match. `TestBookFollowThenSearchDriver` and ucibridge's
+`TestBridgeBookFollowThenSearch` play a full opening on-device.
+
+### Coexistence note (move stack)
+
+`MOVESTACKTOP` is `$2000` and the generator's overflow guard may write up
+to ~124 bytes past it (`$2000-$207F`) before trapping — only when the move
+stack is at capacity (~1151 stacked moves across the recursion), which no
+realistic search approaches. In that pathological case it would corrupt the
+book header; the book is probed only at the root before search, so it would
+affect at worst the *next* move's probe (which would see no magic and
+search). Not a concern at practical depths.

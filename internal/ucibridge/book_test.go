@@ -12,7 +12,7 @@ import (
 	"github.com/zellyn/chess6502/internal/refchess"
 )
 
-func loadBridgeDeps(t *testing.T) ([]byte, chesstest.Defs) {
+func loadBridgeDeps(t *testing.T) ([]byte, chesstest.Defs, uint16) {
 	t.Helper()
 	asmbuild.BuildT(t, "../..")
 	bin, err := os.ReadFile(filepath.Join("..", "..", "asm", "engine.bin"))
@@ -23,7 +23,15 @@ func loadBridgeDeps(t *testing.T) ([]byte, chesstest.Defs) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return bin, defs
+	labels, err := chesstest.ParseLabelFile(filepath.Join("..", "..", "asm", "engine.lbl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bookentry, ok := labels["bookentry"]
+	if !ok {
+		t.Fatal("bookentry label not found in engine.lbl")
+	}
+	return bin, defs, bookentry
 }
 
 // playBook drives the bridge move-by-move from the start with a book
@@ -31,13 +39,13 @@ func loadBridgeDeps(t *testing.T) ([]byte, chesstest.Defs) {
 // book it returns book moves instantly; the first out-of-book position
 // falls through to a real (short) search. Returns the move list and the
 // number of book plies played before the transition.
-func playBook(t *testing.T, bin []byte, defs chesstest.Defs, seed uint64) (moves []string, bookPlies int, lastName string, searched bool) {
+func playBook(t *testing.T, bin []byte, defs chesstest.Defs, bookentry uint16, seed uint64) (moves []string, bookPlies int, lastName string, searched bool) {
 	t.Helper()
 	bk, err := book.Default()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Bridge{Bin: bin, Defs: defs, FixedBudgetMs: 300, Book: bk, BookSeed: seed}
+	b := &Bridge{Bin: bin, Defs: defs, FixedBudgetMs: 300, Book: bk, BookEntry: bookentry, BookSeed: seed}
 	b.pos, _ = refchess.ParseFEN(refchess.StartFEN)
 	for ply := 0; ply < 40; ply++ {
 		mv, err := b.think(nil)
@@ -67,8 +75,8 @@ func playBook(t *testing.T, bin []byte, defs chesstest.Defs, seed uint64) (moves
 // engine follows book moves for the opening, tracks/logs the opening
 // name, then transitions to a normal search when out of book.
 func TestBridgeBookFollowThenSearch(t *testing.T) {
-	bin, defs := loadBridgeDeps(t)
-	moves, bookPlies, name, searched := playBook(t, bin, defs, 12345)
+	bin, defs, bookentry := loadBridgeDeps(t)
+	moves, bookPlies, name, searched := playBook(t, bin, defs, bookentry, 12345)
 	t.Logf("book plies=%d, opening=%q, then searched=%v; line=%v", bookPlies, name, searched, moves)
 	if bookPlies < 8 {
 		t.Errorf("followed book for only %d plies, want >= 8", bookPlies)
@@ -84,9 +92,9 @@ func TestBridgeBookFollowThenSearch(t *testing.T) {
 // TestBridgeBookDeterminism (deliverable e): same BookSeed -> same book
 // choices; and a different seed is allowed to differ (variety).
 func TestBridgeBookDeterminism(t *testing.T) {
-	bin, defs := loadBridgeDeps(t)
-	a1, _, n1, _ := playBook(t, bin, defs, 777)
-	a2, _, n2, _ := playBook(t, bin, defs, 777)
+	bin, defs, bookentry := loadBridgeDeps(t)
+	a1, _, n1, _ := playBook(t, bin, defs, bookentry, 777)
+	a2, _, n2, _ := playBook(t, bin, defs, bookentry, 777)
 	// Compare only the book prefix (drop the final searched move, which is
 	// engine output; the book prefix is what BookSeed governs).
 	if len(a1) != len(a2) || n1 != n2 {
@@ -102,7 +110,7 @@ func TestBridgeBookDeterminism(t *testing.T) {
 // TestBridgeNoBookByteIdentical: with no book, the book code path is
 // inert — the bridge produces the same first move as a bare bridge.
 func TestBridgeNoBookByteIdentical(t *testing.T) {
-	bin, defs := loadBridgeDeps(t)
+	bin, defs, _ := loadBridgeDeps(t)
 	mk := func() *Bridge {
 		b := &Bridge{Bin: bin, Defs: defs, FixedBudgetMs: 300}
 		b.pos, _ = refchess.ParseFEN(refchess.StartFEN)

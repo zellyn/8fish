@@ -120,6 +120,11 @@ type Engine struct {
 	// RookTermsAsm subset behind FT_ROOKX.
 	Extra EvalTerms
 
+	// Mopup holds the phase-gated endgame mop-up term (drive the losing
+	// king to a corner + bring the winning king up). Zero value = OFF: a
+	// byte-identical no-op versus the asm's current eval. See mopup.go.
+	Mopup MopupParams
+
 	Best      Move // root best move (BESTFROM/BESTTO/BESTFLAGS)
 	RootScore int
 

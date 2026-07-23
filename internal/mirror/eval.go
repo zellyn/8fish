@@ -272,7 +272,7 @@ func taper(mg, eg, phase int) int {
 // pstruct term, tempo, and dither, mirroring asm eval.
 func (e *Engine) eval() int {
 	if e.cyc {
-		e.chargeEval(e.Extra.anyOn())
+		e.chargeEval(e.Extra.anyOn() || e.Mopup.on())
 	}
 	p := &e.Pos
 	score := p.taperedWhite()
@@ -284,6 +284,9 @@ func (e *Engine) eval() int {
 	}
 	if e.Extra.anyOn() {
 		score += e.extraEval()
+	}
+	if e.Mopup.on() {
+		score += e.mopupEval()
 	}
 	if p.Side != 0 {
 		score = -score

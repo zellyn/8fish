@@ -1,13 +1,14 @@
-// Command genbook compiles the hand-curated opening lines in
-// internal/book into the resident book blob and the asm-includable
-// layout header. It validates every line legal move-by-move through
-// refchess (via book.Build, which refuses illegal lines) and keys each
-// position on the engine's 32-bit Zobrist hash (== asm HASH0-3).
+// Command genbook compiles the human-maintained opening source
+// internal/book/openings.txt (SAN) into everything downstream:
 //
-// Outputs:
-//
+//	internal/book/lines.go      — the generated Go book.Lines (UCI)
 //	internal/book/bookblob.bin  — the resident blob (embedded by package book)
-//	asm/book.inc                — layout defs for the future asm probe
+//	asm/book.inc                — layout defs for the asm probe
+//
+// openings.txt is the SINGLE source of truth. genbook parses it, validates
+// every line legal move-by-move through refchess (refusing an illegal or
+// malformed line, naming the opening and bad move), then keys each position
+// on the engine's 32-bit Zobrist hash (== asm HASH0-3).
 //
 // Run: go run ./cmd/genbook   (from the repo root)
 package main
@@ -20,8 +21,20 @@ import (
 	"github.com/zellyn/chess6502/internal/book"
 )
 
+const openingsPath = "internal/book/openings.txt"
+
 func main() {
-	entries, names, err := book.Build(book.Lines)
+	lines, err := parseOpenings(openingsPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "genbook: parse failed:", err)
+		os.Exit(1)
+	}
+	if err := writeLinesGo("internal/book/lines.go", lines); err != nil {
+		fmt.Fprintln(os.Stderr, "genbook: writing lines.go:", err)
+		os.Exit(1)
+	}
+
+	entries, names, err := book.Build(lines)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "genbook: build failed:", err)
 		os.Exit(1)
@@ -53,8 +66,8 @@ func main() {
 	}
 
 	entriesBytes := len(entries) * book.EntryStride
-	fmt.Printf("genbook: %d lines -> %d entries (%d bytes), %d names\n",
-		len(book.Lines), len(entries), entriesBytes, len(names))
+	fmt.Printf("genbook: %s -> %d lines -> %d entries (%d bytes), %d names\n",
+		openingsPath, len(lines), len(entries), entriesBytes, len(names))
 	fmt.Printf("  header %d B + entries %d B + names %d B (raw) = %d B blob\n",
 		book.HeaderSize, entriesBytes, rawNames, len(blob))
 	fmt.Printf("  name-table measurement: raw=%d B  word-tokenized=%d B  -> using RAW\n",

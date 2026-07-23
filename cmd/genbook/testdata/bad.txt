@@ -1,0 +1,6 @@
+# A deliberately-malformed opening: the second white move is illegal
+# (the king on e1 cannot reach e3). The compiler must REFUSE this file
+# and name the opening and the bad move.
+
+# Bogus Opening
+C99: 1. e4 e5 2. Ke3

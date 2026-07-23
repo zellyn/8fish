@@ -1,0 +1,166 @@
+# chess6502 opening book — source of truth (human-maintainable)
+#
+# Format: each opening is a name line then a moves line.
+#   # <Opening name>
+#   <ECO>: <SAN moves>
+# Moves are Standard Algebraic Notation (what you read in a chess book).
+# Move numbers are optional and ignored; '#' starts a comment; blank
+# lines are ignored. Compile with:  go run ./cmd/genbook
+# See docs/book.md for the full spec and a worked example.
+
+# ===== 1.e4 e5 — open games =====
+
+# Ruy Lopez, Morphy
+C78: 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6
+
+# Ruy Lopez, Closed
+C88: 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 O-O 8. c3 d6
+
+# Ruy Lopez, Marshall
+C89: 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 O-O 8. c3 d5
+
+# Ruy Lopez, Berlin
+C67: 1. e4 e5 2. Nf3 Nc6 3. Bb5 Nf6 4. O-O Nxe4 5. d4 Be7 6. Qe2 Nd6
+
+# Ruy Lopez, Berlin (d3)
+C65: 1. e4 e5 2. Nf3 Nc6 3. Bb5 Nf6 4. d3 Bc5 5. c3 O-O
+
+# Italian, Giuoco Pianissimo
+C50: 1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. c3 Nf6 5. d3 d6 6. O-O O-O
+
+# Italian, Two Knights
+C55: 1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. d3 Bc5 5. c3 d6
+
+# Scotch Game
+C45: 1. e4 e5 2. Nf3 Nc6 3. d4 exd4 4. Nxd4 Nf6 5. Nc3 Bb4
+
+# Petrov Defence
+C42: 1. e4 e5 2. Nf3 Nf6 3. Nxe5 d6 4. Nf3 Nxe4 5. d4 d5 6. Bd3 Nc6
+
+# Four Knights
+C48: 1. e4 e5 2. Nf3 Nc6 3. Nc3 Nf6 4. Bb5 Bb4 5. O-O O-O
+
+# ===== 1.e4 c5 — Sicilian =====
+
+# Sicilian, Najdorf
+B90: 1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6
+
+# Sicilian, Dragon
+B70: 1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 g6
+
+# Sicilian, Scheveningen
+B80: 1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 e6
+
+# Sicilian, Classical
+B56: 1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 Nc6
+
+# Sicilian, Sveshnikov
+B33: 1. e4 c5 2. Nf3 Nc6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 e5
+
+# Sicilian, Taimanov
+B47: 1. e4 c5 2. Nf3 e6 3. d4 cxd4 4. Nxd4 Nc6 5. Nc3 Qc7
+
+# Sicilian, Kan
+B41: 1. e4 c5 2. Nf3 e6 3. d4 cxd4 4. Nxd4 a6 5. Nc3 Qc7
+
+# Sicilian, Accelerated Dragon
+B34: 1. e4 c5 2. Nf3 Nc6 3. d4 cxd4 4. Nxd4 g6 5. Nc3 Bg7
+
+# Sicilian, Rossolimo
+B31: 1. e4 c5 2. Nf3 Nc6 3. Bb5 g6 4. O-O Bg7 5. Re1 e5
+
+# Sicilian, Alapin
+B22: 1. e4 c5 2. c3 Nf6 3. e5 Nd5 4. d4 cxd4 5. Nf3 Nc6
+
+# ===== 1.e4 (e6 / c6 / d5 / d6 / g6 / Nf6) =====
+
+# French, Winawer
+C18: 1. e4 e6 2. d4 d5 3. Nc3 Bb4 4. e5 c5 5. a3 Bxc3+
+
+# French, Classical
+C11: 1. e4 e6 2. d4 d5 3. Nc3 Nf6 4. Bg5 Be7 5. e5 Nfd7
+
+# French, Tarrasch
+C03: 1. e4 e6 2. d4 d5 3. Nd2 Nf6 4. e5 Nfd7 5. Bd3 c5
+
+# French, Advance
+C02: 1. e4 e6 2. d4 d5 3. e5 c5 4. c3 Nc6 5. Nf3 Qb6
+
+# Caro-Kann, Classical
+B18: 1. e4 c6 2. d4 d5 3. Nc3 dxe4 4. Nxe4 Bf5 5. Ng3 Bg6
+
+# Caro-Kann, Advance
+B12: 1. e4 c6 2. d4 d5 3. e5 Bf5 4. Nf3 e6 5. Be2 c5
+
+# Caro-Kann, Exchange
+B13: 1. e4 c6 2. d4 d5 3. exd5 cxd5 4. Bd3 Nc6 5. c3 Nf6
+
+# Scandinavian
+B01: 1. e4 d5 2. exd5 Qxd5 3. Nc3 Qa5 4. d4 Nf6 5. Nf3 c6
+
+# Pirc Defence
+B07: 1. e4 d6 2. d4 Nf6 3. Nc3 g6 4. Nf3 Bg7 5. Be2 O-O
+
+# Modern Defence
+B06: 1. e4 g6 2. d4 Bg7 3. Nc3 d6 4. f4 Nf6 5. Nf3 O-O
+
+# Alekhine Defence
+B03: 1. e4 Nf6 2. e5 Nd5 3. d4 d6 4. Nf3 g6 5. Be2 Bg7
+
+# ===== 1.d4 d5 — Queen's pawn, closed =====
+
+# Queen's Gambit Declined
+D37: 1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. Nf3 Be7 5. Bf4 O-O
+
+# Queen's Gambit Accepted
+D20: 1. d4 d5 2. c4 dxc4 3. Nf3 Nf6 4. e3 e6 5. Bxc4 c5
+
+# Slav Defence
+D15: 1. d4 d5 2. c4 c6 3. Nf3 Nf6 4. Nc3 dxc4 5. a4 Bf5
+
+# Semi-Slav
+D45: 1. d4 d5 2. c4 c6 3. Nf3 Nf6 4. Nc3 e6 5. e3 Nbd7
+
+# London System
+D02: 1. d4 d5 2. Nf3 Nf6 3. Bf4 c5 4. e3 Nc6 5. c3 Qb6
+
+# ===== 1.d4 Nf6 — Indian defences =====
+
+# Nimzo-Indian, Classical
+E32: 1. d4 Nf6 2. c4 e6 3. Nc3 Bb4 4. Qc2 O-O 5. a3 Bxc3+
+
+# Queen's Indian
+E15: 1. d4 Nf6 2. c4 e6 3. Nf3 b6 4. g3 Ba6 5. b3 Bb4+
+
+# Bogo-Indian
+E11: 1. d4 Nf6 2. c4 e6 3. Nf3 Bb4+ 4. Bd2 Qe7
+
+# King's Indian
+E90: 1. d4 Nf6 2. c4 g6 3. Nc3 Bg7 4. e4 d6 5. Nf3 O-O
+
+# Grünfeld
+D85: 1. d4 Nf6 2. c4 g6 3. Nc3 d5 4. cxd5 Nxd5 5. e4 Nxc3
+
+# Catalan
+E06: 1. d4 Nf6 2. c4 e6 3. g3 d5 4. Bg2 Be7 5. Nf3 O-O
+
+# ===== 1.c4 / 1.Nf3 / 1.d4 f5 — flank & Dutch =====
+
+# English, Symmetrical
+A30: 1. c4 c5 2. Nf3 Nf6 3. Nc3 Nc6 4. g3 g6 5. Bg2 Bg7
+
+# English, Four Knights
+A28: 1. c4 e5 2. Nc3 Nf6 3. Nf3 Nc6 4. g3 Bb4
+
+# English, Reversed Sicilian
+A21: 1. c4 e5 2. Nc3 Nc6 3. Nf3 Nf6 4. g3 d5 5. cxd5 Nxd5
+
+# Réti Opening
+A09: 1. Nf3 d5 2. c4 e6 3. g3 Nf6 4. Bg2 Be7 5. O-O O-O
+
+# King's Indian Attack
+A07: 1. Nf3 d5 2. g3 Nf6 3. Bg2 e6 4. O-O Be7 5. d3 O-O
+
+# Dutch, Classical
+A90: 1. d4 f5 2. g3 Nf6 3. Bg2 e6 4. Nf3 Be7 5. O-O O-O
+

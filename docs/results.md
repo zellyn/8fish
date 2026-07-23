@@ -3,6 +3,38 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-22 — opening book: hand-curated, now RESIDENT and probed on-device
+
+The engine is no longer bookless. Two steps, both landed:
+
+**v1 (Go-side probe).** 48 hand-curated sound main-line openings (Ruy
+Lopez family, full Open Sicilian, French, Caro-Kann, QGD/QGA, Slav,
+the Indians, Grünfeld, Catalan, English, Réti, KIA, Dutch), each with
+ECO code + name, every line validated legal move-by-move through
+refchess (the generator refuses illegal lines). Blob = 312 entries +
+48 names = **3866 B = 47% of the free 8 KB main hole at $2000-$3FFF**.
+Keyed on the engine's 32-bit Zobrist, PROVEN == asm HASH0-3 over 311
+positions (checked against the actual keys baked into engine.bin).
+
+**On-device (asm probe).** asm/book.s binary-searches the resident blob
+at $2000 on the root HASH0-3, sums the equal-key run, weighted-picks
+via the dither seed, plays the move directly (no search), and copies
+its NAMEID into a 1-byte CUROPENING state ($3D) — the whole "which
+opening am I in" cost is that one byte, exactly as scoped. The name
+text (1050 B) is display-only and flushes with the book. Proven asm==Go
+byte-for-byte over **4194 probes / 264 positions** (incl. weighted
+distribution + out-of-book miss). The bookless path is **exactly
+zero-cost**: MicroAB grand totals byte-identical to baseline
+(3,819,525,749 / adopted 1,666,146,144), because the probe is a
+separate driver entry and only shifts page-aligned tables by whole
+pages. engine.bin md5 b4066820…; full battery green.
+
+Load path: chesstest.LoadBook pokes the blob into MAIN $2000 (on real
+hardware, a one-time disk read into $2000-$3FFF, resident, independent
+of the aux-bank TT). Design + coexistence notes in docs/book.md. The
+book's real evaluation is a future Sargon gauntlet (variety + avoiding
+early bad lines); self-play would show ~nothing, so no SPRT was faked.
+
 ## 2026-07-22 — deep optimization review r4 follow-up: the three carried items ALL measure null/blocked — nothing shipped
 
 The r4 integration pass carried three unbuilt cross-file items. All

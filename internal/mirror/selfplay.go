@@ -69,6 +69,14 @@ type PlayerCfg struct {
 	// precedence over NodeBudget if both are set.
 	CycleBudget uint64
 	MaxIters    int // ID depth ceiling for budgeted mode (0 => MaxPly-1)
+
+	// Time, when non-nil, selects the adaptive effort-management driver
+	// (effort.go): each move runs SearchTimed against a per-GAME cycle bank
+	// (Base = Time.Base income per move), with the allocation policy deciding
+	// how much of the bank to spend. It takes precedence over CycleBudget/
+	// NodeBudget/Depth. With Time.On == false (and Smooth off, signals off)
+	// each move spends exactly Base — byte-identical to CycleBudget = Base.
+	Time *TimeParams
 }
 
 func (c *PlayerCfg) engine() *Engine {
@@ -116,6 +124,9 @@ type GameRec struct {
 	Samples   []Sample
 	QuietFENs []string // FENs of the sampled quiet positions (collect only)
 	Reason    string
+	// WhiteDiag/BlackDiag carry each side's adaptive effort-management
+	// diagnostics for the game (zero unless PlayerCfg.Time was set).
+	WhiteDiag, BlackDiag TimeDiag
 }
 
 // PlayGame plays one fixed-depth game from the given opening (UCI
@@ -143,11 +154,22 @@ func PlayGame(white, black PlayerCfg, opening []string, rnd *rand.Rand, collect 
 	winStreak, drawStreak := 0, 0
 	collectGate := 0
 
+	// Per-side per-game cycle banks for the adaptive effort driver (nil
+	// Time leaves these unused).
+	var wbank, bbank EffortBank
+	if white.Time != nil {
+		wbank = EffortBank{Base: white.Time.Base, Cap: white.Time.BankCap}
+	}
+	if black.Time != nil {
+		bbank = EffortBank{Base: black.Time.Base, Cap: black.Time.BankCap}
+	}
+
 	for ply := 0; ; ply++ {
 		eng := we
 		cfg := white
+		bank := &wbank
 		if gp.Side != 0 {
-			eng, cfg = be, black
+			eng, cfg, bank = be, black, &bbank
 		}
 		eng.SetPosition(&gp)
 		seen[eng.Pos.Hash]++
@@ -189,6 +211,14 @@ func PlayGame(white, black PlayerCfg, opening []string, rnd *rand.Rand, collect 
 		var best Move
 		var score int
 		switch {
+		case cfg.Time != nil:
+			maxIters := cfg.MaxIters
+			if maxIters <= 0 {
+				maxIters = MaxPly - 1
+			}
+			var spent uint64
+			best, score, spent = eng.SearchTimed(cfg.Time, bank.bank, maxIters)
+			bank.settle(spent)
 		case cfg.CycleBudget > 0:
 			maxIters := cfg.MaxIters
 			if maxIters <= 0 {
@@ -266,6 +296,7 @@ func PlayGame(white, black PlayerCfg, opening []string, rnd *rand.Rand, collect 
 		pending[i].R = rec.Result
 	}
 	rec.Samples = pending
+	rec.WhiteDiag, rec.BlackDiag = we.diag, be.diag
 	return rec, nil
 }
 

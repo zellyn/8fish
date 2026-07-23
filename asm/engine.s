@@ -469,3 +469,223 @@ itsearch:
         .segment "CODE"
         .include "book.s"
 
+        ; ---------------------------------------------------------------
+        ; mopfin / mopcd: the mop-up term's tail (close term + signed apply)
+        ; and its corner-distance helper. Deliberately placed HERE, at the
+        ; end of the CODE segment, to fill the page-alignment padding between
+        ; CODE's end and the page-aligned TABLES base (~48 bytes that would
+        ; otherwise be wasted fill). The image is nearly full, so relocating
+        ; this ~48-byte tail out of TABLES (mopupterm's home) into that free
+        ; CODE slack is what lets the feature fit MAIN at all. mopupterm
+        ; reaches mopfin by `jmp mopfin` with A = manhattan(kings); mopcd is
+        ; reached by `jsr mopcd` (absolute, cross-segment — fine). Neither
+        ; grows CODE past the page boundary, so the hot code and the
+        ; page-aligned TABLES base do not move (FT2_MOPUP-off byte-identical).
+        ; ---------------------------------------------------------------
+        .segment "CODE"
+mopfin: ; A = manhattan(losing,winning king); T2 = Edge*CMD (running B);
+        ; MULCNT = winner (0 white / 1 black). Add Close*(14-md), then apply.
+        sta T0                  ; md
+        lda #14
+        sec
+        sbc T0                  ; 14 - md (>= 0, md <= 14)
+        asl
+        asl                     ; *4 = Close*(14-md); C=0 (value <= 52)
+        adc T2                  ; B = Edge*CMD + Close term (<= 116, positive)
+        sta T2
+        ; apply B to SCORE, sign-extended, negated for a black winner
+        ; (B > 0, so -B is a negative byte -> hi = $FF). One 16-bit add.
+        ldy #0
+        lda T2
+        ldx MULCNT
+        beq :+
+        eor #$FF                ; -B (two's complement)
+        clc
+        adc #1
+        ldy #$FF                ; sign extension
+:       clc
+        adc SCORE
+        sta SCORE
+        tya
+        adc SCORE+1
+        sta SCORE+1
+        rts
+; mopcd: A = coordinate 0..7 -> centre corner distance (~c)&3 for c<4 else
+; c&3, i.e. {3,2,1,0,0,1,2,3}. Shared by the two CMD terms.
+mopcd:  cmp #4
+        bcs :+
+        eor #$FF
+:       and #$03
+        rts
+
+        ; ---------------------------------------------------------------
+        ; mopupterm (FT2_MOPUP): phase-gated endgame mop-up eval term.
+        ; Appended at CODE's end (like the aspiration/book blocks) so the
+        ; hot search/eval/board/movegen code before it does not move and
+        ; TABLES/LCCODE shift only by whole pages; it is cold in the 0x1f
+        ; default (never called unless FT2_MOPUP is set). eval jsr's here
+        ; after the pstruct/extraterm adds and BEFORE the side-to-move
+        ; negation, so the WHITE-POV bonus carries the right sign.
+        ;
+        ; Fires only when PHASE <= 6 (endgame) AND the signed material edge
+        ; (winning minus losing side, mirror mopMatVal values) is >= 450
+        ; (a rook). Then it drives the LOSING king toward a corner
+        ; (Edge*MOPCMD[losingKing], Edge=10) and pulls the WINNING king in
+        ; (Close*(14 - manhattan(kings)), Close=4), max ~116cp < a minor —
+        ; so it breaks the won-endgame shuffling draw without ever trading
+        ; material. Mirrors internal/mirror mopupEval (DefaultMopup) exactly.
+        ;
+        ; Material is one piece-list pass, reached only in low-phase
+        ; endgames — cheaper and simpler than a maintained signed-material
+        ; accumulator that would tax every make/unmake on the hot path for
+        ; a signal used only when this rare gate opens.
+        ;
+        ; Reads PHASE/PIECESQ/BOARD, writes SCORE (16-bit ZP). Clobbers
+        ; A,X,Y,T0,T1,T2,EVTMP,MULCNT,PSQPIECE — all dead in eval's POV/
+        ; tempo/seed tail (its only caller). No multiply, no tables beyond
+        ; MOPCMD (packed-square corner distance) and MOPMATLO/HI.
+        ;
+        ; Placed in the TABLES segment (the page-aligned MAIN tail, beside
+        ; its MOPCMD/MOPMAT data) rather than CODE: this image has only a
+        ; few bytes of CODE slack before its length rolls to a new page and
+        ; shoves the page-aligned TABLES base up a whole 256 bytes. Keeping
+        ; this cold routine in TABLES avoids that tax; it is still ordinary
+        ; MAIN RAM ($4000-$BEFF), so eval's `jsr mopupterm` runs it normally.
+        ; ---------------------------------------------------------------
+        .segment "TABLES"
+mopupterm:
+        lda PHASE
+        cmp #7                  ; PHASE <= 6 ?  (unsigned: PHASE < 7)
+        bcc mopg
+        rts                     ; middlegame: term 0, SCORE unchanged
+mopg:   ; signed material diff (white - black) -> T1:T0
+        lda #0
+        sta T0
+        sta T1
+        ldx #31
+mopms:  ldy PIECESQ,x           ; Y = square (NOSQ = $FF, bit 7 set)
+        bmi mopmx               ; empty slot: skip
+        lda a:BOARD,y
+        and #TYPEMASK
+        tay                     ; Y = piece type 0..6 (king -> 0 value)
+        cpx #16
+        bcs mopmb               ; slot >= 16 -> black: subtract
+        clc                     ; white: add value
+        lda T0
+        adc MOPMATLO,y
+        sta T0
+        lda T1
+        adc MOPMATHI,y
+        sta T1
+        jmp mopmx
+mopmb:  sec                     ; black: subtract value
+        lda T0
+        sbc MOPMATLO,y
+        sta T0
+        lda T1
+        sbc MOPMATHI,y
+        sta T1
+mopmx:  dex
+        bpl mopms
+        ; winner index X and |diff|: X=0 white leads, X=1 black leads.
+        ; diff sign is T1's bit 7; negate in place for the black case so a
+        ; single UNSIGNED compare decides the >= 450 (a rook) gate.
+        ldx #0                  ; assume white leads
+        lda T1
+        bpl mopc                ; diff >= 0
+        inx                     ; black leads
+        sec                     ; T1:T0 = -diff (= |diff|)
+        lda #0
+        sbc T0
+        sta T0
+        lda #0
+        sbc T1
+        sta T1
+mopc:   lda T0                  ; |diff| >= 450 ?  (unsigned 16-bit)
+        cmp #<450
+        lda T1
+        sbc #>450
+        bcs mopw                ; carry set: |diff| >= 450, term fires
+        rts                     ; edge < a rook: term 0
+mopw:   stx MULCNT              ; 0 = white winner (add), 1 = black (subtract)
+        ; cache the losing king (-> EVTMP) and the winning king (-> PSQSQ);
+        ; slots differ by 16, so eor #16 swaps white<->black.
+        ldy #16                 ; white winner -> losing king = black (+16)
+        cpx #0
+        beq :+
+        ldy #0                  ; black winner -> losing king = white (+0)
+:       lda PIECESQ,y
+        sta EVTMP
+        tya
+        eor #16
+        tay
+        lda PIECESQ,y
+        sta PSQSQ
+        ; king-capture guard: a pseudo-legal node may have captured a king
+        ; (square NOSQ); the score is irrelevant there, add nothing.
+        lda EVTMP
+        cmp #NOSQ
+        bne :+
+        rts
+:       lda PSQSQ
+        cmp #NOSQ
+        bne :+
+        rts
+:       ; Edge * cornerDist(losingKing): cornerdist(file) + cornerdist(rank)
+        ; via mopcd (no table); reproduces the mirror's mopupCMD values.
+        lda EVTMP
+        and #$07                ; losing king file
+        jsr mopcd
+        sta PSQPIECE            ; cornerdist(file)
+        lda EVTMP
+        lsr
+        lsr
+        lsr
+        lsr                     ; losing king rank
+        jsr mopcd
+        clc
+        adc PSQPIECE            ; CMD 0..6
+        sta PSQPIECE
+        asl                     ; CMD*2
+        sta T2
+        lda PSQPIECE
+        asl
+        asl
+        asl                     ; CMD*8
+        clc
+        adc T2                  ; CMD*10 = Edge*CMD (<= 60)
+        sta T2                  ; running bonus B
+        ; manhattan(losing,winning king) = |lr-wr| + |lf-wf|
+        lda EVTMP
+        lsr
+        lsr
+        lsr
+        lsr                     ; lr
+        sta T0
+        lda PSQSQ
+        lsr
+        lsr
+        lsr
+        lsr                     ; wr
+        sec
+        sbc T0
+        bcs :+
+        eor #$FF
+        adc #1                  ; C=0 -> |lr - wr|
+:       sta T1                  ; |rank diff|
+        lda EVTMP
+        and #$07                ; lf
+        sta T0
+        lda PSQSQ
+        and #$07                ; wf
+        sec
+        sbc T0
+        bcs :+
+        eor #$FF
+        adc #1                  ; |lf - wf|
+:       clc
+        adc T1                  ; manhattan (in A)
+        ; close term + apply live in the CODE segment's page-tail slack
+        ; (mopfin, engine.s) so the whole feature fits the near-full image.
+        jmp mopfin
+

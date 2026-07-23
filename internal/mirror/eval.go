@@ -268,6 +268,11 @@ func taper(mg, eg, phase int) int {
 	return eg + prod
 }
 
+// Eval exposes the static eval (side-to-move POV, incl. pstruct/extra/mopup,
+// tempo, dither) for cross-engine parity tests (see internal/chesstest
+// TestMopupEvalParity), the analogue of the exported ExtraEval.
+func (e *Engine) Eval() int { return e.eval() }
+
 // eval returns the score from the side to move's POV including the
 // pstruct term, tempo, and dither, mirroring asm eval.
 func (e *Engine) eval() int {

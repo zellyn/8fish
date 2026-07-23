@@ -12,14 +12,82 @@ the reference the asm probe is proven byte-for-byte equal to.
 
 | File | Role |
 |------|------|
-| `internal/book/lines.go` | curated source: 48 sound main lines, each `{ECO, Name, UCI moves}` |
+| **`internal/book/openings.txt`** | **the source of truth**: 48 sound main lines in human SAN (`# name` + `ECO: moves`). Edit this. |
+| `cmd/genbook/` | the compiler: parses `openings.txt`, validates every line legal move-by-move through refchess, and generates everything below |
+| `internal/book/lines.go` | **generated** Go `book.Lines` (UCI) — `DO NOT EDIT` |
+| `internal/book/bookblob.bin` | **generated** resident blob (embedded by package book) |
+| `asm/book.inc` | **generated** asm layout defs for the resident probe |
 | `internal/book/build.go` | validates every line legal move-by-move through refchess (refuses illegal lines); keys each position on the engine hash |
 | `internal/book/book.go` | blob format, encode/decode, binary-search probe, weighted pick, `HashFEN` keying |
-| `cmd/genbook/main.go` | generator → `internal/book/bookblob.bin` + `asm/book.inc` |
-| `internal/book/bookblob.bin` | generated resident blob (embedded by package book) |
-| `asm/book.inc` | generated asm layout defs for the future resident probe |
+| `internal/refchess/san.go` | `ParseSAN`/`SAN`: resolve SAN ⇄ moves against the legal-move generator (used by the compiler) |
 
-Regenerate with `go run ./cmd/genbook` (from repo root).
+The pipeline is `openings.txt` → `cmd/genbook` → `lines.go` + `bookblob.bin` + `book.inc`.
+A single command does the whole thing:
+
+```
+go run ./cmd/genbook        # from the repo root
+```
+
+## Editing the book — the text format
+
+`internal/book/openings.txt` is the one file a human edits. It is plain
+text a chess player can read at a glance:
+
+```
+# ===== 1.e4 e5 — open games =====      # a comment (section divider)
+
+# Ruy Lopez, Morphy                     # the opening's NAME
+C78: 1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6
+
+# Sicilian, Najdorf
+B90: 1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6
+```
+
+Rules:
+
+- **Moves are Standard Algebraic Notation (SAN)** — exactly what you read
+  in a chess book: `Nf3`, `Bb5`, `exd4`, `Nxd4`, `O-O`, `O-O-O`, `e8=Q`,
+  checks `Bxc3+`, mate `Qh4#`. Disambiguation (`Nbd7`, `R1e2`) is written
+  only when SAN requires it, and the compiler enforces it (an ambiguous
+  move is refused).
+- **Move numbers (`1.`, `2.`) are optional and ignored** — keep them for
+  readability. `1.e4` (no space) is accepted too.
+- **`#` starts a comment.** The `#` line *directly above* a moves line is
+  that opening's display name; other `#` lines (section dividers, notes)
+  are ignored.
+- **A moves line is `<ECO>: <moves>`** — an ECO code (`A00`–`E99`), a
+  colon, then the SAN move sequence. **Blank lines are ignored.**
+
+**Why SAN and not coordinate (`e2e4`)?** SAN is what a human authors and
+reviews naturally, and the compiler resolves it against refchess's legal
+moves — so it is *self-validating*: a typo that names no legal move, or an
+under-specified ambiguous move, fails the build with a clear error naming
+the opening and the bad move. (Coordinate notation is trivial to parse but
+unreadable and does not catch a "looks fine but illegal" typo.)
+
+### How to add an opening
+
+1. Open `internal/book/openings.txt`.
+2. Add two lines in the appropriate section:
+
+   ```
+   # Vienna Game
+   C25: 1. e4 e5 2. Nc3 Nc6 3. f4 exf4 4. Nf3 g5
+   ```
+
+3. Run `go run ./cmd/genbook`. It re-validates every line, regenerates
+   `lines.go` + `bookblob.bin` + `book.inc`, and prints the new sizes. If
+   your line has an illegal, ambiguous, or misspelled move, it refuses to
+   compile and tells you which opening and which move — e.g.
+
+   ```
+   genbook: parse failed: internal/book/openings.txt:123: Vienna Game (C25): ply 6 "Nf7": no legal move in ...
+   ```
+
+4. `go test ./internal/book/ ./cmd/genbook/` — the tests confirm the
+   source compiles cleanly, every line is legal, and `lines.go` matches
+   the source (a stale `lines.go` fails `TestCompiledMatchesGeneratedLines`).
+5. Commit `openings.txt` **and** the three generated files together.
 
 ## Keying — the correctness hinge
 

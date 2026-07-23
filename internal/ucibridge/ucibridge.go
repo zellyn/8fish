@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/zellyn/chess6502/internal/book"
 	"github.com/zellyn/chess6502/internal/chesstest"
 	"github.com/zellyn/chess6502/internal/refchess"
 )
@@ -49,11 +50,29 @@ type Bridge struct {
 	// fixed-depth mode ignores it.
 	Banked bool
 
+	// Book, if non-nil, is the resident opening book. Before searching,
+	// the bridge probes it on the current position's 32-bit Zobrist key
+	// (== asm HASH0-3) and, on a hit, plays a weighted-random book move
+	// WITHOUT searching. When Book is nil the bridge behaves byte-
+	// identically to the bookless engine (existing tests/fingerprints
+	// unaffected).
+	Book *book.Book
+	// BookSeed seeds the deterministic PRNG that drives the weighted book
+	// pick, so A/B replays reproduce (same seed -> same book choices).
+	BookSeed uint64
+
 	pos   *refchess.Position
 	aux   []byte // carried-over aux bank (TT state); nil until first move
 	rnd   func() byte
 	info  string // "info depth ... score cp ..." from the last think
 	clock *chesstest.BankedClock
+
+	bookRnd func() uint32
+	// CurOpening is the name ID (+1) of the opening the last book move
+	// belonged to; 0 means "not in book / out of book". CurOpeningName is
+	// its text ("ECO Name"), surfaced in the info log ("in book: ...").
+	CurOpening     byte
+	CurOpeningName string
 }
 
 // Run processes UCI commands until quit/EOF. Protocol errors are
@@ -84,6 +103,8 @@ func (b *Bridge) Run(r io.Reader, w io.Writer) error {
 		case "ucinewgame":
 			b.aux = nil // clear the TT
 			b.pos, _ = refchess.ParseFEN(refchess.StartFEN)
+			b.bookRnd = nil // restart the deterministic book-choice stream
+			b.CurOpening, b.CurOpeningName = 0, ""
 		case "setoption":
 			// setoption name X value Y
 			if len(fields) >= 5 && strings.EqualFold(fields[2], "EmulatedMovetimeMs") {
@@ -178,9 +199,53 @@ func (b *Bridge) budgetCycles(args []string) uint64 {
 	return 30_000 * cyclesPerMs // default: 30 emulated seconds
 }
 
+// probeBook probes the resident book on the current position. On a hit it
+// applies the chosen book move to the game state and returns its UCI form;
+// ok=false means Book is disabled or the position is out of book (fall
+// through to search). The move choice is deterministic given BookSeed.
+func (b *Bridge) probeBook() (move string, ok bool, err error) {
+	if b.Book == nil {
+		return "", false, nil
+	}
+	if b.bookRnd == nil {
+		seed := b.BookSeed
+		r := rand.New(rand.NewPCG(seed, seed^0x9E3779B97F4A7C15))
+		b.bookRnd = func() uint32 { return r.Uint32() }
+	}
+	key, err := book.HashFEN(b.pos.FEN())
+	if err != nil {
+		return "", false, err
+	}
+	// Draw one random value regardless of hit/miss so the PRNG stream —
+	// hence the whole game's book choices — depends only on BookSeed and
+	// the move number, not on where the game left the book.
+	r := b.bookRnd()
+	e, name, hit := b.Book.Probe(key, r)
+	if !hit {
+		return "", false, nil
+	}
+	move = chesstest.MoveUCI(e.From, e.To, e.Flags)
+	mv, err := refchess.ParseMove(move)
+	if err != nil {
+		return "", false, fmt.Errorf("book move %q: %w", move, err)
+	}
+	if err := b.pos.Make(mv); err != nil {
+		return "", false, fmt.Errorf("book move %q illegal: %w", move, err)
+	}
+	b.CurOpening = e.NameID + 1
+	b.CurOpeningName = name
+	b.info = fmt.Sprintf("info string in book: %s", name)
+	return move, true, nil
+}
+
 // think runs the engine over the current position and returns the move
 // in UCI form, also applying it to the bridge's game state.
 func (b *Bridge) think(args []string) (string, error) {
+	if move, ok, err := b.probeBook(); err != nil {
+		return "", err
+	} else if ok {
+		return move, nil
+	}
 	pos, err := chesstest.ParseFEN(b.pos.FEN())
 	if err != nil {
 		return "", err

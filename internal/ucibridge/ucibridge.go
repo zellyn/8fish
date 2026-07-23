@@ -103,6 +103,41 @@ type Bridge struct {
 	// its text ("ECO Name"), surfaced in the info log ("in book: ...").
 	CurOpening     byte
 	CurOpeningName string
+
+	// PonderSelf enables gauntlet self-pondering: when the driving GUI does NOT
+	// speak the UCI go-ponder/ponderhit handshake (e.g. cutechess-cli), the
+	// bridge emulates a pondering interval internally. On each real "go" it
+	// first ponders the position it predicted last move (root+M+P) under
+	// PonderBudgetMs — warming the carried TT exactly as a go-ponder would —
+	// then runs the real search on the actual position (root+M+S), recording
+	// whether the opponent's reply S matched the prediction P (the ponder-hit
+	// rate). Requires Ponder. When PonderSelf is true the "bestmove M ponder P"
+	// advisory and the Ponder UCI option are suppressed so a non-pondering GUI
+	// never tries to drive pondering itself. When PonderSelf is false the bridge
+	// is byte-identical to before (every self-ponder path is gated on it).
+	PonderSelf bool
+	// Log, if non-nil, receives out-of-band measurement lines (book openings,
+	// ponder hit/miss, per-game ponder summaries). A gauntlet points this at the
+	// engine's stderr so the ponder-hit rate is captured to a file regardless of
+	// whether the GUI surfaces "info string" lines.
+	Log io.Writer
+
+	// Self-ponder bookkeeping (only touched when PonderSelf is true).
+	posBase       []string // "startpos" / "fen ..." prefix of the last position command
+	posMoves      []string // moves list of the last position command
+	gameNo        int      // 1-based game counter (bumped on ucinewgame)
+	ponderHits    int      // ponder hits this game
+	ponderTotal   int      // ponder intervals this game
+	ponderHitsAll int      // ponder hits over the whole session
+	ponderTotAll  int      // ponder intervals over the whole session
+}
+
+// logf writes one out-of-band measurement line to b.Log (no-op if unset).
+func (b *Bridge) logf(format string, args ...any) {
+	if b.Log == nil {
+		return
+	}
+	fmt.Fprintf(b.Log, format+"\n", args...)
 }
 
 // Run processes UCI commands until quit/EOF. Protocol errors are
@@ -127,16 +162,24 @@ func (b *Bridge) Run(r io.Reader, w io.Writer) error {
 			say("id name chess6502")
 			say("id author zellyn + Claude")
 			say("option name EmulatedMovetimeMs type spin default 0 min 0 max 3600000")
-			if b.Ponder {
+			if b.Ponder && !b.PonderSelf {
 				say("option name Ponder type check default true")
 			}
 			say("uciok")
 		case "isready":
 			say("readyok")
 		case "ucinewgame":
+			if b.PonderSelf && b.ponderTotal > 0 {
+				b.logf("PONDER-GAME-SUMMARY game=%d hits=%d total=%d rate=%.3f",
+					b.gameNo, b.ponderHits, b.ponderTotal,
+					float64(b.ponderHits)/float64(b.ponderTotal))
+			}
+			b.gameNo++
+			b.ponderHits, b.ponderTotal = 0, 0
+			b.posBase, b.posMoves = nil, nil
 			b.aux = nil // clear the TT
 			b.pos, _ = refchess.ParseFEN(refchess.StartFEN)
-			b.bookRnd = nil // restart the deterministic book-choice stream
+			b.bookRnd = nil // restart the book-choice stream (re-derived per game)
 			b.CurOpening, b.CurOpeningName = 0, ""
 			b.ponderArgs, b.ponderBest, b.ponderPredicted = nil, "", ""
 		case "setoption":
@@ -165,6 +208,9 @@ func (b *Bridge) Run(r io.Reader, w io.Writer) error {
 				}
 				continue
 			}
+			if b.Ponder && b.PonderSelf {
+				b.selfPonder(say)
+			}
 			b.emitMove(say, args)
 		case "ponderhit":
 			// The opponent played the predicted reply P; the position is still
@@ -186,10 +232,32 @@ func (b *Bridge) Run(r io.Reader, w io.Writer) error {
 				say("bestmove 0000")
 			}
 		case "quit":
+			b.flushSessionSummary()
 			return nil
 		}
 	}
+	b.flushSessionSummary()
 	return sc.Err()
+}
+
+// flushSessionSummary logs the final game's per-game summary (if unflushed) and
+// the whole-session ponder-hit rate. Called on quit and at EOF.
+func (b *Bridge) flushSessionSummary() {
+	if !b.PonderSelf {
+		return
+	}
+	if b.ponderTotal > 0 {
+		b.logf("PONDER-GAME-SUMMARY game=%d hits=%d total=%d rate=%.3f",
+			b.gameNo, b.ponderHits, b.ponderTotal,
+			float64(b.ponderHits)/float64(b.ponderTotal))
+		b.ponderTotal = 0 // avoid double-flush (quit then EOF)
+	}
+	if b.ponderTotAll > 0 {
+		b.logf("PONDER-SESSION-SUMMARY games=%d hits=%d total=%d rate=%.3f",
+			b.gameNo, b.ponderHitsAll, b.ponderTotAll,
+			float64(b.ponderHitsAll)/float64(b.ponderTotAll))
+		b.ponderTotAll = 0
+	}
 }
 
 func (b *Bridge) setPosition(args []string) error {
@@ -213,7 +281,12 @@ func (b *Bridge) setPosition(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Record the base spec and full move list so self-pondering can reconstruct
+	// the predicted position (root+M+P) — args[:i] is "startpos"/"fen f1..f6".
+	b.posBase = append(b.posBase[:0:0], args[:i]...)
+	b.posMoves = nil
 	if i < len(args) && args[i] == "moves" {
+		b.posMoves = append(b.posMoves[:0:0], args[i+1:]...)
 		for _, ms := range args[i+1:] {
 			mv, err := refchess.ParseMove(ms)
 			if err != nil {
@@ -225,6 +298,35 @@ func (b *Bridge) setPosition(args []string) error {
 		}
 	}
 	return nil
+}
+
+// buildPosition constructs a fresh position from a position-command base spec
+// ("startpos" or "fen f1..f6") plus a move list. Used to reconstruct the
+// position we predicted (root+M+P) for self-pondering.
+func buildPosition(base, moves []string) (*refchess.Position, error) {
+	var pos *refchess.Position
+	var err error
+	switch {
+	case len(base) > 0 && base[0] == "startpos":
+		pos, err = refchess.ParseFEN(refchess.StartFEN)
+	case len(base) > 0 && base[0] == "fen":
+		pos, err = refchess.ParseFEN(strings.Join(base[1:], " "))
+	default:
+		return nil, fmt.Errorf("bad position base %v", base)
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, ms := range moves {
+		mv, err := refchess.ParseMove(ms)
+		if err != nil {
+			return nil, err
+		}
+		if err := pos.Make(mv); err != nil {
+			return nil, err
+		}
+	}
+	return pos, nil
 }
 
 // budgetCycles derives the emulated budget from the go arguments.
@@ -267,7 +369,11 @@ func (b *Bridge) probeBook() (move string, ok bool, err error) {
 		return "", false, nil
 	}
 	if b.bookRnd == nil {
-		seed := b.BookSeed
+		// Vary the book stream per game (gameNo folded in) so a gauntlet driven
+		// by one long-lived engine process gets opening variety across games,
+		// while gameNo==0 (direct think() use in tests) reproduces the original
+		// BookSeed stream exactly.
+		seed := b.BookSeed + uint64(b.gameNo)*0x9E3779B97F4A7C15
 		r := rand.New(rand.NewPCG(seed, seed^0x9E3779B97F4A7C15))
 		b.bookRnd = func() uint32 { return r.Uint32() }
 	}
@@ -299,6 +405,7 @@ func (b *Bridge) probeBook() (move string, ok bool, err error) {
 	b.CurOpening = res.NameID + 1
 	b.CurOpeningName = name
 	b.info = fmt.Sprintf("info string in book: %s", name)
+	b.logf("BOOK game=%d move=%s name=%q", b.gameNo, move, name)
 	return move, true, nil
 }
 
@@ -440,11 +547,66 @@ func (b *Bridge) emitMove(say func(string, ...any), args []string) {
 	if b.Ponder {
 		if p, ok, perr := b.ponderPrediction(); perr == nil && ok {
 			b.ponderPredicted = p
-			say("bestmove %s ponder %s", move, p)
-			return
+			if !b.PonderSelf {
+				// Advise the GUI which reply to have us ponder next. Suppressed
+				// under PonderSelf, where the bridge ponders internally instead
+				// (see selfPonder) and a plain bestmove keeps a non-pondering GUI
+				// from trying to drive the handshake.
+				say("bestmove %s ponder %s", move, p)
+				return
+			}
 		}
 	}
 	say("bestmove %s", move)
+}
+
+// selfPonder emulates one pondering interval for gauntlet drivers that do not
+// speak the UCI ponder handshake. Using the reply P predicted after our last
+// move, it ponders the position we WOULD have faced (root+M+P) under
+// PonderBudgetMs — warming the carried TT (b.aux) exactly as a go-ponder would —
+// then measures whether the opponent's actual reply S (the last move in the
+// current position) matched P. On a hit the follow-up real search (emitMove,
+// run next) inherits the warm TT for the exact position it now faces; on a miss
+// the TT is merely less relevant (never wrong). Game state is restored before
+// returning, so the ensuing real search sees the true position root+M+S.
+func (b *Bridge) selfPonder(say func(string, ...any)) {
+	if b.ponderPredicted == "" || len(b.posMoves) == 0 {
+		return // first move of the game, or nothing predicted yet
+	}
+	p := b.ponderPredicted
+	s := b.posMoves[len(b.posMoves)-1] // opponent's actual reply
+	b.ponderPredicted = ""             // consumed
+
+	// Reconstruct root+M+P: the current move list with the opponent's actual
+	// reply replaced by our prediction P.
+	predMoves := append(append([]string(nil), b.posMoves[:len(b.posMoves)-1]...), p)
+	if predPos, err := buildPosition(b.posBase, predMoves); err == nil {
+		saved := b.pos
+		b.pos = predPos
+		b.ponderArgs = nil // budget comes from PonderBudgetMs
+		if perr := b.ponder(); perr != nil {
+			say("info string self-ponder error: %v", perr)
+		}
+		b.pos = saved
+	} else {
+		say("info string self-ponder rebuild error: %v", err)
+	}
+
+	hit := s == p
+	b.ponderTotal++
+	b.ponderTotAll++
+	if hit {
+		b.ponderHits++
+		b.ponderHitsAll++
+	}
+	label := "MISS"
+	if hit {
+		label = "HIT"
+	}
+	say("info string ponder %s predicted %s actual %s (game %d/%d, all %d/%d)",
+		label, p, s, b.ponderHits, b.ponderTotal, b.ponderHitsAll, b.ponderTotAll)
+	b.logf("PONDER %s game=%d predicted=%s actual=%s game_hits=%d/%d all_hits=%d/%d",
+		label, b.gameNo, p, s, b.ponderHits, b.ponderTotal, b.ponderHitsAll, b.ponderTotAll)
 }
 
 // ponder runs the pondering search over the current position (root+M+P, the

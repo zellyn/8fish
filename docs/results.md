@@ -3,6 +3,36 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-23 — Sargon III gauntlet #3 (round-4 engine + pondering): 52.5%, point estimate crosses positive
+
+40 games, pool openings (varied), Sargon at 1.5×, 30M-cycle budget —
+same conditions as gauntlet #2 (2026-07-20), now with the round-4
+optimized engine (−12.6% cycles → deeper search at the same budget)
+AND self-pondering on.
+
+**Raw 18W-16L-6D = 52.5% ≈ +17 ± ~110 Elo.** Audited clean: 3
+adapter-judgment screen dumps — 2 genuine repetition draws (repTracker
+played the drawing move, correctly counted as draws), and 1 promotion-
+driver hiccup that was a GENUINE win (we had just promoted a SECOND
+queen with check, `A2-A1/Q+`, against Sargon's bare wandering king;
+Sargon processed the move on its own screen and replied — the
+"submit failed" was only a CTRL-T timing glitch, not a technicality).
+No reclassification needed; raw == audited.
+
+Progress vs gauntlet #2's audited 46.25% (−26 ± 100): the point
+estimate crosses to POSITIVE for the first time (statistical parity
+still — the interval spans 50% — but nominally we're now ahead).
+CONFOUND: this reflects round-4 speed AND pondering together; a clean
+pondering-only number needs a ponder-off control run (offered).
+
+**Ponder-hit rate: 891/1888 = 47.2%** over the 40 games — rock-steady
+(per-game 27–62%, aggregate never strays far from ~48%), and above the
+3M-budget validation's 43.7% (deeper search predicts Sargon's replies
+better). Roughly every other move inherits a warm TT worth the measured
+head start (same depth at 4–12% of the nodes, or +1 ply). BOOK was
+inert here (0/40 pool openings are in-book — the pool starts past our
+main lines); the book's own value needs a standard-start run.
+
 ## 2026-07-23 — pondering mechanics (step 1): warm-TT head start measured, gauntlet measurement pending
 
 Built the pondering machinery bridge-side (Go), no asm change, gated

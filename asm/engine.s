@@ -460,3 +460,12 @@ itsearch:
         sta BETAHI
         jmp search              ; rts returns to itsearch's caller
 
+        ; Resident opening-book probe (bookentry/bookprobe). Appended at the
+        ; very end of CODE — after the aspiration block — so it moves nothing
+        ; before it and shifts the page-aligned TABLES/LCCODE only by whole
+        ; pages: the bookless search path stays byte-identical (see book.s).
+        ; Reached only via bookentry, which the harness/bridge invokes when a
+        ; book is loaded; the normal $4000 entry never touches it.
+        .segment "CODE"
+        .include "book.s"
+

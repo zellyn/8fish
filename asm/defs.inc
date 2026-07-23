@@ -152,6 +152,17 @@ CLSP      = $3C         ; movegen class-presence accumulator (deep opt r4
                         ;  meaningless; batched quiets skip the OR).
                         ;  Reset by gennodeq/gennodef, latched to
                         ;  CLSPRES[PLY] by gennd2 after generation.
+; ---- Resident opening book (docs/book.md; layout in asm/book.inc) ----
+; The probe (asm/book.s, entry bookentry) runs standalone at the root before
+; any search. These are the only bytes it CLAIMS; its working scratch is
+; borrowed search/eval ZP (see book.s), all dead before the first node.
+CUROPENING = $3D        ; "which opening am I in": the NAMEID (name-table
+                        ;  index) of the last book move the probe played.
+                        ;  Free ZP: $3D-$3F were unallocated (CLSP $3C ..
+                        ;  BOARD $40). Meaningful only after a book hit.
+RUNPTR     = $3E         ; 16-bit ($3E-$3F): the probe's equal-key-run /
+                        ;  weighted-pick pointer (ZP for (RUNPTR),y reads).
+
 EVALVALID = $32         ; improving (FT2_IMPROV): nonzero = a static eval was
                         ;  recorded for the CURRENT node's visit (deep opt r4:
                         ;  was a 32-byte per-ply array at $0278; single ZP byte
@@ -395,6 +406,15 @@ SMODE      = $0DE0      ; child window mode for the move being searched:
 ; touches XSTRUCT, so it stays valid at the root after a search).
 RKCNT      = $0210      ; 16 bytes ($0210-$021F)
 XSTRUCT    = $0220      ; 16-bit signed, white POV
+
+; Resident-book probe I/O (asm/book.s). Free driver-scratch RAM between
+; XSTRUCT ($0220-$0221) and ITSTART ($0230). Touched only by the book
+; probe, which the harness/bridge runs only when a book is loaded.
+BOOKRND    = $0222      ; 4 bytes: 32-bit LE random r, poked by the harness
+                        ;  (on hardware, derived from SEED / input timing).
+                        ;  CONSUMED by the probe (shifted out by r % total).
+BOOKHIT    = $0226      ; byte: 1 = a book move was played (BESTFROM/TO/FLAGS
+                        ;  + CUROPENING valid), 0 = no book / out of book.
 
 ; Driver scratch (budget mode)
 ITSTART0   = $0230      ; 24-bit CLOCK snapshot at iteration start

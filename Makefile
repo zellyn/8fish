@@ -42,7 +42,8 @@ asm/perft.bin: asm/perft.s asm/board.s asm/movegen.s asm/defs.inc asm/tables.s a
 	cd asm && $(LD65) -C perft.cfg perft.o -o perft.bin -Ln perft.lbl
 
 ENGINE_SRCS = asm/engine.s asm/search.s asm/tt.s asm/eval.s asm/board.s \
-              asm/movegen.s asm/defs.inc asm/tables.s asm/engine.cfg
+              asm/movegen.s asm/book.s asm/book.inc asm/defs.inc \
+              asm/tables.s asm/engine.cfg
 
 asm/engine.bin: $(ENGINE_SRCS)
 	cd asm && $(CA65) -g engine.s -o engine.o

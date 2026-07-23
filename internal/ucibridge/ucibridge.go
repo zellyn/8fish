@@ -50,15 +50,25 @@ type Bridge struct {
 	// fixed-depth mode ignores it.
 	Banked bool
 
-	// Book, if non-nil, is the resident opening book. Before searching,
-	// the bridge probes it on the current position's 32-bit Zobrist key
-	// (== asm HASH0-3) and, on a hit, plays a weighted-random book move
-	// WITHOUT searching. When Book is nil the bridge behaves byte-
-	// identically to the bookless engine (existing tests/fingerprints
-	// unaffected).
+	// Book, if non-nil, is the resident opening book. Before searching, the
+	// bridge loads the blob into the emulated machine's $2000 hole and runs
+	// the engine's ON-DEVICE probe (the asm bookentry point): the 6502
+	// engine computes the position's 32-bit Zobrist key (== asm HASH0-3),
+	// binary-searches the resident array, weighted-picks among the equal-key
+	// moves, and returns the move to play WITHOUT any node search. The bridge
+	// merely supplies the random value and reads back the engine's choice;
+	// the selection is byte-for-byte the resident engine's own (proven by
+	// chesstest.TestBookProbeParityASMvsGo). When Book is nil the bridge
+	// behaves byte-identically to the bookless engine (existing tests/
+	// fingerprints unaffected).
 	Book *book.Book
+	// BookEntry is the address of the asm bookentry label (from engine.lbl);
+	// required when Book is set. The bridge starts the machine here for the
+	// probe pass.
+	BookEntry uint16
 	// BookSeed seeds the deterministic PRNG that drives the weighted book
-	// pick, so A/B replays reproduce (same seed -> same book choices).
+	// pick, so A/B replays reproduce (same seed -> same book choices). The
+	// engine consumes this value; only the PRNG lives host-side.
 	BookSeed uint64
 
 	pos   *refchess.Position
@@ -199,10 +209,11 @@ func (b *Bridge) budgetCycles(args []string) uint64 {
 	return 30_000 * cyclesPerMs // default: 30 emulated seconds
 }
 
-// probeBook probes the resident book on the current position. On a hit it
-// applies the chosen book move to the game state and returns its UCI form;
-// ok=false means Book is disabled or the position is out of book (fall
-// through to search). The move choice is deterministic given BookSeed.
+// probeBook runs the engine's ON-DEVICE book probe over the current
+// position. On a hit it applies the engine-chosen book move to the game
+// state and returns its UCI form; ok=false means Book is disabled or the
+// position is out of book (fall through to search). The move choice is the
+// resident engine's own, deterministic given BookSeed.
 func (b *Bridge) probeBook() (move string, ok bool, err error) {
 	if b.Book == nil {
 		return "", false, nil
@@ -212,19 +223,23 @@ func (b *Bridge) probeBook() (move string, ok bool, err error) {
 		r := rand.New(rand.NewPCG(seed, seed^0x9E3779B97F4A7C15))
 		b.bookRnd = func() uint32 { return r.Uint32() }
 	}
-	key, err := book.HashFEN(b.pos.FEN())
+	pos, err := chesstest.ParseFEN(b.pos.FEN())
 	if err != nil {
 		return "", false, err
 	}
 	// Draw one random value regardless of hit/miss so the PRNG stream —
 	// hence the whole game's book choices — depends only on BookSeed and
-	// the move number, not on where the game left the book.
+	// the move number, not on where the game left the book. The engine does
+	// the key/search/pick; we only feed it r.
 	r := b.bookRnd()
-	e, name, hit := b.Book.Probe(key, r)
-	if !hit {
+	res, err := chesstest.AsmBookProbe(b.Bin, b.Defs, b.BookEntry, b.Book.Blob(), pos, r)
+	if err != nil {
+		return "", false, err
+	}
+	if !res.Hit {
 		return "", false, nil
 	}
-	move = chesstest.MoveUCI(e.From, e.To, e.Flags)
+	move = res.Move
 	mv, err := refchess.ParseMove(move)
 	if err != nil {
 		return "", false, fmt.Errorf("book move %q: %w", move, err)
@@ -232,7 +247,8 @@ func (b *Bridge) probeBook() (move string, ok bool, err error) {
 	if err := b.pos.Make(mv); err != nil {
 		return "", false, fmt.Errorf("book move %q illegal: %w", move, err)
 	}
-	b.CurOpening = e.NameID + 1
+	name := b.Book.Name(res.NameID) // name text is host-side (log) only
+	b.CurOpening = res.NameID + 1
 	b.CurOpeningName = name
 	b.info = fmt.Sprintf("info string in book: %s", name)
 	return move, true, nil

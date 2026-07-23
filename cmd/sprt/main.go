@@ -31,6 +31,9 @@ func main() {
 		pairs    = flag.Int("pairs", 50, "opening pairs (games = 2x)")
 		parallel = flag.Int("parallel", runtime.NumCPU()-2, "concurrent games")
 		openseed = flag.Uint64("openseed", 0, "opening-generation seed (0 = historical default 42)")
+		pergame  = flag.Bool("pergame", false, "per-GAME cycle-bank mode: -budget is each side's per-move income into a per-game bank (needed to exercise time management)")
+		adaptA   = flag.Bool("adaptA", false, "side A runs on-device FT2_ADAPT adaptive time management (per-game mode)")
+		adaptB   = flag.Bool("adaptB", false, "side B runs on-device FT2_ADAPT adaptive time management (per-game mode)")
 	)
 	flag.Parse()
 
@@ -91,6 +94,9 @@ func main() {
 		Pairs:        *pairs,
 		Parallel:     *parallel,
 		OpenSeed:     *openseed,
+		PerGame:      *pergame,
+		AdaptiveA:    *adaptA,
+		AdaptiveB:    *adaptB,
 	})
 	for _, e := range res.Errors {
 		fmt.Fprintf(os.Stderr, "ERROR: %s\n", e)

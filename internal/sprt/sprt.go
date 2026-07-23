@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/zellyn/chess6502/harness"
 	"github.com/zellyn/chess6502/internal/chesstest"
 	"github.com/zellyn/chess6502/internal/refchess"
 )
@@ -57,6 +58,73 @@ type Config struct {
 	Pairs        int    // games = 2*Pairs (each opening pair, colors swapped)
 	Parallel     int
 	OpenSeed     uint64 // opening-generation seed; 0 = the historical default (42)
+
+	// PerGame switches from a flat per-move budget to a per-GAME cycle BANK:
+	// each side earns BudgetCycles of income per move into its own bank and
+	// may spend from it, so time management has something to manage (a flat
+	// per-move budget gives it nothing). Total game compute is conserved
+	// (income == BudgetCycles per move) whether or not a side redistributes,
+	// which is what makes the A/B honest. Mirrors mirror.EffortBank /
+	// TimeMatch. When false the harness is byte-identical to before.
+	PerGame bool
+	// AdaptiveA / AdaptiveB select which side runs on-device FT2_ADAPT
+	// (adaptive-aggr: banking baseline + panic/instability/easy-stop signals)
+	// vs flat (spends exactly its per-move income). Only consulted in PerGame
+	// mode. The canonical time-management SPRT is AdaptiveA=true,
+	// AdaptiveB=false — adaptive vs flat.
+	AdaptiveA bool
+	AdaptiveB bool
+}
+
+// effortBank is a per-game cycle bank (host-side; the engine's zero page does
+// NOT persist across the harness's fresh-machine-per-move, so the bank must
+// live here and be poked into each move's budget). Mirrors mirror.EffortBank
+// and chesstest.BankedClock: income per move, spend, carry forward, cap 8x.
+type effortBank struct {
+	income uint64
+	bank   uint64
+}
+
+func (b *effortBank) settle(spent uint64) {
+	total := b.bank + b.income
+	if spent >= total {
+		b.bank = 0
+	} else {
+		b.bank = total - spent
+	}
+	if cap := 8 * b.income; b.bank > cap {
+		b.bank = cap
+	}
+}
+
+// pokeAlloc installs this move's cycle budget for a side drawing from its
+// per-game bank and returns the machine run cap. The flat side spends exactly
+// its income. The adaptive side pokes the FT2_ADAPT movable-ceiling params,
+// computed exactly as mirror.SearchTimed does (base = income; smoothed base
+// ceiling = income + bank/8; hard max = min(4*income, income+bank); instability
+// target = min(3*income, hard max); easy-stop min spend = income/4). The engine
+// then raises the ceiling on-device via the panic/instability signals.
+func pokeAlloc(m *harness.Machine, defs chesstest.Defs, income, bank uint64, adaptive bool) uint64 {
+	if !adaptive {
+		chesstest.SetBudget(m, defs, income, 24)
+		return income*3 + 2_000_000_000
+	}
+	baseCeiling := income + bank/8
+	maxCeiling := 4 * income
+	if lim := income + bank; maxCeiling > lim {
+		maxCeiling = lim
+	}
+	if maxCeiling < baseCeiling {
+		maxCeiling = baseCeiling
+	}
+	unstTarget := 3 * income
+	if unstTarget > maxCeiling {
+		unstTarget = maxCeiling
+	}
+	chesstest.SetBudget(m, defs, baseCeiling, 24)
+	chesstest.SetAdaptive(m, defs, maxCeiling, unstTarget, income/4)
+	// Hard abort is 2*maxCeiling on device; allow generous slack + fixed cost.
+	return maxCeiling*3 + 2_000_000_000
 }
 
 // Result tallies from A's perspective.
@@ -244,6 +312,11 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 	}
 	seen := map[uint64]int{}
 	auxes := map[bool][]byte{} // per-side TT carryover
+	// Per-game cycle banks (PerGame mode). aTurn==true is side A.
+	banks := map[bool]*effortBank{
+		true:  {income: cfg.BudgetCycles},
+		false: {income: cfg.BudgetCycles},
+	}
 	for range 400 {
 		if ref.HalfmoveClock() >= 100 || ref.InsufficientMaterial() {
 			return 0, nil
@@ -283,14 +356,29 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 		}
 		chesstest.SetFeatures(m, defs, features)
 		chesstest.SetFeatures2(m, defs, features2)
-		chesstest.SetBudget(m, defs, cfg.BudgetCycles, 24)
+		// Budget/time-management poke. Per-move mode: flat BudgetCycles.
+		// Per-game mode: draw this move's allocation from the side's bank; the
+		// adaptive side additionally installs the FT2_ADAPT ceiling params.
+		runCap := cfg.BudgetCycles*3 + 2_000_000_000
+		if cfg.PerGame {
+			adaptive := cfg.AdaptiveA
+			if !aTurn {
+				adaptive = cfg.AdaptiveB
+			}
+			runCap = pokeAlloc(m, defs, banks[aTurn].income, banks[aTurn].bank, adaptive)
+		} else {
+			chesstest.SetBudget(m, defs, cfg.BudgetCycles, 24)
+		}
 		m.Mem.Main[defs["HALFMOVE"]] = byte(min(ref.HalfmoveClock(), 255))
 		if aux := auxes[aTurn]; aux != nil {
 			copy(m.Mem.Aux[:], aux)
 		}
-		exited, code, err := m.Run(cfg.BudgetCycles*3 + 2_000_000_000)
+		exited, code, err := m.Run(runCap)
 		if err != nil || !exited {
 			return 0, fmt.Errorf("engine run: exited=%v err=%v (fen %q)", exited, err, ref.FEN())
+		}
+		if cfg.PerGame {
+			banks[aTurn].settle(m.Cycles) // actual emulated cycles spent
 		}
 		if auxes[aTurn] == nil {
 			auxes[aTurn] = make([]byte, len(m.Mem.Aux))

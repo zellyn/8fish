@@ -57,7 +57,7 @@ func followSearch(t *testing.T, b *Bridge, budget uint64, depth byte) engineResu
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := b.runEngine(pos, pos.Halfmove, budget, depth, -1)
+	res, err := b.runEngine(pos, pos.Halfmove, budget, depth, -1, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

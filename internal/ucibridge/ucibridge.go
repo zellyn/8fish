@@ -50,6 +50,15 @@ type Bridge struct {
 	// fixed-depth mode ignores it.
 	Banked bool
 
+	// Adaptive enables on-device adaptive time/effort management (FT2_ADAPT):
+	// the bridge runs the BankedClock as with Banked (per-move income, /8
+	// smoothing, carry), but each move ALSO installs the movable-ceiling
+	// params (CEILMAX/UNSTCEIL/MINSPEND) so the engine spends MORE on
+	// critical/unstable moves and LESS on easy ones at the same per-game
+	// total. Only meaningful with a per-move budget; supersedes Banked when
+	// both are set. Byte-identical to Banked when unset.
+	Adaptive bool
+
 	// Ponder enables pondering: searching during the opponent's turn on the
 	// position we would face if the opponent plays our predicted reply,
 	// letting that search warm the transposition table that already carries
@@ -426,7 +435,15 @@ type engineResult struct {
 // leaves SEED at its default. It never touches game state (b.pos). This is the
 // exact machine-setup sequence that think() and the ponder search share, so
 // the carried TT is populated identically whichever drives it.
-func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64, depth byte, seed int) (engineResult, error) {
+// adaptiveAlloc holds the FT2_ADAPT movable-ceiling params for a move (all in
+// cycles; the engine converts to its 256-cycle units). Nil => flat search.
+type adaptiveAlloc struct {
+	maxCeiling uint64 // panic target / hard max = min(4*income, income+bank)
+	unstTarget uint64 // instability target = min(3*income, maxCeiling)
+	minSpend   uint64 // easy-stop minimum spend = income/4
+}
+
+func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64, depth byte, seed int, adapt *adaptiveAlloc) (engineResult, error) {
 	// Gameplay config: FEATURES stays the NewMachine 0x1F default.
 	// FT2_IMPROV (improving-LMR) was adopted 2026-07-21 on a +13 ± 9 cycle
 	// screen, then RETRACTED 2026-07-22: a 4200-game confirmation SPRT
@@ -439,6 +456,9 @@ func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64
 		return engineResult{}, err
 	}
 	chesstest.SetBudget(m, b.Defs, budget, depth)
+	if adapt != nil {
+		chesstest.SetAdaptive(m, b.Defs, adapt.maxCeiling, adapt.unstTarget, adapt.minSpend)
+	}
 	m.Mem.Main[b.Defs["HALFMOVE"]] = halfmove
 	if seed >= 0 {
 		m.Mem.Main[b.Defs["SEED"]] = byte(seed)
@@ -491,11 +511,31 @@ func (b *Bridge) think(args []string) (string, error) {
 	if d, ok := goDepth(args); ok {
 		depth, budget = d, 0 // fixed-depth mode
 	}
-	if b.Banked && budget != 0 {
-		if b.clock == nil || b.clock.Base != budget {
-			b.clock = &chesstest.BankedClock{Base: budget}
+	var adapt *adaptiveAlloc
+	if (b.Banked || b.Adaptive) && budget != 0 {
+		income := budget
+		if b.clock == nil || b.clock.Base != income {
+			b.clock = &chesstest.BankedClock{Base: income}
 		}
-		budget = b.clock.Alloc()
+		budget = b.clock.Alloc() // base ceiling = income + bank/8
+		if b.Adaptive {
+			// Movable-ceiling params, computed exactly as mirror.SearchTimed:
+			// hard max = min(4*income, income+bank), clamped >= base ceiling;
+			// instability target = min(3*income, hard max); min spend =
+			// income/4. The engine raises the ceiling on-device from these.
+			maxCeiling := 4 * income
+			if lim := income + b.clock.Bank(); maxCeiling > lim {
+				maxCeiling = lim
+			}
+			if maxCeiling < budget {
+				maxCeiling = budget
+			}
+			unstTarget := 3 * income
+			if unstTarget > maxCeiling {
+				unstTarget = maxCeiling
+			}
+			adapt = &adaptiveAlloc{maxCeiling: maxCeiling, unstTarget: unstTarget, minSpend: income / 4}
+		}
 	}
 	seed := -1
 	if b.Dither {
@@ -505,7 +545,7 @@ func (b *Bridge) think(args []string) (string, error) {
 		}
 		seed = int(b.rnd())
 	}
-	res, err := b.runEngine(pos, byte(min(b.pos.HalfmoveClock(), 255)), budget, depth, seed)
+	res, err := b.runEngine(pos, byte(min(b.pos.HalfmoveClock(), 255)), budget, depth, seed, adapt)
 	if err != nil {
 		return "", err
 	}
@@ -621,7 +661,7 @@ func (b *Bridge) ponder() error {
 		return err
 	}
 	budget := b.ponderBudgetCycles(b.ponderArgs)
-	res, err := b.runEngine(pos, byte(min(b.pos.HalfmoveClock(), 255)), budget, maxDepthCap, -1)
+	res, err := b.runEngine(pos, byte(min(b.pos.HalfmoveClock(), 255)), budget, maxDepthCap, -1, nil)
 	if err != nil {
 		return err
 	}
@@ -716,7 +756,7 @@ func (b *Bridge) ponderPrediction() (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	res, err := b.runEngine(pos, byte(min(b.pos.HalfmoveClock(), 255)), ponderProbeMs*cyclesPerMs, maxDepthCap, -1)
+	res, err := b.runEngine(pos, byte(min(b.pos.HalfmoveClock(), 255)), ponderProbeMs*cyclesPerMs, maxDepthCap, -1, nil)
 	if err != nil {
 		return "", false, err
 	}

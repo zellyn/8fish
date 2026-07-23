@@ -217,6 +217,39 @@ func SetBudget(m *harness.Machine, defs Defs, budgetCycles uint64, maxDepth byte
 	m.Mem.Main[defs["MAXDEPTH"]] = maxDepth
 }
 
+// poke24 writes a value (in cycles, converted to the engine's 24-bit
+// 256-cycle units, rounding up) to a 3-byte little-endian MAIN triple whose
+// low byte is at defs[sym].
+func poke24(m *harness.Machine, defs Defs, sym string, cycles uint64) {
+	v := (cycles + 255) >> 8
+	if v > 0xFFFFFF {
+		v = 0xFFFFFF
+	}
+	a := defs[sym]
+	m.Mem.Main[a] = byte(v)
+	m.Mem.Main[a+1] = byte(v >> 8)
+	m.Mem.Main[a+2] = byte(v >> 16)
+}
+
+// SetAdaptive pokes the FT2_ADAPT (adaptive time/effort) engine params and
+// turns the feature bit on. BUDGET (the movable ceiling's start = the base
+// ceiling) must already be poked by SetBudget. All three ceilings are in
+// CYCLES (converted to 256-cycle units on device, matching BUDGET):
+//
+//	ceilMax  = panic target / hard max ceiling = min(4*base, income+bank)
+//	unstCeil = instability target             = min(3*base, ceilMax)
+//	minSpend = easy-stop minimum spend        = base/4
+//
+// The host (which runs the per-game bank) computes these; on device the engine
+// only compares and raises the movable ceiling. Leaves FEATURES2's other bits
+// untouched (OR in FT2_ADAPT). ftAdapt must be the FT2_ADAPT defs value.
+func SetAdaptive(m *harness.Machine, defs Defs, ceilMax, unstCeil, minSpend uint64) {
+	poke24(m, defs, "CEILMAX0", ceilMax)
+	poke24(m, defs, "UNSTCEIL0", unstCeil)
+	poke24(m, defs, "MINSPEND0", minSpend)
+	m.Mem.Main[defs["FEATURES2"]] |= byte(defs["FT2_ADAPT"])
+}
+
 // SearchResult is the outcome of running the engine binary once.
 type SearchResult struct {
 	Move   string // UCI ("e2e4", "e7e8q"), or "" if no legal move

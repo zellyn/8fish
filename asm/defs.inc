@@ -279,15 +279,11 @@ FT_KILLER = $02         ; killer-move ordering
 FT_FUTIL  = $04         ; futility + reverse-futility at depth <= 2
 FT_PSTRUCT = $08        ; pawn-structure + king-shield eval term
 FT_LMR    = $10         ; PVS zero-window scouts + late move reductions
-FT_ROOKX  = $20         ; experimental rook/blockade eval terms (task #51):
-                        ;  rook open-file +25 / semi-open +12 (per rook),
-                        ;  doubled rooks on a file +15, passed-pawn
-                        ;  blockade -18. White-POV, flat (not tapered),
-                        ;  added to SCORE beside PSTRUCT. Computed live in
-                        ;  eval by extraterm (a piece-list scan + per-file
-                        ;  blockade pass); zero cost when the bit is clear
-                        ;  (arm A == the current engine byte-for-byte).
-                        ;  A/B via sprt -a 0x3F -b 0x1F.
+; $20 free: was FT_ROOKX (experimental rook/blockade eval terms, task #51);
+;  removed 2026-07-23 after its SPRT lost (-19 +/- 33) to reclaim CODE space
+;  for the mop-up + adaptive ports. The extraterm subroutine + RKCNT/XSTRUCT
+;  scratch are gone; PWBITS/PBBITS and WBLOCKM/BBLOCKM (shared with pawnterm)
+;  are untouched.
 FT_ASP    = $40         ; aspiration windows at the iterative-deepening
                         ;  root (budget mode only): after iteration d
                         ;  completes with score s (not a mate, d >= 1),
@@ -304,6 +300,22 @@ FT_CKVERIFY = $80       ; debug: verify make's gives-check against a
                         ; full scan at every node (exit 101 on mismatch)
 
 ; ---- Second feature byte (FEATURES2) ----
+FT2_ADAPT  = $04        ; adaptive time/effort management (mirror.SearchTimed
+                        ;  port). Budget mode only. The host pokes BUDGET =
+                        ;  the per-move base ceiling and CEILMAX = the hard max
+                        ;  (min(4*base, income+bank)); the engine RAISES the
+                        ;  movable ceiling (mutating BUDGET in place) after each
+                        ;  completed ID iteration on the panic (root score
+                        ;  dropped >=25cp vs last completed iter -> 4*base) and
+                        ;  instability (root best move changed -> 3*base)
+                        ;  signals, and STOPS early (easy move) once the best
+                        ;  move has been stable for 2 iters past depth 2 with a
+                        ;  flat (|drop|<=30cp) score and >= base/4 cycles spent.
+                        ;  All raises clamp to CEILMAX; multipliers are eighths
+                        ;  (shift+add). adaptive-aggr params (mirror-validated:
+                        ;  +54 vs flat / +21 vs banking). Zero tree effect when
+                        ;  clear: BUDGET stays the poked constant, ABORTL =
+                        ;  2*BUDGET, no policy runs -> byte-identical search.
 FT2_IMPROV = $01        ; improving heuristic, full-signal LMR application
                         ;  (mirror ImprovingParams{Mode:full, LMR:true,
                         ;  LMRExtra:1}). "improving" = the side to move's
@@ -318,7 +330,7 @@ FT2_IMPROV = $01        ; improving heuristic, full-signal LMR application
 FT2_MOPUP = $02         ; phase-gated endgame mop-up eval term (mirror
                         ;  DefaultMopup{Edge:10, Close:4, MatThreshold:450,
                         ;  PhaseMax:6}). White-POV bonus added to SCORE beside
-                        ;  PSTRUCT/extraterm, BEFORE the side-to-move negation.
+                        ;  PSTRUCT, BEFORE the side-to-move negation.
                         ;  Fires only at PHASE <= 6 (endgame) AND a signed
                         ;  material edge >= 450 (a rook): drives the losing
                         ;  king to a corner (Edge*cornerDist(losingKing),
@@ -417,18 +429,11 @@ SMODE      = $0DE0      ; child window mode for the move being searched:
                         ;  0 full window, 1 zero-window scout (PVS),
                         ;  2/3 scout reduced by 1/2 (LMR)
 
-; FT_ROOKX eval-term state (task #51), MAIN just above PWBITS/PBBITS.
-; RKCNT: per-file rook counts, file|colorbit indexed (colorbit = $08,
-; like PWBITS/PBBITS), scratch rebuilt on every extraterm call from the
-; piece-list scan; drives the doubled-rook bonus. XSTRUCT: the last
-; white-POV extra-term value; evalinit writes the ROOT position's value
-; here for the parity harness (eval recomputes live into T2/T3 and never
-; touches XSTRUCT, so it stays valid at the root after a search).
-RKCNT      = $0210      ; 16 bytes ($0210-$021F)
-XSTRUCT    = $0220      ; 16-bit signed, white POV
+; $0210-$0221 is free driver-scratch RAM (was FT_ROOKX's RKCNT[16] at
+; $0210 and XSTRUCT at $0220, removed 2026-07-23 with the feature).
 
 ; Resident-book probe I/O (asm/book.s). Free driver-scratch RAM between
-; XSTRUCT ($0220-$0221) and ITSTART ($0230). Touched only by the book
+; PWBITS/PBBITS ($0200-$020F) and ITSTART ($0230). Touched only by the book
 ; probe, which the harness/bridge runs only when a book is loaded.
 BOOKRND    = $0222      ; 4 bytes: 32-bit LE random r, poked by the harness
                         ;  (on hardware, derived from SEED / input timing).
@@ -474,6 +479,28 @@ CLSPRES    = $0278      ; 32 bytes: per-ply move-list class presence (CLSP
                         ;  (bit 0 = heavy capture/promo, bit 1 = light
                         ;  capture; conservative - a consumed TT move may
                         ;  leave a set bit with nothing left to find).
+
+; FT2_ADAPT adaptive-effort scratch (page 3, $0300-$030A — free RAM: nothing
+; is defined between UNDOPD's tail ($02B7) and PIECESQ ($0800), and the 6502
+; stack lives in page 1). CEILMAX/UNSTCEIL/MINSPEND are POKED by the host each
+; move (the host already runs the per-game bank, so it does all the ceiling
+; arithmetic — no multiply on-device): CEILMAX = panic target = the hard max
+; = min(4*BASE, income+bank); UNSTCEIL = instability target = min(3*BASE,
+; CEILMAX); MINSPEND = BASE/4 = easy-stop minimum spend. All 24-bit, 256-cycle
+; units, matching BUDGET. STABLE is engine-only. Untouched unless FT2_ADAPT set.
+CEILMAX0   = $0300      ; 24-bit panic target / hard max ceiling (poked)
+CEILMAX1   = $0301
+CEILMAX2   = $0302
+UNSTCEIL0  = $0303      ; 24-bit instability target = min(3*BASE, CEILMAX) (poked)
+UNSTCEIL1  = $0304
+UNSTCEIL2  = $0305
+MINSPEND0  = $0306      ; 24-bit easy-stop minimum spend = BASE/4 (poked)
+MINSPEND1  = $0307
+MINSPEND2  = $0308
+STABLE     = $0309      ; best-move stability counter (iterations unchanged)
+RTARGET0   = $030A      ; 24-bit staged raise target for the shared `raise`
+RTARGET1   = $030B
+RTARGET2   = $030C
 
 MOVESTACK  = $0E00      ; 4 bytes/move (tier,from,to,flags); through $1FFF
                         ;  (1151-move capacity; emitmove traps overflow with

@@ -47,7 +47,10 @@ ldloop: lda (ZPTR),y
         ; depth cap; MAXDEPTH becomes the per-iteration depth
         lda MAXDEPTH
         sta MAXCAP
-        ; hard-abort limit = 2x budget, saturating at 24 bits
+        ; hard-abort limit = 2x budget. (The former 24-bit saturation clamp
+        ; here was dead: a real per-move budget is ~10^5 256-cycle units, so
+        ; 2*BUDGET never approaches 2^23. Dropped to reclaim CODE space; fixed-
+        ; depth mode uses budget 0 and never reaches this in any case.)
         lda BUDGET0
         asl
         sta ABORTL0
@@ -57,11 +60,13 @@ ldloop: lda (ZPTR),y
         lda BUDGET2
         rol
         sta ABORTL2
-        bcc :+
-        lda #$FF
-        sta ABORTL0
-        sta ABORTL1
-        sta ABORTL2
+        ; FT2_ADAPT: override ABORTL with 2*CEILMAX so a raised ceiling is not
+        ; hard-aborted at 2*BASE. Zero effect (and byte-identical tree) when the
+        ; bit is clear; adaptaborthi is appended at CODE's end.
+        lda FEATURES2
+        and #FT2_ADAPT
+        beq :+
+        jsr adaptaborthi
 :
         ; fixed-depth mode (budget 0): one iteration at the cap
         lda BUDGET0
@@ -112,7 +117,13 @@ idok:   ; a winning mate is exact and final: deepening can't improve it
         bmi :+
         cmp #MATEZONEHI
         bcs reportj
-:       ; predictive gate: the next iteration is estimated at 2x the
+:       ; FT2_ADAPT: after this completed iteration, raise the movable ceiling
+        ; (panic/instability) or request an early easy-stop. adaptmaybe is
+        ; appended; it returns A=0 (Z=1) with the ceiling untouched when the bit
+        ; is clear, so the flat predictive gate below is byte-identical.
+        jsr adaptmaybe
+        bne reportj             ; easy-stop: report the completed move now
+        ; predictive gate: the next iteration is estimated at 2x the
         ; one just finished (QS-dominated growth ratios run 2-6, and
         ; the 2x-budget hard abort still backstops underestimates).
         ; Start it only if now + 2*cost fits inside the full budget -
@@ -524,7 +535,7 @@ mopcd:  cmp #4
         ; hot search/eval/board/movegen code before it does not move and
         ; TABLES/LCCODE shift only by whole pages; it is cold in the 0x1f
         ; default (never called unless FT2_MOPUP is set). eval jsr's here
-        ; after the pstruct/extraterm adds and BEFORE the side-to-move
+        ; after the pstruct adds and BEFORE the side-to-move
         ; negation, so the WHITE-POV bonus carries the right sign.
         ;
         ; Fires only when PHASE <= 6 (endgame) AND the signed material edge
@@ -689,3 +700,149 @@ mopw:   stx MULCNT              ; 0 = white winner (add), 1 = black (subtract)
         ; (mopfin, engine.s) so the whole feature fits the near-full image.
         jmp mopfin
 
+
+
+; ===================================================================
+; FT2_ADAPT adaptive time/effort management (mirror.SearchTimed port).
+; Appended at CODE's end (after book.s), reached from the driver via the
+; jsr adaptaborthi (entry) and jsr adaptmaybe (idok) hooks. All ceiling
+; arithmetic is done HOST-SIDE (the host runs the per-game bank); it pokes
+; BUDGET=base, CEILMAX=panic target = hard max = min(4*base,income+bank),
+; UNSTCEIL=min(3*base,CEILMAX), MINSPEND=base/4. On-device the engine only
+; compares and RAISES the movable ceiling, which IS the BUDGET word (mutated
+; in place); the flat predictive gate still reads BUDGET, so with FT2_ADAPT
+; clear BUDGET stays constant and the gate/tree are unchanged. Signals
+; (adaptive-aggr): panic (root score dropped >=25cp vs last completed iter)
+; -> BUDGET=max(BUDGET,CEILMAX); instability (root best move changed) ->
+; BUDGET=max(BUDGET,UNSTCEIL); easy-stop once the best move has been stable
+; for StableIters=2 past MinDepth=2 with |drop|<=30cp (ScoreFlat) and
+; >= MINSPEND cycles spent.
+; ===================================================================
+
+; adaptaborthi: override the hard-abort limit with ABORTL = 2*CEILMAX (no
+; saturation: 2*CEILMAX <= 8*base is far under 24 bits for any real budget).
+; Called from entry only when FT2_ADAPT is set.
+adaptaborthi:
+        lda CEILMAX0
+        asl
+        sta ABORTL0
+        lda CEILMAX1
+        rol
+        sta ABORTL1
+        lda CEILMAX2
+        rol
+        sta ABORTL2
+        rts
+
+; adaptmaybe: post-completed-iteration policy. Returns A=0 (Z=1) to continue,
+; A=1 (Z=0) to easy-stop. When FT2_ADAPT is clear it returns 0 immediately
+; with the ceiling untouched (the flat search path is unchanged). Otherwise it
+; maintains STABLE and raises the ceiling (BUDGET) on the panic/instability
+; signals, mirroring mirror.SearchTimed's per-iteration block (adaptive-aggr).
+; BEST*/SCORE = this iteration, PREV*/PREVSC = previous completed iteration
+; (aspiterate snapshots them at each iteration start).
+adaptmaybe:
+        lda FEATURES2
+        and #FT2_ADAPT
+        bne @on
+        lda #0                  ; flat: continue, ceiling untouched
+        rts
+@on:
+        lda CURDEPTH
+        cmp #2
+        bcs @dgt1
+        lda #1                  ; d==1: stable=1, no panic/unstable/stop
+        sta STABLE
+        lda #0
+        rts
+@dgt1:
+        sec                     ; scoreDrop = PREVSC - SCORE (16-bit signed) -> T1:T0
+        lda PREVSC0
+        sbc SCORE
+        sta T0
+        lda PREVSC1
+        sbc SCORE+1
+        sta T1
+        bmi @nopanic            ; scoreDrop < 0 -> no panic
+        bne @dopanic            ; high byte > 0 -> drop >= 256 >= 25 -> panic
+        lda T0
+        cmp #25
+        bcc @nopanic            ; low byte < 25 -> no panic
+@dopanic:
+        lda CEILMAX0           ; panic target = CEILMAX (the hard max)
+        sta RTARGET0
+        lda CEILMAX1
+        sta RTARGET1
+        lda CEILMAX2
+        sta RTARGET2
+        jsr raise
+@nopanic:
+        lda BESTFROM            ; unstable if best move changed vs previous iter
+        cmp PREVFROM
+        bne @changed
+        lda BESTTO
+        cmp PREVTO
+        bne @changed
+        inc STABLE
+        jmp @easy
+@changed:
+        lda #1
+        sta STABLE
+        lda UNSTCEIL0          ; instability target = UNSTCEIL
+        sta RTARGET0
+        lda UNSTCEIL1
+        sta RTARGET1
+        lda UNSTCEIL2
+        sta RTARGET2
+        jsr raise
+@easy:
+        lda STABLE              ; easy-stop: stable>=2, spent>=MINSPEND, |drop|<=30
+        cmp #2
+        bcc @nostop
+        lda CLOCK_TRAP
+        cmp MINSPEND0
+        lda CLOCK_TRAP+1
+        sbc MINSPEND1
+        lda CLOCK_TRAP+2
+        sbc MINSPEND2
+        bcc @nostop
+        lda T1                  ; |scoreDrop| <= 30 ?
+        bpl @abs
+        sec
+        lda #0
+        sbc T0
+        sta T0
+        lda #0
+        sbc T1
+        sta T1
+@abs:
+        lda T0
+        cmp #31
+        lda T1
+        sbc #0
+        bcs @nostop             ; |drop| >= 31 -> not flat -> keep searching
+        lda #1
+        rts
+@nostop:
+        lda #0
+        rts
+
+; raise: BUDGET = max(BUDGET, RTARGET). The caller stages the target (CEILMAX
+; for panic, UNSTCEIL for instability; both host-poked and already clamped to
+; CEILMAX) in RTARGET0-2. Only ever raises the movable ceiling. BUDGET0-2 ($E3)
+; are contiguous ZP.
+raise:
+        lda BUDGET0
+        cmp RTARGET0
+        lda BUDGET1
+        sbc RTARGET1
+        lda BUDGET2
+        sbc RTARGET2
+        bcs @done              ; BUDGET >= RTARGET: no raise
+        lda RTARGET0
+        sta BUDGET0
+        lda RTARGET1
+        sta BUDGET1
+        lda RTARGET2
+        sta BUDGET2
+@done:  rts

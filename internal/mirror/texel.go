@@ -15,7 +15,10 @@ import (
 // (all features on, dither on, both sides using weights w) and
 // collects quiet labeled positions.
 func GenerateData(openings [][]string, w Weights, depth, games, workers int, seed uint64, progress func(games, samples int)) ([]Sample, error) {
-	cfg := PlayerCfg{Features: FtAll, Weights: w, Depth: depth}
+	// QS must be the asm's shipped recap2 shape, not the zero-value
+	// (unlimited) — otherwise the Texel corpus is generated from a
+	// quiescence the shipped engine never uses (fix, 2026-07-23).
+	cfg := PlayerCfg{Features: FtAll, Weights: w, Depth: depth, QS: DefaultQS}
 	var mu sync.Mutex
 	var samples []Sample
 	next, done := 0, 0

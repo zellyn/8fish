@@ -64,6 +64,39 @@ ceiling + a 24-bit zp bank (effort.go asm-port note; no floats, /k are
 shifts, signals are a 2-byte compare + a counter). NOT YET PORTED — a
 follow-on; the mirror screen is the go/no-go and it says GO.
 
+## 2026-07-23 — three strength levers investigated; verdicts (time-mgmt WIN, endgame conversion-win, Texel neutral)
+
+Pushing toward a decisive Sargon lead, three levers screened mirror-side
+(cycle-budget, asm-matched):
+
+**1. Adaptive time/effort management — WIN, porting to asm.** A per-game
+cycle bank + a movable per-move ceiling (panic-extend on score drop,
+extend on best-move instability, early-stop+bank on stable moves).
+**+54 Elo vs the current flat budget / +21 ± 9 vs even banking while
+spending FEWER cycles** (Pareto), at equal per-game budget. Banking
+alone recovers ~15% of budget the soft-start gate wastes (+23); the
+aggressive targeting adds the rest. Off byte-identical. asm port +
+per-game-budget SPRT in progress.
+
+**2. Endgame mop-up eval — conversion win, porting to asm.** Diagnosis
+overturned the hypothesis: KQK/KRK/KRRK/KBBK already convert; the real
+leaks are KPK-win, KBNK, and occasional threefold shuffling draws (the
+equal-material perpetuals seen in the gauntlets). A phase+material-gated
+term (drive losing king to corner + bring winning king close) removes
+the shuffling draws, shortens mates, partially recovers KPK (0→2/4) and
+KBNK (0→1/4). Byte-identical above the gate (0 diffs / 23849 midgame
+positions); self-play −7 ± 32 (NEUTRAL — self-play can't see asymmetric
+conversion). A practical/conversion win, not an Elo jump; ported for the
+half-points it saves vs Sargon at near-zero risk.
+
+**3. Fresh-corpus Texel retune — NEUTRAL, do not port.** Regenerated the
+corpus from current-strength self-play (112,613 rows) and refit: +7 ± 9
+cycle-budget (CI [−2,+16], spans zero), same as the 2026-07-21 hybrid
+screen. The eval SHAPE, not the weight values, is the ceiling. Bonus: a
+real tooling bug fixed — GenerateData/GenerateFENData generated corpora
+under UNLIMITED QS, not the shipped recap2 (QS: DefaultQS now); every
+prior corpus used a quiescence the engine never plays.
+
 ## 2026-07-23 — Sargon III gauntlet #3 (round-4 engine + pondering): 52.5%, point estimate crosses positive
 
 40 games, pool openings (varied), Sargon at 1.5×, 30M-cycle budget —

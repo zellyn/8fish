@@ -86,7 +86,7 @@ type FenRow struct {
 // sampled positions as FEN + white-POV result (same gates as the pawn-
 // feature collector in PlayGame).
 func GenerateFENData(openings [][]string, w Weights, depth, games, workers int, seed uint64, progress func(games, rows int)) ([]FenRow, error) {
-	cfg := PlayerCfg{Features: FtAll, Weights: w, Depth: depth}
+	cfg := PlayerCfg{Features: FtAll, Weights: w, Depth: depth, QS: DefaultQS}
 	var mu sync.Mutex
 	var rows []FenRow
 	next, done := 0, 0

@@ -64,6 +64,36 @@ ceiling + a 24-bit zp bank (effort.go asm-port note; no floats, /k are
 shifts, signals are a 2-byte compare + a counter). NOT YET PORTED — a
 follow-on; the mirror screen is the go/no-go and it says GO.
 
+## 2026-07-23 — LANDED: adaptive time management (SPRT +51) + endgame mop-up, on-device; FT_ROOKX removed
+
+Both winning levers are now shipped in the asm engine, and the feature
+audit was forced (and done) to make room.
+
+- **Adaptive time management (FT2_ADAPT=$04): asm SPRT +51 ± 36** vs
+  flat (per-game bank mode, 260 games, CI [+15,+87]) — no mirror
+  compression (mirror said +54). **First SPRT-confirmed strength gain
+  since futility.** Per-game cycle bank (host) + movable per-move
+  ceiling (engine): panic-extend on score drop, extend on best-move
+  instability, early-stop+bank on stable moves.
+- **Endgame mop-up (FT2_MOPUP=$02)**: phase+material-gated king-driving
+  term; mirror-asm parity exact, converts the KRK/KQK shuffling draws,
+  no-regression SPRT +2 ± 30 (a conversion win, self-play-neutral).
+- **Feature audit (task #31/#1): FT_ROOKX removed.** The two new
+  features overflowed MAIN by 169 B (image was at the $BFF0 trap
+  ceiling). Removed the rejected gated-off FT_ROOKX rook/blockade eval
+  (−19 ± 33, dead since 2026-07-21) — freed 447 B; FT_ASP kept. Its
+  state (RKCNT/XSTRUCT) was fully exclusive; the shared pawn masks
+  (PWBITS/PBBITS/WBLOCKM/BBLOCKM) were read-only to extraterm, so pawn
+  eval is provably unchanged (PStructParity/PTCache green).
+
+Both features OFF = tree-identical (all 24 MicroAB fingerprints
+byte-identical across 0x1f/0x07/0x00 + improving; only layout cycles
+drift). Image top $BEDA (278 B headroom). engine.bin md5 a41840a4.
+FT2_ADAPT relocated $02→$04 (mop-up bit collision). The adaptive win is
+the real prize — stacked on gauntlet #3's nominal parity, it's the kind
+of gain that could turn the next Sargon gauntlet from a coin-flip into
+an edge.
+
 ## 2026-07-23 — three strength levers investigated; verdicts (time-mgmt WIN, endgame conversion-win, Texel neutral)
 
 Pushing toward a decisive Sargon lead, three levers screened mirror-side

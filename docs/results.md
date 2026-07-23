@@ -3,6 +3,32 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-23 — pondering mechanics (step 1): warm-TT head start measured, gauntlet measurement pending
+
+Built the pondering machinery bridge-side (Go), no asm change, gated
+behind `Bridge.Ponder` (default off, byte-identical). Model: the TT
+already carries across moves, so during the opponent's turn we search
+the position after our move + our predicted reply, warming the carried
+TT; a ponder-HIT then starts the next real search warm.
+
+- Ponder move read FREE from the carried TT's PV 2nd move (matches a
+  fresh post-move search exactly on every tested position); shallow-
+  search fallback for empty slots.
+- **Measured head start on a hit** (nodes to fixed depth 6, warm vs
+  cold): startpos 6.8M vs 180.6M (**0.038×**), Ruy 30.2M vs 251.7M
+  (0.12×), Sicilian 8.4M vs 158.7M (0.053×); or **+1 ply** for a fixed
+  short follow-up. That is pondering's value — measured, not assumed.
+- Miss never corrupts (TT always valid): follow-up on a different reply
+  returns the identical move/score to cold. Ponder=off byte-identical.
+
+HONEST CAVEAT (the whole verdict hinges on it): this head start is the
+per-HIT payoff; realized Elo = (per-hit value) × (ponder-hit rate),
+and the hit rate against Sargon is UNMEASURED. Step 2 (the follow-on)
+drives this in a Sargon gauntlet: time Sargon's actual think, convert
+to an emulated ponder budget, and measure the REAL hit rate — crediting
+only real hits, never an assumed rate. The Elo number is meaningless
+without the measured hit rate reported beside it.
+
 ## 2026-07-22 — opening book: hand-curated, now RESIDENT and probed on-device
 
 The engine is no longer bookless. Two steps, both landed:

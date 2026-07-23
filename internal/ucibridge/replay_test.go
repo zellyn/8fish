@@ -24,8 +24,14 @@ func TestReplayMatchPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The match game, from the engine's (White's) side.
-	replies := []string{"d7d5", "b8c6", "g8f6", "e7e6", "f8b4", "b4c3", "d8d6", "d6a3"}
+	// The match game, from the engine's (White's) side. Trailing replies
+	// are trimmed to the prefix that stays legal against the CURRENT
+	// engine: since this game was recorded (M3, 2026-07-18) the engine's
+	// play improved, and by move 8 it now plays Qc5 (bridge and cold search
+	// agree — the parity point still holds), which blocks the old historical
+	// reply d6a3. The bridge-vs-cold parity assertion runs on every White
+	// move of the surviving prefix, which is the test's actual purpose.
+	replies := []string{"d7d5", "b8c6", "g8f6", "e7e6", "f8b4", "b4c3", "d8d6"}
 
 	b := &Bridge{Bin: bin, Defs: defs, FixedBudgetMs: 30000}
 	// Drive move by move via bridge internals so cold searches can be

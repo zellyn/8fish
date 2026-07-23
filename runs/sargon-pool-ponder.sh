@@ -55,7 +55,13 @@ echo "=== sargon-pool-ponder: $((ROUNDS*2)) games, BOOK + PONDER on ==="
 echo "    our budget=${BUDGET}cyc (${US_BUDGET_MS}ms), Sargon MULT=${MULT} (${SARGON_CYC}cyc)"
 echo "    ponder budget=${PONDER_MS}ms (== Sargon's per-move think), book-seed=${BOOK_SEED}"
 echo "building binaries + engine.lbl (for the on-device book probe)..."
-go build -o "$OUT/us" ./cmd/uci
+# Run this from a checkout where BOTH build: our engine (cmd/uci) needs the
+# book+ponder bridge from THIS commit; the Sargon adapter (cmd/sargon-xboard)
+# needs the local go.work goapple2 (WithLazyVideoScan). The main worktree after
+# merging this commit satisfies both. Our engine is built GOWORK=off (module
+# mode, no goapple2 dependency) so it always compiles the merged bridge source;
+# the adapter is built under the ambient go.work so it picks up local goapple2.
+GOWORK=off go build -o "$OUT/us" ./cmd/uci
 go build -o "$OUT/sargon-xb" ./cmd/sargon-xboard
 # Assemble engine.bin + engine.lbl together from source into $OUT so the book
 # probe's entry label matches the binary exactly (does not touch asm/engine.bin).

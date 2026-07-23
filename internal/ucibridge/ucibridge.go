@@ -50,6 +50,21 @@ type Bridge struct {
 	// fixed-depth mode ignores it.
 	Banked bool
 
+	// Ponder enables pondering: searching during the opponent's turn on the
+	// position we would face if the opponent plays our predicted reply,
+	// letting that search warm the transposition table that already carries
+	// across moves via b.aux. On a ponder hit the follow-up real search
+	// begins with a TT warm for the exact position (a real head start); on a
+	// miss the entries are simply less relevant (a TT is never wrong), so no
+	// discard is needed. When Ponder is false the bridge is BYTE-IDENTICAL to
+	// the non-pondering engine (every ponder code path is gated on this flag).
+	Ponder bool
+	// PonderBudgetMs, if nonzero, pins the ponder search's emulated-time
+	// budget in ms. In a real gauntlet this stands in for however long the
+	// opponent takes to move; zero derives it from the go arguments like a
+	// normal search. Only meaningful when Ponder is true.
+	PonderBudgetMs uint64
+
 	// Book, if non-nil, is the resident opening book. Before searching, the
 	// bridge loads the blob into the emulated machine's $2000 hole and runs
 	// the engine's ON-DEVICE probe (the asm bookentry point): the 6502
@@ -76,6 +91,11 @@ type Bridge struct {
 	rnd   func() byte
 	info  string // "info depth ... score cp ..." from the last think
 	clock *chesstest.BankedClock
+
+	// Ponder bookkeeping (all only touched when Ponder is true).
+	ponderArgs      []string // go-command args (minus "ponder") for the pending ponder / its ponderhit budget
+	ponderBest      string   // best move the last ponder search found (held for the UCI stop reply)
+	ponderPredicted string   // the reply P last advertised in "bestmove M ponder P"
 
 	bookRnd func() uint32
 	// CurOpening is the name ID (+1) of the opening the last book move
@@ -107,6 +127,9 @@ func (b *Bridge) Run(r io.Reader, w io.Writer) error {
 			say("id name chess6502")
 			say("id author zellyn + Claude")
 			say("option name EmulatedMovetimeMs type spin default 0 min 0 max 3600000")
+			if b.Ponder {
+				say("option name Ponder type check default true")
+			}
 			say("uciok")
 		case "isready":
 			say("readyok")
@@ -115,6 +138,7 @@ func (b *Bridge) Run(r io.Reader, w io.Writer) error {
 			b.pos, _ = refchess.ParseFEN(refchess.StartFEN)
 			b.bookRnd = nil // restart the deterministic book-choice stream
 			b.CurOpening, b.CurOpeningName = 0, ""
+			b.ponderArgs, b.ponderBest, b.ponderPredicted = nil, "", ""
 		case "setoption":
 			// setoption name X value Y
 			if len(fields) >= 5 && strings.EqualFold(fields[2], "EmulatedMovetimeMs") {
@@ -127,16 +151,40 @@ func (b *Bridge) Run(r io.Reader, w io.Writer) error {
 				say("info string position error: %v", err)
 			}
 		case "go":
-			move, err := b.think(fields[1:])
-			if err != nil {
-				say("info string engine error: %v", err)
-				say("bestmove 0000")
+			args := fields[1:]
+			if b.Ponder && hasToken(args, "ponder") {
+				// UCI ponder: the GUI has already set the position to
+				// root+M+P (our move plus the predicted reply) and asks us to
+				// think on it. Warm the carried TT for that position; hold the
+				// bestmove until ponderhit/stop (do not emit one here).
+				b.ponderArgs = stripToken(args, "ponder")
+				if err := b.ponder(); err != nil {
+					say("info string ponder error: %v", err)
+				} else if b.info != "" {
+					say("%s", b.info)
+				}
 				continue
 			}
-			if b.info != "" {
-				say("%s", b.info)
+			b.emitMove(say, args)
+		case "ponderhit":
+			// The opponent played the predicted reply P; the position is still
+			// root+M+P. Continue into the real follow-up search — it now begins
+			// with a TT the ponder search already warmed. Budget comes from the
+			// original "go ponder" line (UCI sends none on ponderhit).
+			b.emitMove(say, b.ponderArgs)
+		case "stop":
+			// Ponder miss / abort: UCI requires a bestmove reply. We emit the
+			// move the (completed) ponder search found; the GUI discards it on
+			// a miss. The carried TT stays valid — the next real "go" benefits
+			// regardless of whether this was a hit. (On real hardware a true
+			// asynchronous stop would halt the running search here and read out
+			// its best-so-far; the emulator runs each search to its budget, so
+			// "stop" arrives after the ponder search has already finished.)
+			if b.ponderBest != "" {
+				say("bestmove %s", b.ponderBest)
+			} else {
+				say("bestmove 0000")
 			}
-			say("bestmove %s", move)
 		case "quit":
 			return nil
 		}
@@ -254,6 +302,71 @@ func (b *Bridge) probeBook() (move string, ok bool, err error) {
 	return move, true, nil
 }
 
+// engineResult is one raw harness search outcome (before it is committed to
+// game state), as read out of the machine after runEngine.
+type engineResult struct {
+	code            int    // engine exit code: 0 = move found, 2 = no legal move
+	from, to, flags byte   // BESTFROM/BESTTO/BESTFLAGS (engine 0x88 + flag encoding)
+	score           int16  // SCORE, side-to-move POV
+	depth           byte   // CURDEPTH, the deepest iterative-deepening iteration reached
+	nodes           uint64 // machine cycles spent (the engine's node/cost proxy)
+}
+
+// runEngine builds a fresh harness machine over pos, restores the carried aux
+// (TT), runs one search under the given cycle budget (0 = fixed-depth mode)
+// and depth cap, then carries the resulting aux forward in b.aux. halfmove is
+// poked into HALFMOVE; seed >= 0 is poked into SEED (eval dither), seed < 0
+// leaves SEED at its default. It never touches game state (b.pos). This is the
+// exact machine-setup sequence that think() and the ponder search share, so
+// the carried TT is populated identically whichever drives it.
+func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64, depth byte, seed int) (engineResult, error) {
+	// Gameplay config: FEATURES stays the NewMachine 0x1F default.
+	// FT2_IMPROV (improving-LMR) was adopted 2026-07-21 on a +13 ± 9 cycle
+	// screen, then RETRACTED 2026-07-22: a 4200-game confirmation SPRT
+	// landed at −1.8 ± 8.6 (no demonstrable benefit; screen's +13 outside
+	// the CI). FEATURES2 now stays 0 in gameplay. The asm implementation
+	// remains gated behind FT2_IMPROV for re-test; excising it (to reclaim
+	// its ~0.19% feature-off gate-check tax) is a deferred search.s cleanup.
+	m, err := chesstest.NewMachine(b.Bin, b.Defs, pos, 0, io.Discard)
+	if err != nil {
+		return engineResult{}, err
+	}
+	chesstest.SetBudget(m, b.Defs, budget, depth)
+	m.Mem.Main[b.Defs["HALFMOVE"]] = halfmove
+	if seed >= 0 {
+		m.Mem.Main[b.Defs["SEED"]] = byte(seed)
+	}
+	if b.aux != nil {
+		copy(m.Mem.Aux[:], b.aux) // restore the TT
+	}
+
+	runCap := budget*3 + 4_000_000_000
+	if budget == 0 {
+		runCap = 300_000_000_000 // fixed-depth mode: deep searches take what they take
+	}
+	exited, code, err := m.Run(runCap)
+	if err != nil {
+		return engineResult{}, err
+	}
+	if !exited {
+		return engineResult{}, fmt.Errorf("engine did not finish")
+	}
+	if b.aux == nil {
+		b.aux = make([]byte, len(m.Mem.Aux))
+	}
+	copy(b.aux, m.Mem.Aux[:]) // carry the TT forward
+	return engineResult{
+		code:  int(code),
+		from:  m.Mem.Main[b.Defs["BESTFROM"]],
+		to:    m.Mem.Main[b.Defs["BESTTO"]],
+		flags: m.Mem.Main[b.Defs["BESTFLAGS"]],
+		score: int16(uint16(m.Mem.Main[b.Defs["SCORE"]]) |
+			uint16(m.Mem.Main[b.Defs["SCORE"]+1])<<8),
+		depth: m.Mem.Main[b.Defs["CURDEPTH"]],
+		nodes: m.Cycles,
+	}, nil
+}
+
 // think runs the engine over the current position and returns the move
 // in UCI form, also applying it to the bridge's game state.
 func (b *Bridge) think(args []string) (string, error) {
@@ -266,17 +379,6 @@ func (b *Bridge) think(args []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	m, err := chesstest.NewMachine(b.Bin, b.Defs, pos, 0, io.Discard)
-	if err != nil {
-		return "", err
-	}
-	// Gameplay config: FEATURES stays the NewMachine 0x1F default.
-	// FT2_IMPROV (improving-LMR) was adopted 2026-07-21 on a +13 ± 9 cycle
-	// screen, then RETRACTED 2026-07-22: a 4200-game confirmation SPRT
-	// landed at −1.8 ± 8.6 (no demonstrable benefit; screen's +13 outside
-	// the CI). FEATURES2 now stays 0 in gameplay. The asm implementation
-	// remains gated behind FT2_IMPROV for re-test; excising it (to reclaim
-	// its ~0.19% feature-off gate-check tax) is a deferred search.s cleanup.
 	depth := byte(maxDepthCap)
 	budget := b.budgetCycles(args)
 	if d, ok := goDepth(args); ok {
@@ -288,52 +390,30 @@ func (b *Bridge) think(args []string) (string, error) {
 		}
 		budget = b.clock.Alloc()
 	}
-	chesstest.SetBudget(m, b.Defs, budget, depth)
-	m.Mem.Main[b.Defs["HALFMOVE"]] = byte(min(b.pos.HalfmoveClock(), 255))
+	seed := -1
 	if b.Dither {
 		if b.rnd == nil {
 			r := rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64()))
 			b.rnd = func() byte { return byte(r.IntN(255) + 1) }
 		}
-		m.Mem.Main[b.Defs["SEED"]] = b.rnd()
+		seed = int(b.rnd())
 	}
-	if b.aux != nil {
-		copy(m.Mem.Aux[:], b.aux) // restore the TT
-	}
-
-	runCap := budget*3 + 4_000_000_000
-	if budget == 0 {
-		runCap = 300_000_000_000 // fixed-depth mode: deep searches take what they take
-	}
-	exited, code, err := m.Run(runCap)
+	res, err := b.runEngine(pos, byte(min(b.pos.HalfmoveClock(), 255)), budget, depth, seed)
 	if err != nil {
 		return "", err
 	}
-	if !exited {
-		return "", fmt.Errorf("engine did not finish")
-	}
-	if b.aux == nil {
-		b.aux = make([]byte, len(m.Mem.Aux))
-	}
-	copy(b.aux, m.Mem.Aux[:]) // carry the TT forward
 	if b.clock != nil && budget != 0 {
-		b.clock.Settle(m.Cycles)
+		b.clock.Settle(res.nodes)
 	}
 
-	if code == 2 {
+	if res.code == 2 {
 		return "0000", nil // no legal move; cutechess shouldn't ask
 	}
-	if code != 0 {
-		return "", fmt.Errorf("engine exit code %d", code)
+	if res.code != 0 {
+		return "", fmt.Errorf("engine exit code %d", res.code)
 	}
-	from := m.Mem.Main[b.Defs["BESTFROM"]]
-	to := m.Mem.Main[b.Defs["BESTTO"]]
-	flags := m.Mem.Main[b.Defs["BESTFLAGS"]]
-	score := int16(uint16(m.Mem.Main[b.Defs["SCORE"]]) |
-		uint16(m.Mem.Main[b.Defs["SCORE"]+1])<<8)
-	b.info = fmt.Sprintf("info depth %d score cp %d nodes %d",
-		m.Mem.Main[b.Defs["CURDEPTH"]], score, m.Cycles)
-	move := chesstest.MoveUCI(from, to, flags)
+	b.info = fmt.Sprintf("info depth %d score cp %d nodes %d", res.depth, res.score, res.nodes)
+	move := chesstest.MoveUCI(res.from, res.to, res.flags)
 	mv, err := refchess.ParseMove(move)
 	if err != nil {
 		return "", fmt.Errorf("engine move %q: %w", move, err)
@@ -342,6 +422,170 @@ func (b *Bridge) think(args []string) (string, error) {
 		return "", fmt.Errorf("engine played illegal %q: %w", move, err)
 	}
 	return move, nil
+}
+
+// emitMove runs the real search for the current position, prints its info and
+// bestmove, and — when Ponder is on and a reply can be predicted — appends the
+// "ponder P" advisory that tells the GUI which move to have us ponder next.
+func (b *Bridge) emitMove(say func(string, ...any), args []string) {
+	move, err := b.think(args)
+	if err != nil {
+		say("info string engine error: %v", err)
+		say("bestmove 0000")
+		return
+	}
+	if b.info != "" {
+		say("%s", b.info)
+	}
+	if b.Ponder {
+		if p, ok, perr := b.ponderPrediction(); perr == nil && ok {
+			b.ponderPredicted = p
+			say("bestmove %s ponder %s", move, p)
+			return
+		}
+	}
+	say("bestmove %s", move)
+}
+
+// ponder runs the pondering search over the current position (root+M+P, the
+// one we'd face if the opponent plays the predicted reply). Its only job is to
+// warm the carried TT (b.aux) for that position so the follow-up real search
+// on a ponder hit gets a head start; it does not touch game state and its
+// bestmove is merely held for the UCI "stop" reply. Not book-probed and not
+// dithered — a ponder result is never committed.
+func (b *Bridge) ponder() error {
+	pos, err := chesstest.ParseFEN(b.pos.FEN())
+	if err != nil {
+		return err
+	}
+	budget := b.ponderBudgetCycles(b.ponderArgs)
+	res, err := b.runEngine(pos, byte(min(b.pos.HalfmoveClock(), 255)), budget, maxDepthCap, -1)
+	if err != nil {
+		return err
+	}
+	if res.code == 0 && res.to != 0xFF {
+		b.ponderBest = chesstest.MoveUCI(res.from, res.to, res.flags)
+	} else {
+		b.ponderBest = ""
+	}
+	b.info = fmt.Sprintf("info string pondering depth %d nodes %d", res.depth, res.nodes)
+	return nil
+}
+
+// ponderBudgetCycles is the emulated cycle budget for a ponder search:
+// PonderBudgetMs if pinned, else derived from the go args like a real search.
+func (b *Bridge) ponderBudgetCycles(args []string) uint64 {
+	if b.PonderBudgetMs != 0 {
+		return b.PonderBudgetMs * cyclesPerMs
+	}
+	return b.budgetCycles(args)
+}
+
+// ttBase is the aux-bank byte offset of the transposition table (asm TTBASE,
+// $0200). Entries are 8 bytes; see PonderMove for the entry layout.
+const ttBase = 0x0200
+
+// ponderProbeMs is the emulated-time budget of the source-(b) fallback search
+// used to predict the opponent's reply when the TT slot is empty/mismatched.
+const ponderProbeMs = 300
+
+// PonderMove reads the engine's own predicted reply for the CURRENT position
+// (typically root+M, right after our real move) straight out of the carried
+// transposition table — source (a), the free PV-2nd-move continuation. It
+// reproduces the asm TTADDR indexing exactly: compute the position's 32-bit
+// Zobrist key (== asm HASH0-3, via book.HashFEN — proven equal to the on-
+// device hash by TestBookKeyMatchesASM), form index = (HASH1&0x0F)<<8 | HASH0,
+// read the 8-byte entry at ttBase+index*8 (+0..2 verify = HASH1..3, +3 from,
+// +4 to, +5..6 score, +7 depth<<2|bound), verify the stored key and a non-zero
+// bound, and return the stored from/to as a legal UCI move. ok=false when the
+// slot is empty, keyed to a different position, holds NOSQ, or the move is not
+// legal here (caller should fall back to a shallow search — source (b)).
+func (b *Bridge) PonderMove() (string, bool) {
+	if b.aux == nil {
+		return "", false
+	}
+	key, err := book.HashFEN(b.pos.FEN())
+	if err != nil {
+		return "", false
+	}
+	h0, h1, h2, h3 := byte(key), byte(key>>8), byte(key>>16), byte(key>>24)
+	index := int(h0) | int(h1&0x0F)<<8
+	addr := ttBase + index*8
+	if addr+8 > len(b.aux) {
+		return "", false
+	}
+	e := b.aux[addr : addr+8]
+	if e[7]&0x03 == 0 { // bound 0: empty entry
+		return "", false
+	}
+	if e[0] != h1 || e[1] != h2 || e[2] != h3 { // key mismatch (collision)
+		return "", false
+	}
+	if e[4] == 0xFF { // NOSQ: no move stored
+		return "", false
+	}
+	return b.legalFromTo(e[3], e[4])
+}
+
+// legalFromTo turns a TT from/to pair (engine 0x88 squares; the TT stores no
+// promotion piece) into a legal UCI move in the current position, matching on
+// from+to. ok=false if no legal move matches (a stale/colliding entry).
+func (b *Bridge) legalFromTo(from88, to88 byte) (string, bool) {
+	sq := func(s byte) byte { return (s>>4)*8 + (s & 0x0F) } // 0x88 -> 0..63
+	from, to := sq(from88), sq(to88)
+	for _, mv := range b.pos.LegalMoves() {
+		if mv.From == from && mv.To == to {
+			return mv.String(), true
+		}
+	}
+	return "", false
+}
+
+// ponderPrediction picks the move to ponder on for the current position: the
+// free TT PV-2nd-move (source a) when present and legal, else a short shallow
+// search (source b). ok=false only when there is genuinely no legal move
+// (checkmate/stalemate). Source (b) runs through runEngine so it too warms the
+// carried TT — a harmless bonus (a TT is never wrong).
+func (b *Bridge) ponderPrediction() (string, bool, error) {
+	if p, ok := b.PonderMove(); ok {
+		return p, true, nil // source (a): free PV continuation
+	}
+	pos, err := chesstest.ParseFEN(b.pos.FEN())
+	if err != nil {
+		return "", false, err
+	}
+	res, err := b.runEngine(pos, byte(min(b.pos.HalfmoveClock(), 255)), ponderProbeMs*cyclesPerMs, maxDepthCap, -1)
+	if err != nil {
+		return "", false, err
+	}
+	if res.code == 2 || res.to == 0xFF {
+		return "", false, nil // no legal move
+	}
+	if res.code != 0 {
+		return "", false, fmt.Errorf("ponder-probe exit code %d", res.code)
+	}
+	return chesstest.MoveUCI(res.from, res.to, res.flags), true, nil
+}
+
+// hasToken reports whether tok appears among args.
+func hasToken(args []string, tok string) bool {
+	for _, a := range args {
+		if a == tok {
+			return true
+		}
+	}
+	return false
+}
+
+// stripToken returns args with every occurrence of tok removed.
+func stripToken(args []string, tok string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if a != tok {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func goDepth(args []string) (byte, bool) {

@@ -48,6 +48,10 @@ type PlayerCfg struct {
 	// this side. Zero = off (the asm's current eval). Pair it with
 	// EvalTermsCost so cycle-budgeted screens pay the term's real 6502 tax.
 	Extra EvalTerms
+
+	// Mopup enables the phase-gated endgame mop-up term for this side.
+	// Zero value = OFF (byte-identical to the asm's current eval).
+	Mopup MopupParams
 	// EvalTermsCost is the estimated per-eval-call 6502 cost of the Extra
 	// terms, charged only in CycleBudget mode (Costs.EvalTerm). 0 leaves the
 	// terms untaxed (node-budget behavior). For the ported rook set use
@@ -93,6 +97,7 @@ func (c *PlayerCfg) engine() *Engine {
 	e.KB = c.KB
 	e.Ord = c.Ord
 	e.Extra = c.Extra
+	e.Mopup = c.Mopup
 	if c.EvalTermsCost != 0 {
 		e.Costs.EvalTerm = c.EvalTermsCost
 	}

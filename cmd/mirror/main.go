@@ -37,9 +37,114 @@ func main() {
 		genfen(os.Args[2:])
 	case "tunekb":
 		tunekb(os.Args[2:])
+	case "atime":
+		atime(os.Args[2:])
 	default:
 		usage()
 	}
+}
+
+// atime runs the adaptive time/effort-management screen: an adaptive
+// allocation policy (A) vs a flat allocation (B) at the SAME per-game cycle
+// bank, asm-matched config, self-play. Both arms earn Base cycles/move of
+// income; the difference is only HOW the bank is spent. Reports Elo +/- err
+// and per-side diagnostics (moves extended/shortened, cycles/game, avg
+// depth) so the gain can be attributed to the panic vs easy-move side.
+func atime(args []string) {
+	fs := flag.NewFlagSet("atime", flag.ExitOnError)
+	base := fs.Uint64("base", 40_000_000, "per-move cycle income (== the flat per-move budget)")
+	pairs := fs.Int("pairs", 1000, "game pairs (2 games each)")
+	workers := fs.Int("workers", 3, "parallel pairs")
+	seed := fs.Uint64("seed", 6502, "RNG seed")
+	variant := fs.String("variant", "adaptive", "A policy: flatbank|easy|panic|unstable|adaptive|adaptive-smooth|adaptive-aggr")
+	bl := fs.String("baseline", "flatbank", "B policy (the flat baseline): flat|flatbank")
+	maxiters := fs.Int("maxiters", 0, "ID depth ceiling (0 = MaxPly-1)")
+	fs.Parse(args)
+
+	// asm-matched config: mask 0x1f (FtAll), recap2 QS, shipped (Default)
+	// weights, corrected-guard RFP 120/500 (NewEngine default via nil Fut).
+	mk := func(tp *mirror.TimeParams) mirror.PlayerCfg {
+		return mirror.PlayerCfg{
+			Features: mirror.FtAll, Weights: mirror.DefaultWeights,
+			QS: mirror.DefaultQS, Time: tp, MaxIters: *maxiters,
+		}
+	}
+	aTP := atimeVariant(*variant, *base)
+	bTP := atimeVariant(*bl, *base)
+	a, b := mk(aTP), mk(bTP)
+
+	lines, err := mirror.GenOpenings(sprt.Openings, *pairs, *seed)
+	check(err)
+	start := time.Now()
+	res, aD, bD, err := mirror.TimeMatch(a, b, lines, *pairs, *workers, *seed)
+	check(err)
+	games := 2 * *pairs
+	fmt.Printf("A=%s vs B=%s  base %dM  %d games (seed %d, %v)\n",
+		*variant, *bl, *base/1_000_000, games, *seed, time.Since(start).Round(time.Second))
+	fmt.Printf("  result (A POV): %s\n", res)
+	fmt.Printf("  A %s\n", atimeDiagStr(aD, *base))
+	fmt.Printf("  B %s\n", atimeDiagStr(bD, *base))
+}
+
+// atimeVariant maps a policy name to a TimeParams at the given base.
+func atimeVariant(name string, base uint64) *mirror.TimeParams {
+	switch name {
+	case "flat":
+		// Pure flat, no bank: byte-identical to a flat SearchCycleBudget(base).
+		return &mirror.TimeParams{On: false, Base: base, MaxEighths: 8}
+	case "flatbank":
+		// BankedClock-style flat baseline: base ceiling Base + bank/8, no
+		// signals. Recycles under-spend EVENLY (fair equal-bank flat).
+		return &mirror.TimeParams{On: true, Base: base, Smooth: true, MaxEighths: 8}
+	case "easy":
+		// Easy-stop only, smoothed base (banks easy savings, spreads via /8).
+		return &mirror.TimeParams{On: true, Base: base, Smooth: true,
+			EasyStop: true, StableIters: 3, ScoreFlat: 20, MinDepth: 3, MinSpendEighths: 4,
+			MaxEighths: 8}
+	case "panic":
+		// Panic (score-drop) extension only, no easy-stop.
+		return &mirror.TimeParams{On: true, Base: base, Smooth: true,
+			Panic: true, PanicDrop: 40, PanicEighths: 24, MaxEighths: 24}
+	case "unstable":
+		// Instability extension only, no easy-stop.
+		return &mirror.TimeParams{On: true, Base: base, Smooth: true,
+			Unstable: true, UnstableEighths: 24, MaxEighths: 24}
+	case "adaptive":
+		// Conservative: easy-stop banks, panic+instability extend to 2x.
+		return &mirror.TimeParams{On: true, Base: base, Smooth: false,
+			EasyStop: true, StableIters: 3, ScoreFlat: 20, MinDepth: 3, MinSpendEighths: 4,
+			Panic: true, PanicDrop: 40, PanicEighths: 16,
+			Unstable: true, UnstableEighths: 16, MaxEighths: 16}
+	case "adaptive-smooth":
+		// Same signals but on a smoothed base ceiling (recycles the bank fully
+		// even on non-extended moves — should hold total compute closest).
+		return &mirror.TimeParams{On: true, Base: base, Smooth: true,
+			EasyStop: true, StableIters: 3, ScoreFlat: 20, MinDepth: 3, MinSpendEighths: 4,
+			Panic: true, PanicDrop: 40, PanicEighths: 24,
+			Unstable: true, UnstableEighths: 16, MaxEighths: 24}
+	case "adaptive-aggr":
+		// Aggressive: extend to 4x, earlier/looser easy-stop.
+		return &mirror.TimeParams{On: true, Base: base, Smooth: false,
+			EasyStop: true, StableIters: 2, ScoreFlat: 30, MinDepth: 2, MinSpendEighths: 2,
+			Panic: true, PanicDrop: 25, PanicEighths: 32,
+			Unstable: true, UnstableEighths: 24, MaxEighths: 32}
+	default:
+		fmt.Fprintf(os.Stderr, "unknown atime variant %q\n", name)
+		os.Exit(2)
+		return nil
+	}
+}
+
+func atimeDiagStr(d mirror.TimeDiag, base uint64) string {
+	if d.Moves == 0 {
+		return "(no timed moves)"
+	}
+	avgDepth := float64(d.DepthSum) / float64(d.Moves)
+	mcycPerMove := float64(d.Cycles) / float64(d.Moves) / 1e6
+	pctExt := 100 * float64(d.Extended) / float64(d.Moves)
+	pctShort := 100 * float64(d.Shortened) / float64(d.Moves)
+	return fmt.Sprintf("moves %d  ext %.1f%% (panic %d, unstable %d)  short %.1f%%  avgdepth %.2f  %.1f Mcyc/move (base %dM)",
+		d.Moves, pctExt, d.Panics, d.Unstables, pctShort, avgDepth, mcycPerMove, base/1_000_000)
 }
 
 func usage() {

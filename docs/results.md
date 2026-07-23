@@ -3,6 +3,67 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-23 — adaptive time/effort management (mirror screen): banking + aggressive targeting = +54 over the flat mirror
+
+Mirror-side measurement of ADAPTIVE effort allocation (internal/mirror/
+effort.go: a per-GAME cycle bank + an ID-loop-signal allocation policy;
+`mirror atime`). The engine has no clock, so "time" is EFFORT (est. 6502
+cycles/move). Both arms earn `Base` cycles/move of income into a shared
+per-game bank (EffortBank, the mirror twin of chesstest.BankedClock); the
+only difference is HOW the bank is spent. asm-matched config (mask 0x1f,
+recap2, shipped weights, corrected-guard RFP 120/500), self-play, dither
+on, `Base = 40 M` cycles/move (≈ depth 4.5; spot-checked at 80 M ≈ depth
+5.1). The OFF path (TimeParams.On=false, no smoothing) is byte-identical
+to a flat `SearchCycleBudget(Base)` — TestEffortOffIdentical.
+
+Signals (all cheap, read from the ID loop, 6502-portable — see the
+asm-port note in effort.go): best-move **instability** (best changed →
+extend), **score drop / panic** (this iteration worse than the last →
+extend), **easy move** (best stable N iters → stop early, bank it).
+
+Results (A vs B, A POV, 2000 games/row @40M unless noted, ±~13 Elo):
+
+| A (policy)        | B (baseline) | Elo ± err | A Mcyc/mv | B Mcyc/mv | ext%  | short% |
+|-------------------|--------------|-----------|-----------|-----------|-------|--------|
+| flatbank (bank+/8)| flat (nobank)| **+23**   | 38.3      | 33.2      | 0     | 0      |
+| adaptive (moder.) | flatbank     | −0        | 39.3      | 38.3      | 50.5  | 36.3   |
+| easy-stop only    | flatbank     | −0        | 37.6      | 38.3      | 0     | 37.7   |
+| instability only  | flatbank     | −2        | 39.6      | 38.3      | 43.5  | 0      |
+| panic (drop) only | flatbank     | +8        | 39.2      | 38.3      | 15.1  | 0      |
+| adaptive-smooth   | flatbank     | +9        | 39.4      | 38.3      | 50.1  | 37.2   |
+| **adaptive-aggr** | flatbank     | **+21 ± 9** (4000g) | 36.1 | 38.3 | 60  | 71 |
+| **adaptive-aggr** | flat (nobank)| **+54**   | 35.9      | 33.2      | 60    | 71     |
+| adaptive-aggr @80M| flatbank     | +30 ± 20 (800g) | 68.2 | 76.5    | 70    | 83     |
+
+Findings:
+- **Banking recovers wasted slack.** The flat per-move budget (current
+  mirror) underspends by ~15% — the ~50% soft-start gate leaves the top
+  of the budget unused whenever the next iteration would overshoot.
+  Recycling it into a bank (BankedClock `Base + bank/8`) spends that slack
+  on later moves: **+23 Elo** at +15% compute. (Matches the 2026-07-19
+  banked-time TSCP result; here quantified at 2000 self-play games.)
+- **Even targeting is near-neutral; AGGRESSIVE targeting wins at LESS
+  compute.** On top of even smoothing, the moderate policy and each single
+  signal are within noise. But an aggressive policy — commit early on
+  stable moves (StableIters 2, MinDepth 2, stop after Base/4) and dump up
+  to 4× Base on panic/instability — is **+21 ± 9** over even banking while
+  spending 6% FEWER cycles at shallower average depth (a strict Pareto
+  win: stronger AND cheaper). Robust at 80 M (deeper): +30 ± 20 at −11%
+  compute. Total over the flat mirror: **+54**.
+- **Where the gain lives.** Panic (score-drop) is the only single signal
+  that leans positive (+8); the win emerges from the *combination* of
+  hard-move extension and aggressive easy-move banking, not any one
+  signal. Instability alone is non-selective at this depth (best flips
+  between iterations constantly → extends 43% wastefully, neutral).
+
+Winning params (adaptive-aggr): EasyStop StableIters=2 ScoreFlat=30
+MinDepth=2 MinSpend=Base/4; Panic drop≥25cp → ceil 4×Base; Unstable →
+ceil 3×Base; MaxEighths=32 (4×Base per-move cap, also clamped to
+Base+bank). asm port = the existing soft-start gate with a MOVABLE
+ceiling + a 24-bit zp bank (effort.go asm-port note; no floats, /k are
+shifts, signals are a 2-byte compare + a counter). NOT YET PORTED — a
+follow-on; the mirror screen is the go/no-go and it says GO.
+
 ## 2026-07-23 — Sargon III gauntlet #3 (round-4 engine + pondering): 52.5%, point estimate crosses positive
 
 40 games, pool openings (varied), Sargon at 1.5×, 30M-cycle budget —

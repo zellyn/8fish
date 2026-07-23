@@ -103,6 +103,11 @@ type Engine struct {
 	// the budget bought). 0 if only depth 1 ran.
 	CompletedDepth int
 
+	// diag accumulates adaptive effort-management diagnostics over the
+	// engine's lifetime (one engine per side per game in self-play), for the
+	// time-management screen. See effort.go / SearchTimed.
+	diag TimeDiag
+
 	// Ord configures the scored move ordering used when FtSEE/FtHistory
 	// are enabled (task #35).
 	Ord OrderParams

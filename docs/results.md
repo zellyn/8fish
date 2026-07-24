@@ -64,6 +64,36 @@ ceiling + a 24-bit zp bank (effort.go asm-port note; no floats, /k are
 shifts, signals are a 2-byte compare + a counter). NOT YET PORTED — a
 follow-on; the mirror screen is the go/no-go and it says GO.
 
+## 2026-07-23 — SYMMETRIC fudge-free Sargon III rematch: PARITY (48.75%, −9 ± ~100)
+
+The definitive test, on honest terms at last. cmd/sargon-symmatch: an
+in-process match where 8fish and Sargon III BOTH ponder for exactly the
+emulated-cycle time the other consumed — no 1.5× multiplier — both in
+Hard Mode (true Infinite level + repeated CTRL-T), and move-acceptance
+read from the ponder-immune SCREEN column (which also retires the old
+promotion-confirm bug that inflated prior wins). Full 8fish stack: book
++ pondering + adaptive time mgmt + mop-up, B = 30M cyc/move.
+
+**15W −16L =9D over 40 games = 48.75% ≈ −9 ± ~100 Elo. Statistical
+parity.** Symmetry verified EXACT: 8fish_think == sargon_ponder_window
+on 1787/1787 moves (cycle-for-cycle). Ponder hits ~45%.
+
+Answer to "are we decisively beating Sargon III?": **No — honest coin
+flip.** But it's the first Sargon number with zero asterisks (no fudge
+multiplier, no promotion-bug inflation, symmetric Hard-Mode pondering),
+and it's robust: gauntlet #3 (1.5×) 52.5%, gauntlet #4 (1.5×, budget-
+honest) 48.75%, symmetric 48.75% — all converge on parity. A modern-
+technique engine on a 1 MHz 6502 holding EVEN with full-strength Sargon
+III is the real result; "decisive" would need more strength (levers
+largely exhausted) or many more games to resolve a small edge.
+
+Minor harness follow-ups (do not affect the verdict): (1) screenTokenToCoord
+doesn't parse the en-passant capture token "PXPEP" → 1/40 games adjudicated
+on the unreadable reply; (2) 8fish runs ~1.08× its nominal per-move budget
+(intrinsic iteration-boundary overshoot) — mirrored onto Sargon's ponder,
+so symmetry holds, but worth reconciling with the debt-bank conservation
+the cutechess path showed (0.998).
+
 ## 2026-07-23 — time management HONEST number: +34 ± 32 (the +51 was a ~13% budget overspend)
 
 zellyn asked to confirm we actually honor our own time budget. We did

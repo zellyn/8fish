@@ -61,8 +61,11 @@ func (m *Machine) Level(n int) error {
 	if n < 1 || n > 9 {
 		return fmt.Errorf("level %d out of range 1-9", n)
 	}
-	// SHIFT-<digit> on the Apple ][+ keyboard: 1..9 -> ! @ # $ % ^ & * (
-	shifted := []byte("!@#$%^&*(")
+	// SHIFT-<digit> on the Apple ][+ keyboard: 1..9 -> ! " # $ % & ' ( )
+	// (the ][+ shifted number row; NOT the modern US-PC row ! @ # $ % ^ & * (,
+	// on which SHIFT-9 is '(' = level 8 — so Level(9)/InfiniteLevel would fall a
+	// level short of true Infinite). SHIFT-9 = ')' (0x29) selects level 9.
+	shifted := []byte("!\"#$%&'()")
 	m.Key(shifted[n-1])
 	// Give the key time to be consumed.
 	return m.Run(pollChunk)
@@ -174,8 +177,16 @@ func (m *Machine) RequestMove(move string, budgetCycles uint64) (MoveResult, err
 		}
 	}
 	if !book {
-		m.ForceMove() // CTRL-T: play best move so far
-		if !m.waitSargonCommit(prevCol, 12_000_000) {
+		committed := false
+		if m.HardMode {
+			// Hard Mode: Sargon searches the Infinite level while pondering, so a
+			// single CTRL-T is often missed — re-send until it commits.
+			committed = m.forceCommitHard(prevCol, 80_000_000)
+		} else {
+			m.ForceMove() // CTRL-T: play best move so far
+			committed = m.waitSargonCommit(prevCol, 12_000_000)
+		}
+		if !committed {
 			res.ThinkCycles = m.Cycles() - thinkStart
 			res.Message, res.GameOver = m.scrapeMessage()
 			if res.GameOver {
@@ -207,6 +218,78 @@ func (m *Machine) sargonColumnText() string {
 		sb.WriteByte('|')
 	}
 	return sb.String()
+}
+
+// ourColumnText returns the KEYBOARD opponent's entire move-list column (all
+// rows concatenated) — the opposite column to sargonColumnText. White's moves
+// occupy the left column and Black's the right, regardless of who Sargon is, so
+// our column is the left one when we play White (Sargon Black) and the right one
+// when we play Black (Sargon White). Like sargonColumnText it changes only when
+// a move is committed to that column, so it is immune to Sargon's ponder-search
+// scribbling of the RAM piece list — the basis for Hard-mode move confirmation.
+func (m *Machine) ourColumnText() string {
+	lo, hi := 10, 18   // we play White -> left column
+	if m.SargonWhite { // we play Black -> right column
+		lo, hi = 22, 30
+	}
+	var sb strings.Builder
+	for r := 10; r < 24; r++ {
+		row := m.TextRow(r)
+		if len(row) >= hi {
+			sb.WriteString(row[lo:hi])
+		}
+		sb.WriteByte('|')
+	}
+	return sb.String()
+}
+
+// confirmMoveScreen polls up to maxSteps for Hard-mode move acceptance: our
+// move-list column changes from prevOwnCol (our move landed in the list) with no
+// ILLEGAL/INVALID message on the message row. Returns false (caller retries) if
+// an ILLEGAL/INVALID message appears or the window elapses with no column change.
+func (m *Machine) confirmMoveScreen(prevOwnCol string, maxSteps uint64) bool {
+	var s uint64
+	for s < maxSteps {
+		if err := m.Run(pollChunk); err != nil {
+			return false
+		}
+		s += pollChunk
+		if msg := m.messageLine(); strings.Contains(msg, "ILLEGAL") || strings.Contains(msg, "INVALID") {
+			return false
+		}
+		if m.ourColumnText() != prevOwnCol {
+			return true
+		}
+	}
+	return false
+}
+
+// forceCommitHard drives a commit in Hard Mode, where a single CTRL-T is
+// unreliable: while Sargon searches the Infinite level with pondering enabled it
+// polls (and clears) the keyboard latch only occasionally, so one strobe is
+// often missed. It therefore RE-SENDS CTRL-T, spaced ~2M steps apart (long
+// enough for Sargon to read and clear the previous strobe), checking after each
+// send for a move-list column change (a committed move). Returns whether a
+// commit was seen within maxSteps. The Easy-mode single-CTRL-T path is unchanged.
+func (m *Machine) forceCommitHard(prev string, maxSteps uint64) bool {
+	const strobeGap = 2_000_000 // steps between CTRL-T re-sends
+	var steps uint64
+	for steps < maxSteps {
+		m.ForceMove() // CTRL-T
+		var w uint64
+		for w < strobeGap && steps < maxSteps {
+			if err := m.Run(pollChunk); err != nil {
+				return false
+			}
+			steps += pollChunk
+			w += pollChunk
+			if m.sargonColumnText() != prev {
+				m.Run(1_000_000) // let the piece list / display finish updating
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // waitSargonCommit polls up to maxSteps until Sargon's move-list column changes
@@ -302,18 +385,30 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 	}
 
 	// Settle: after moving, Sargon redraws before returning to its keyboard
-	// loop; typing during that window drops characters.
-	if err := m.Run(3_000_000); err != nil {
-		return mid, "", err
+	// loop; typing during that window drops characters. In Hard Mode the caller
+	// has just run Sargon for a ponder window (the display is already stable and
+	// the keyboard loop is live), and the RAM piece list is being churned by the
+	// ponder search, so we skip both the settle and the RAM-based source-square
+	// guard — the move is confirmed from the ponder-immune screen column below.
+	if !m.HardMode {
+		if err := m.Run(3_000_000); err != nil {
+			return mid, "", err
+		}
 	}
 
 	before := m.ReadPieceList()
 	// The keyboard opponent plays Black iff Sargon is White.
 	oppBlack := m.SargonWhite
 	fromIdx := pieceIndexAt(before, from, oppBlack)
-	if fromIdx < 0 {
+	if fromIdx < 0 && !m.HardMode {
 		return mid, "", fmt.Errorf("no %s piece on %s for move %q", colorName(oppBlack), from.Algebraic(), move)
 	}
+
+	// Hard-mode confirmation baseline: our move-list column BEFORE typing. Our
+	// column changes only when our move is accepted into the list; a rejected
+	// (ILLEGAL/INVALID) move never appears, so a column change is a reliable,
+	// ponder-immune accept signal.
+	prevOwnCol := m.ourColumnText()
 
 	const stepsPerKey = 200_000
 	accepted := false
@@ -347,17 +442,24 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 			// Prompt never appeared (dropped keys): fall through to retry.
 			continue
 		}
-		var s uint64
-		for s < 4_000_000 {
-			if err := m.Run(pollChunk); err != nil {
-				return mid, "", err
-			}
-			s += pollChunk
-			// Accept when any of our pieces has reached the destination.
-			// (Promotions are handled above via the prompt and never reach here.)
-			if m.anyPieceAt(to, oppBlack) {
-				accepted = true
-				break
+		if m.HardMode {
+			// Screen confirmation: our move appears in our move-list column, and
+			// no ILLEGAL/INVALID message shows. Ponder-immune (the RAM piece list
+			// is search scratch while Sargon ponders).
+			accepted = m.confirmMoveScreen(prevOwnCol, 5_000_000)
+		} else {
+			var s uint64
+			for s < 4_000_000 {
+				if err := m.Run(pollChunk); err != nil {
+					return mid, "", err
+				}
+				s += pollChunk
+				// Accept when any of our pieces has reached the destination.
+				// (Promotions are handled above via the prompt and never reach here.)
+				if m.anyPieceAt(to, oppBlack) {
+					accepted = true
+					break
+				}
 			}
 		}
 		_ = fromIdx
@@ -515,8 +617,14 @@ func (m *Machine) StartAsWhite(budgetCycles uint64) (MoveResult, error) {
 			}
 		}
 		if !book {
-			m.ForceMove() // CTRL-T
-			if !m.waitSargonCommit(prevCol, 12_000_000) {
+			committed := false
+			if m.HardMode {
+				committed = m.forceCommitHard(prevCol, 80_000_000)
+			} else {
+				m.ForceMove() // CTRL-T
+				committed = m.waitSargonCommit(prevCol, 12_000_000)
+			}
+			if !committed {
 				res.ThinkCycles = m.Cycles() - thinkStart
 				res.Message, res.GameOver = m.scrapeMessage()
 				return res, fmt.Errorf("no opening move from sargon-as-white")

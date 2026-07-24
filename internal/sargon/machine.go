@@ -36,6 +36,14 @@ type Machine struct {
 	// the keyboard opponent is then Black. It flips which piece-list half and
 	// which move-list column belong to Sargon vs the opponent.
 	SargonWhite bool
+	// HardMode is true when Sargon is driven WITHOUT Easy Mode, i.e. it ponders
+	// on the opponent's time. While pondering, Sargon continuously overwrites its
+	// $60-$7F piece list as search scratch, so RAM-based move confirmation is
+	// unreliable. When HardMode is set, enterMove confirms our move via the
+	// on-screen move-list column (ponder-immune) instead of the RAM piece list.
+	// It does NOT itself change Sargon's mode — the caller must simply refrain
+	// from calling EasyMode(). See cmd/sargon-symmatch.
+	HardMode bool
 }
 
 func romDir() string {

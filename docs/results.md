@@ -64,6 +64,37 @@ ceiling + a 24-bit zp bank (effort.go asm-port note; no floats, /k are
 shifts, signals are a 2-byte compare + a counter). NOT YET PORTED — a
 follow-on; the mirror screen is the go/no-go and it says GO.
 
+## 2026-07-24 — SYMMETRIC rematch, 300 games: +8 ± 32 (parity, slightly positive) — but a promotion quirk masks games
+
+The long clean run. cmd/sargon-symmatch, B=30M, Hard Mode, mirrored
+ponder, full 8fish stack, en-passant token fix + debt-bank conservation
+in place. **103W −96L =101D = 51.17% ≈ +8 ± 32 Elo** (95% CI [−24,+40]).
+Adherence 0.9903 over all 300 games (debt-bank holds); genuine draw rate
+~26% after removing the quirk below.
+
+**HARNESS QUIRK — 30/300 games (10%) adjudicated to draws by ONE bug on
+ONE opening.** A specific pool line reaches a position where 8fish plays
+F7-F8 promotion; Sargon in Hard Mode does not reply to the promotion
+after CTRL-T, so the harness times out → "unresolved → draw." Because
+both engines are deterministic and the pool cycles, it recurs every ~20
+games (g10 f7f8r, g30 f7f8q, g50 …). All 30 → draws. Excluding them the
+score is ~51.3% (unchanged — the conclusion holds), BUT these are
+PROMOTION games (the promoter usually wins); if that position is a win
+for 8fish, fixing the quirk converts up to ~30 draws to wins → as high
+as ~+43 Elo. So +8 ± 32 is our best number and may UNDER-state us.
+
+PRIORITY: fix the Sargon-promotion-no-reply-in-Hard-Mode quirk (a real
+adapter bug, likely the same class as the earlier promotion-confirm
+issue) before the next measurement — it's the biggest lever toward a
+trustworthy number and may uncover a real edge currently masked.
+
+Verdict on "decisively beating Sargon III": still NO — best honest
+estimate is parity, a hair positive (+8 ± 32). But the trend across
+clean-er conditions and the masked promotion games leave open that the
+true value is modestly positive. The genuine ~26% draw rate (no
+contempt: 8fish settles equal positions at score 0) keeps contempt on
+the table as a strength lever, now less inflated than the raw 34%.
+
 ## 2026-07-23 — SYMMETRIC fudge-free Sargon III rematch: PARITY (48.75%, −9 ± ~100)
 
 The definitive test, on honest terms at last. cmd/sargon-symmatch: an

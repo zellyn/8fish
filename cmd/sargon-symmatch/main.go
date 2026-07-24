@@ -209,7 +209,13 @@ func newEightfish(binfile, defsfile, lblfile string, usebook bool, bookSeed uint
 	// FixedBudgetMs=0 and Banked/Adaptive=false so each own-move `go movetime B`
 	// is a FLAT budget-B search (the symmetric base). b.aux (the TT) carries
 	// across moves and is warmed by the ponder exactly as in a real gauntlet.
-	b := &ucibridge.Bridge{Bin: bin, Defs: defs, Ponder: true, Log: logw}
+	// Dither ON: per-move eval-noise so 8fish plays DIFFERENT games from a
+	// repeated opening (the 40-position pool cycles ~7-8x over 300 games; both
+	// engines are otherwise deterministic, so without dither "300 games" is
+	// really ~40-80 distinct games replayed — a false-tight error bar). Dither
+	// makes each game an independent sample; symmetry is unaffected (Sargon
+	// still ponders 8fish's ACTUAL measured cycles, whatever dither makes them).
+	b := &ucibridge.Bridge{Bin: bin, Defs: defs, Ponder: true, Dither: true, Log: logw}
 	if usebook {
 		bk, err := book.Default()
 		if err != nil {

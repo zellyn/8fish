@@ -3,6 +3,42 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-24 — FIXED the Sargon Hard-Mode promotion "no reply" quirk (root cause: forced-reply detection, not promotion entry)
+
+Resolved the bug that drew ~10% of the 300-game symmetric run (g10 f7f8r,
+g30 f7f8q, …). ROOT CAUSE was NOT the promotion entry (the "ENTER PROMOTED
+PIECE" prompt was always answered; the /Q,/R token always registered).
+It was REPLY DETECTION: when our move — here a stalemate-avoiding
+under-promotion f7-f8=R — leaves Sargon a SINGLE legal reply, Sargon plays
+it INSTANTLY the moment the move registers, on the Infinite level, WITHOUT
+waiting for CTRL-T. RequestMove captured its commit baseline AFTER
+enterMove, by which point the reply (e.g. H7-H6) was already on the list, so
+forceCommitHard waited forever → "no reply after CTRL-T" → adjudicated draw.
+
+FIX (internal/sargon/driver.go): RequestMove now snapshots Sargon's
+newest-move token BEFORE entering our move (the token is scroll-immune and
+our move lands in the opposite color's column, so it only changes on a
+Sargon commit) and returns immediately if a reply appears during entry.
+Also hardened completePromotion for Hard mode: longer prompt-wait +
+re-strobe the confirming keystroke until the prompt clears (mirrors
+forceCommitHard's repeated CTRL-T), so a confirm keystroke missed by the
+rarely-polled keyboard latch can't park Sargon at the prompt.
+
+VALIDATION. Exact g10 position (8/5P1k/5K2/8/8/8/8/8 w): RequestMove F7-F8R
+BEFORE → "no reply after CTRL-T"; AFTER → Sargon replies H7-H6 (regression
+test TestHardPromotionForcedReply). Deterministic 11-game rerun (book-seed
+1, pool, B=30M): BEFORE 3W-2L-6D (g10 = draw); AFTER **4W-2L-5D, g10 =
+8fish-wins** — the masked position IS a win (KR-vs-K mate). Games g0-g9
+byte-identical, so no perturbation of non-promotion play. Symmetry exact
+(459/459 moves 8fish_think == sargon_ponder_window), adherence 0.9836,
+ponder hits 47.9%. All Easy- + Hard-mode promotion tests pass (Q, under-
+promotion N/R, checking promotion, Sargon's own promotion decode).
+
+Implication for the 300-game number: the ~30 masked draws are promotion
+endgames the promoter wins, so the fixed score should rise above +8 — a
+full rerun (coordinator) is needed to quantify. Ready command:
+runs/sargon-symmatch.sh 300 30000000 <outdir> 1.
+
 ## 2026-07-23 — adaptive time/effort management (mirror screen): banking + aggressive targeting = +54 over the flat mirror
 
 Mirror-side measurement of ADAPTIVE effort allocation (internal/mirror/

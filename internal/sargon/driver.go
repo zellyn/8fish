@@ -152,12 +152,32 @@ func (m *Machine) SubmitMove(move string, maxThinkSteps uint64) (MoveResult, err
 // "free" move), that reply is returned unchanged with ThinkCycles ~= 0.
 func (m *Machine) RequestMove(move string, budgetCycles uint64) (MoveResult, error) {
 	var res MoveResult
-	mid, prevReply, err := m.enterMove(move)
+
+	// Sargon's newest committed move BEFORE we enter ours. Captured now (not after
+	// enterMove) so a FORCED reply is still seen as a change: when our move leaves
+	// Sargon a single legal response — common after a stalemate-avoiding
+	// under-promotion, e.g. f7-f8=R leaving the enemy king one square — Sargon
+	// plays it INSTANTLY the moment our move registers, on the Infinite level and
+	// WITHOUT waiting for CTRL-T. That happens while enterMove is still running, so
+	// a baseline taken after enterMove already contains the reply and the
+	// change-based detection below would wait forever, wrongly reporting "no reply"
+	// (the promotion-draw bug that contaminated ~10% of the 300-game run). Our move
+	// lands in the opponent-color move-list column, so entering it never alters
+	// Sargon's newest-move token (only a Sargon commit does), and the bottom-most
+	// token is scroll-immune — so this baseline is robust.
+	baseReply := m.scrapeReplyText()
+
+	mid, _, err := m.enterMove(move)
 	if err != nil {
 		return res, err
 	}
-	_ = prevReply
 	thinkStart := m.Cycles()
+
+	// Forced/instant reply already on the list: return it without waiting.
+	if tok := m.scrapeReplyText(); tok != "" && tok != baseReply {
+		res.ThinkCycles = m.Cycles() - thinkStart
+		return m.decodeReply(res, mid), nil
+	}
 
 	// Commit detection uses Sargon's whole move-list column text, which changes
 	// ONLY when Sargon commits a move — its internal search scribbles the
@@ -473,20 +493,39 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 // completePromotion answers Sargon's "ENTER PROMOTED PIECE" prompt, which
 // appears after a pawn's FROM-TO move to the last rank is entered. Sargon shows
 // the prompt with a default of Queen (".../Q" in the move list) and blocks until
-// a choice is confirmed:
+// a single keystroke confirms a choice:
 //
-//	Queen ('Q'):        just RETURN (accept the default)
-//	Under-promote:      the piece letter N/R/B, then RETURN
+//	Queen:         RETURN (accept the shown default)
+//	Under-promote: the piece letter N/R/B (selects AND confirms directly —
+//	               verified on-screen: pressing the letter clears the prompt)
 //
-// It waits for the prompt (which lags the RETURN by ~1M cycles) before sending
-// the choice, and reports whether the prompt was seen and answered. A false
-// return means the prompt never appeared (e.g. dropped keystrokes) and the
-// caller should retry.
+// It waits for the prompt (which lags the FROM-TO RETURN by ~1M cycles) before
+// sending the choice, and reports whether the prompt was seen and answered. A
+// false return means the prompt never appeared (e.g. dropped FROM-TO keys) and
+// the caller should retry entering the move.
+//
+// In HARD mode Sargon ponders (Infinite level) while the prompt is up and polls
+// (and clears) the keyboard latch only occasionally, so a SINGLE confirming
+// keystroke is easily missed — and a missed confirm parks Sargon at the prompt
+// forever (never searching its reply), which is the "no reply after CTRL-T"
+// promotion hang that drew ~10% of the 300-game symmetric run. The Hard path
+// therefore waits longer for the prompt (a premature give-up would make the
+// caller re-type FROM-TO and corrupt the prompt state) and RE-STROBES the
+// confirm key until the prompt clears — mirroring forceCommitHard's repeated
+// CTRL-T. The Easy path (Sargon idle at the prompt) is a single keystroke, as
+// before.
 func (m *Machine) completePromotion(promo byte) (bool, error) {
 	const stepsPerKey = 200_000
+	// Prompt-appearance window. Easy mode reads the FROM-TO RETURN promptly;
+	// Hard mode (deep ponder, rare keyboard poll) can lag, so wait much longer
+	// before concluding the FROM-TO keys were dropped.
+	promptWait := uint64(6_000_000)
+	if m.HardMode {
+		promptWait = 30_000_000
+	}
 	sawPrompt := false
 	var s uint64
-	for s < 6_000_000 {
+	for s < promptWait {
 		if err := m.Run(pollChunk); err != nil {
 			return false, err
 		}
@@ -499,14 +538,61 @@ func (m *Machine) completePromotion(promo byte) (bool, error) {
 	if !sawPrompt {
 		return false, nil
 	}
-	// Queen is the default; only under-promotions need the piece letter typed.
+	if !m.HardMode {
+		// Easy mode: Sargon is idle at the prompt and reads the key immediately.
+		// (Unchanged: type the under-promotion piece letter, then RETURN.)
+		if promo != 'Q' {
+			if err := m.TypePaced(string(promo), stepsPerKey); err != nil {
+				return false, err
+			}
+		}
+		m.Key(0x0D) // RETURN confirms the shown promotion piece
+		return true, m.Run(1_500_000)
+	}
+	// Hard mode: re-strobe a single confirming keystroke until the prompt clears.
+	// RETURN accepts the default Queen; an under-promotion piece letter (N/R/B)
+	// selects AND confirms in one key (verified on-screen).
+	confirm := byte(0x0D)
 	if promo != 'Q' {
-		if err := m.TypePaced(string(promo), stepsPerKey); err != nil {
-			return false, err
+		confirm = promo
+	}
+	return m.confirmPromotionHard(confirm), nil
+}
+
+// confirmPromotionHard re-sends the promotion-confirm keystroke until Sargon's
+// "ENTER PROMOTED PIECE" prompt clears (the promotion committed). A single
+// strobe is unreliable while Sargon ponders — the keyboard latch is polled and
+// cleared only occasionally, so one keystroke is often missed (the same reason a
+// single CTRL-T is missed; see forceCommitHard). It re-sends every strobeGap
+// steps, checking after each poll for the prompt to vanish, and NEVER sends
+// another keystroke once the prompt has cleared, so no stray key leaks into
+// Sargon's ensuing search. Returns whether the prompt cleared within maxSteps.
+func (m *Machine) confirmPromotionHard(confirm byte) bool {
+	const (
+		strobeGap = 2_000_000 // steps between re-sends (Sargon reads+clears)
+		maxSteps  = 80_000_000
+	)
+	var steps uint64
+	for steps < maxSteps {
+		if !m.ScreenContains("PROMOTED") {
+			m.Run(1_000_000) // let the board / move list finish updating
+			return true
+		}
+		m.Key(confirm)
+		var w uint64
+		for w < strobeGap && steps < maxSteps {
+			if err := m.Run(pollChunk); err != nil {
+				return false
+			}
+			w += pollChunk
+			steps += pollChunk
+			if !m.ScreenContains("PROMOTED") {
+				m.Run(1_000_000)
+				return true
+			}
 		}
 	}
-	m.Key(0x0D) // RETURN confirms the shown promotion piece
-	return true, m.Run(1_500_000)
+	return false
 }
 
 // waitReply polls up to maxThinkSteps CPU steps for a new SARGON move token to

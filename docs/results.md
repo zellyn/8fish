@@ -64,6 +64,31 @@ ceiling + a 24-bit zp bank (effort.go asm-port note; no floats, /k are
 shifts, signals are a 2-byte compare + a counter). NOT YET PORTED — a
 follow-on; the mirror screen is the go/no-go and it says GO.
 
+## 2026-07-23 — time management HONEST number: +34 ± 32 (the +51 was a ~13% budget overspend)
+
+zellyn asked to confirm we actually honor our own time budget. We did
+NOT: the audit logging showed adaptive time management OVERSPENDING its
+own-move allotment by ~13% (session own_total/intended = 1.13). Cause:
+the per-game bank clamped at 0, so a panic move that ran to the device
+hard-abort on a thin bank had the overshoot FORGIVEN instead of clawed
+back. The +51 SPRT was measured under this leak — the adaptive side was
+quietly using ~13% more compute than flat, so it was NOT an equal-budget
+comparison.
+
+FIX (host-side, no asm change): the bank now goes into DEBT (bank int64;
+overspends repaid by reduced allocation on later moves), consistently in
+BankedClock (bridge/gauntlet), sprt.effortBank, and mirror.EffortBank.
+Restores conservation — own-move adherence 1.13 → ~1.0, and the A/B
+equal-total-spend is now within **2.18%** (was ~13%).
+
+HONEST RE-SPRT (fixed, genuinely equal budget, 300 games):
+**+111 =107 −82 = 54.8% → +34 ± 32, llr 1.12.** So ~17 Elo of the
+confounded +51 was the overspend; **+34 ± 32 is the real value of
+allocation skill** — still a positive gain (CI ≈ [+2,+66]), just modest
+and wide. The +34 supersedes the +51 everywhere. Lesson: audit that a
+feature honors its stated budget BEFORE trusting its SPRT — an
+equal-budget A/B is only equal if both sides actually spend equally.
+
 ## 2026-07-23 — LANDED: adaptive time management (SPRT +51) + endgame mop-up, on-device; FT_ROOKX removed
 
 Both winning levers are now shipped in the asm engine, and the feature

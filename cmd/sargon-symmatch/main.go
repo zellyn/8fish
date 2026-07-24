@@ -115,6 +115,7 @@ func main() {
 		*games, *budget, *budget/cyclesPerMs, *usebook)
 
 	var wins, losses, draws int
+	var sess timeAcct // whole-session 8fish own-move spend vs intended budget
 	for g := 0; g < *games; g++ {
 		sargonWhite := *sargonFirst
 		if g%2 == 1 {
@@ -124,7 +125,7 @@ func main() {
 		if len(openingList) > 0 {
 			fen = openingList[g%len(openingList)]
 		}
-		res := playGame(lg, eng, *dsk, *budget, sargonWhite, fen, *maxMoves, g)
+		res := playGame(lg, eng, *dsk, *budget, sargonWhite, fen, *maxMoves, g, &sess)
 		switch res {
 		case resWin:
 			wins++
@@ -135,7 +136,40 @@ func main() {
 		}
 		lg("GAME %d RESULT: %s (running: 8fish +%d -%d =%d)", g, res, wins, losses, draws)
 	}
+	// Harness-level adherence (own_total = actual 8fish own-move cycles; own_intended
+	// = flat budget B x moves). Distinct name from the ucibridge's own TIME-*
+	// lines, whose internal "income" is this harness's varying per-move alloc.
+	lg("SYMMATCH-TIME-SESSION-SUMMARY games=%d moves=%d own_total=%d own_intended=%d ratio=%.4f",
+		*games, sess.moves, sess.ownCyc, sess.intended, sess.ratio())
 	lg("SYMMATCH-DONE games=%d 8fish_wins=%d 8fish_losses=%d draws=%d", *games, wins, losses, draws)
+}
+
+// timeAcct accumulates 8fish's own-move cycle spend against its intended budget
+// (income x moves). The debt-bank makes own_total telescope to own_intended, so
+// ratio() reports how close per-game/session compute conserved to 1.0x.
+type timeAcct struct {
+	moves    int
+	ownCyc   uint64 // actual emulated cycles spent on 8fish's own-move searches
+	intended uint64 // sum of per-move income (== budget B x moves)
+}
+
+func (t *timeAcct) add(spent, income uint64) {
+	t.moves++
+	t.ownCyc += spent
+	t.intended += income
+}
+
+func (t *timeAcct) fold(o timeAcct) {
+	t.moves += o.moves
+	t.ownCyc += o.ownCyc
+	t.intended += o.intended
+}
+
+func (t timeAcct) ratio() float64 {
+	if t.intended == 0 {
+		return 0
+	}
+	return float64(t.ownCyc) / float64(t.intended)
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +338,21 @@ func parseNodes(line string) (uint64, bool) {
 // The game loop
 // ---------------------------------------------------------------------------
 
-func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64, sargonWhite bool, fen string, maxMoves, gameNo int) gameResult {
+func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64, sargonWhite bool, fen string, maxMoves, gameNo int, sess *timeAcct) gameResult {
+	// Per-game debt-bank governing 8fish's own-move budget. Income per move is B;
+	// each move spends B + bank/8, and an iteration-boundary overshoot drives the
+	// bank NEGATIVE so later moves' shrunken allocations repay it — the same
+	// conserving BankedClock the cutechess/sprt path uses. This does NOT touch the
+	// symmetry: Sargon still ponders 8fish's ACTUAL measured think (sr.cycles),
+	// whatever the bank let it spend.
+	clock := &chesstest.BankedClock{Base: budget}
+	var gt timeAcct // this game's 8fish own-move spend, folded into sess + logged on return
+	defer func() {
+		lg("SYMMATCH-TIME-GAME-SUMMARY game=%d moves=%d own_total=%d own_intended=%d ratio=%.4f",
+			gameNo, gt.moves, gt.ownCyc, gt.intended, gt.ratio())
+		sess.fold(gt)
+	}()
+
 	// Referee position (authoritative game state + terminal detection).
 	startFEN := refchess.StartFEN
 	base := "startpos"
@@ -357,7 +405,7 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 			lg("GAME %d: sargon-as-white open: %v", gameNo, err)
 			return adjudicate(lg, gameNo, ref, m, false)
 		}
-		s := screenTokenToCoord(res.SargonText, true)
+		s := screenTokenToCoord(res.SargonText, true, ref)
 		if s == "" || !applyMove(ref, seen, s) {
 			lg("GAME %d: sargon opening move unreadable/illegal token=%q", gameNo, res.SargonText)
 			return resDraw
@@ -372,11 +420,16 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 	// Main symmetric loop: 8fish to move at the top.
 	for {
 		// --- Step 1: 8fish searches (T_us); Sargon ponders that same window. ---
-		sr := eng.search(base, moves, budget)
+		// The bank sets THIS move's spendable budget (income B + bank/8); the
+		// actual measured think (sr.cycles) is what Sargon then mirrors.
+		alloc := clock.Alloc()
+		sr := eng.search(base, moves, alloc)
 		if sr.move == "" || sr.move == "0000" {
 			lg("MOVE g%d 8fish has no move (%q) — adjudicating", gameNo, sr.move)
 			return adjudicate(lg, gameNo, ref, m, true)
 		}
+		clock.Settle(sr.cycles)
+		gt.add(sr.cycles, budget)
 		if !applyMove(ref, seen, sr.move) {
 			lg("MOVE g%d 8fish played illegal-to-referee move %q — aborting", gameNo, sr.move)
 			return resDraw
@@ -408,7 +461,7 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 			lg("MOVE g%d 8fish move %s ended game (sargon msg=%q)", gameNo, sr.move, reply.Message)
 			return adjudicate(lg, gameNo, ref, m, false)
 		}
-		s := screenTokenToCoord(reply.SargonText, sargonWhite)
+		s := screenTokenToCoord(reply.SargonText, sargonWhite, ref)
 		if s == "" || !applyMove(ref, seen, s) {
 			lg("MOVE g%d sargon reply unreadable/illegal token=%q msg=%q — adjudicating",
 				gameNo, reply.SargonText, reply.Message)
@@ -593,7 +646,7 @@ func runConfirm(lg func(string, ...any), dsk string, budget, ponderCyc uint64, m
 		lg("SCREEN:\n%s", m.Screen())
 		return
 	}
-	s := screenTokenToCoord(reply.SargonText, false)
+	s := screenTokenToCoord(reply.SargonText, false, nil)
 	lg("CONFIRM RESULT: injection ACCEPTED mid-deep-ponder. Sargon reply token=%q coord=%q think=%d cyc (commit %d cyc, %.1fs total)",
 		reply.SargonText, s, reply.ThinkCycles, m.Cycles()-inj, time.Since(t0).Seconds())
 	lg("CONFIRM-DEEP-PONDER-DONE accepted=true reply=%s", s)
@@ -727,8 +780,13 @@ func coordToSargon(coord string) (string, error) {
 	return move, nil
 }
 
-// screenTokenToCoord parses a Sargon move-list token into UCI notation.
-func screenTokenToCoord(tok string, sargonWhite bool) string {
+// screenTokenToCoord parses a Sargon move-list token into UCI notation. Sargon
+// records most moves as FROM-TO squares ("E2-E4", "E4XD5" for a capture,
+// "E7-E8/Q" for a promotion), but a few forms carry no squares — castling
+// ("0-0"/"0-0-0") and en passant ("PXPEP") — and are resolved against `ref`,
+// the referee's CURRENT position (the position from which Sargon just moved).
+// ref may be nil only for the square-bearing forms (e.g. the runConfirm probe).
+func screenTokenToCoord(tok string, sargonWhite bool, ref *refchess.Position) string {
 	t := strings.ToUpper(strings.TrimSpace(tok))
 	switch t {
 	case "0-0", "O-O":
@@ -742,6 +800,18 @@ func screenTokenToCoord(tok string, sargonWhite bool) string {
 		}
 		return "e8c8"
 	}
+	// En passant: Sargon shows the square-less token "PXPEP" (Pawn takes Pawn
+	// En Passant). Disambiguate against the referee's unique legal en passant
+	// capture. A square-bearing EP variant (were Sargon ever to emit one) still
+	// falls through to the FROM-TO parse below after the EP suffix is trimmed.
+	if strings.HasSuffix(t, "EP") {
+		if ref != nil {
+			if eps := ref.EnPassantCaptures(); len(eps) == 1 {
+				return eps[0].String()
+			}
+		}
+		t = strings.TrimSuffix(t, "EP")
+	}
 	promo := ""
 	if i := strings.IndexByte(t, '/'); i >= 0 {
 		if i+1 < len(t) {
@@ -749,7 +819,6 @@ func screenTokenToCoord(tok string, sargonWhite bool) string {
 		}
 		t = t[:i]
 	}
-	t = strings.TrimSuffix(t, "EP")
 	if len(t) < 5 || (t[2] != '-' && t[2] != 'X') {
 		return ""
 	}

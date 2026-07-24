@@ -67,6 +67,8 @@ echo "starting match at $(date)"
 echo "match exited at $(date)"
 echo "--- result ---"
 grep -E "SYMMATCH-DONE" "$OUT/symmatch.log" || true
+echo "--- own-move budget adherence (own_total vs own_intended, target ~1.0) ---"
+grep -E "SYMMATCH-TIME-SESSION-SUMMARY" "$OUT/symmatch.log" || true
 echo "--- per-game results ---"
 grep -E "GAME [0-9]+ RESULT" "$OUT/symmatch.log" || true
 echo "--- ponder-hit summary (predicted == actual Sargon reply) ---"

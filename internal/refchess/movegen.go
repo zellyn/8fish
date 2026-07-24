@@ -267,6 +267,36 @@ func (p *Position) LegalMoves() []Move {
 	return legal
 }
 
+// EnPassantCaptures returns every legal en passant capture in the position.
+// There is usually zero or one; there are two only when friendly pawns flank
+// the pawn that just double-pushed (both can capture to the same target
+// square). Sargon III renders en passant as the square-less token "PXPEP"
+// (see its manual's notation section), so a caller reading that token
+// disambiguates it against this list — a from/to move it can apply.
+func (p *Position) EnPassantCaptures() []Move {
+	if p.epSquare < 0 {
+		return nil
+	}
+	var out []Move
+	for _, m := range p.LegalMoves() {
+		// An en passant capture is a pawn moving diagonally onto the (empty)
+		// en passant target square. A straight pawn push can never reach that
+		// square (the double-pushed pawn blocks it), but the file guard keeps
+		// this robust against any generator change.
+		if int(m.To) != p.epSquare {
+			continue
+		}
+		if pieceType(p.board[m.From]) != pawn {
+			continue
+		}
+		if int(m.From)%8 == int(m.To)%8 {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // Make plays m if legal, mutating p and returning an error otherwise.
 func (p *Position) Make(m Move) error {
 	for _, lm := range p.LegalMoves() {

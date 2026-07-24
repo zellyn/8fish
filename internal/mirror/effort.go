@@ -84,43 +84,40 @@ type TimeParams struct {
 }
 
 // EffortBank is the per-game cycle bank. Each move earns Base cycles of
-// income; the driver spends between 0 and Base+bank on the move; settle
-// carries the difference forward (clamped to [0, Cap]). Total game effort is
-// conserved (income == Base per move), so an adaptive redistribution spends
-// the same grand total as a flat one — the property that makes the A/B
-// honest. This mirrors chesstest.BankedClock but lives in the mirror so the
-// screen is self-contained, and exposes the raw bank for the driver's
-// signal-based (not just /8) draws.
+// income; the driver spends between minSpend and Base+bank on the move; settle
+// carries the difference forward. The bank is SIGNED: an overspend (the
+// device hard-abort, or the uncapped depth-1 iteration, on a thin bank) drives
+// it NEGATIVE (debt) rather than clamping at zero, so subsequent moves' shrunken
+// allocations repay it and total game effort telescopes to N*Base — the
+// property that makes the A/B honest (a flat side spends the same grand total).
+// Only the positive side is capped (an underspender can't hoard unboundedly).
+// This mirrors chesstest.BankedClock but lives in the mirror so the screen is
+// self-contained, and exposes the raw bank for the driver's signal-based (not
+// just /8) draws.
 type EffortBank struct {
 	Base uint64
 	Cap  uint64 // 0 => 8*Base
-	bank uint64
+	bank int64  // signed carry: >0 saved, <0 debt (clawed-back overspend)
 }
 
-func (b *EffortBank) cap() uint64 {
+func (b *EffortBank) cap() int64 {
 	if b.Cap != 0 {
-		return b.Cap
+		return int64(b.Cap)
 	}
-	return 8 * b.Base
+	return int64(8 * b.Base)
 }
 
-// settle accounts a finished move: income Base earned, spent subtracted,
-// clamped to [0, cap]. The hard-abort ceiling (and the uncapped depth-1
-// iteration) can overspend the allocation; the bank simply floors at zero.
+// settle accounts a finished move: income Base earned, spent subtracted. An
+// overspend drives the bank NEGATIVE (debt); only the positive side is capped.
 func (b *EffortBank) settle(spent uint64) {
-	total := b.bank + b.Base
-	if spent >= total {
-		b.bank = 0
-	} else {
-		b.bank = total - spent
-	}
+	b.bank += int64(b.Base) - int64(spent)
 	if m := b.cap(); b.bank > m {
 		b.bank = m
 	}
 }
 
-// Bank exposes the current balance (diagnostics/tests).
-func (b *EffortBank) Bank() uint64 { return b.bank }
+// Bank exposes the current signed balance (diagnostics/tests).
+func (b *EffortBank) Bank() int64 { return b.bank }
 
 // Diag returns the engine's accumulated effort-management diagnostics.
 func (e *Engine) Diag() TimeDiag { return e.diag }
@@ -213,23 +210,41 @@ type TimeDiag struct {
 //
 // bank is the current EffortBank balance (income already conceptually
 // available as Base). The caller settles the bank with the returned spend.
-func (e *Engine) SearchTimed(tp *TimeParams, bank uint64, maxDepth int) (Move, int, uint64) {
+func (e *Engine) SearchTimed(tp *TimeParams, bank int64, maxDepth int) (Move, int, uint64) {
 	base := tp.Base
 
-	// Base ceiling: flat Base, or the BankedClock /8 smoothing.
+	// minSpend floor: a negative (debt) bank never shrinks a move below Base/4.
+	minSpend := int64(base / 4)
+
+	// Base ceiling: flat Base, or the BankedClock /8 smoothing. A negative bank
+	// lowers the smoothed ceiling to repay debt, floored at minSpend.
 	baseCeiling := base
 	if tp.Smooth {
-		baseCeiling = base + bank/8
+		bc := int64(base) + bank/8
+		if bc < minSpend {
+			bc = minSpend
+		}
+		if bc < 0 {
+			bc = 0
+		}
+		baseCeiling = uint64(bc)
 	}
 	// Hard cap on a single move's spend: Base*MaxEighths/8, but never more
-	// than income+bank, and never below the base ceiling.
+	// than income+bank (floored at minSpend for a debt bank), and never below
+	// the base ceiling.
 	maxEighths := tp.MaxEighths
 	if maxEighths < 8 {
 		maxEighths = 8 // < Base makes no sense; floor at Base
 	}
 	maxCeiling := base * maxEighths / 8
-	if lim := base + bank; maxCeiling > lim {
-		maxCeiling = lim
+	if lim := int64(base) + bank; int64(maxCeiling) > lim {
+		if lim < minSpend {
+			lim = minSpend
+		}
+		if lim < 0 {
+			lim = 0
+		}
+		maxCeiling = uint64(lim)
 	}
 	if maxCeiling < baseCeiling {
 		maxCeiling = baseCeiling
@@ -350,10 +365,13 @@ func (e *Engine) SearchTimed(tp *TimeParams, bank uint64, maxDepth int) (Move, i
 // iteration. Adaptive management is that same loop with a MOVABLE budget and
 // a game-level bank:
 //
-//   1. Bank: a 24-bit counter BANK in zero page. Per move, income = BASE
-//      (the shipped per-move cycle budget). settle: BANK = min(CAP,
-//      BANK + BASE - SPENT), floored at 0. /8 draws and the CAP (=8*BASE)
-//      are shift chains; all adds/compares are 24-bit. (chesstest.BankedClock
+//   1. Bank: a 24-bit SIGNED counter BANK in zero page. Per move, income =
+//      BASE (the shipped per-move cycle budget). settle: BANK = min(CAP,
+//      BANK + BASE - SPENT) — NOT floored at 0, so an overspend leaves a
+//      negative (debt) bank that later moves repay (total conserves to
+//      N*BASE). A minSpend floor (BASE/4) on the drawn ceiling keeps a debt
+//      bank from starving a move. /8 draws and the positive CAP (=8*BASE) are
+//      shift chains; all adds/compares are 24-bit signed. (chesstest.BankedClock
 //      is the already-validated reference for this half.)
 //
 //   2. Ceiling: CEIL starts at BASE (or BASE + BANK/8 for the smoothed

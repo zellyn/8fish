@@ -105,6 +105,23 @@ func main() {
 	fmt.Printf("A(%#02x) vs B(%#02x) @ %dms: +%d =%d -%d  score %.1f%%  elo %+.0f +/- %.0f  llr(0,10) %.2f\n",
 		a, b, *budgetMs, res.Wins, res.Draws, res.Losses,
 		100*res.Score(), elo, margin, res.LLR(0, 10))
+	// Equal-total-spend check: in per-game bank mode the conserving (signed)
+	// bank must make the adaptive and flat sides spend the same grand total
+	// compute (within the minSpend-floor residual) — otherwise the Elo is
+	// confounded by a compute advantage rather than a pure time-allocation one.
+	if res.ACycles > 0 && res.BCycles > 0 {
+		income := *budgetMs * chesstest.CyclesPerMs
+		aInt := income * uint64(res.AMoves)
+		bInt := income * uint64(res.BMoves)
+		aAdh := float64(res.ACycles) / float64(aInt) // adaptive own_total/own_intended
+		bAdh := float64(res.BCycles) / float64(bInt) // flat own_total/own_intended
+		ab := float64(res.ACycles) / float64(res.BCycles)
+		fmt.Printf("  spend: A_total=%d (moves=%d intended=%d adherence=%.4f)\n",
+			res.ACycles, res.AMoves, aInt, aAdh)
+		fmt.Printf("         B_total=%d (moves=%d intended=%d adherence=%.4f)\n",
+			res.BCycles, res.BMoves, bInt, bAdh)
+		fmt.Printf("         equal-total-spend A/B=%.4f (%.2f%%)\n", ab, (ab-1)*100)
+	}
 	if len(res.Errors) > 0 {
 		os.Exit(1)
 	}

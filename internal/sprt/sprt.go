@@ -79,20 +79,19 @@ type Config struct {
 // effortBank is a per-game cycle bank (host-side; the engine's zero page does
 // NOT persist across the harness's fresh-machine-per-move, so the bank must
 // live here and be poked into each move's budget). Mirrors mirror.EffortBank
-// and chesstest.BankedClock: income per move, spend, carry forward, cap 8x.
+// and chesstest.BankedClock: income per move, spend, carry forward. The bank
+// is SIGNED — an overspend (device hard-abort on a thin bank) drives it
+// NEGATIVE (debt) rather than clamping at zero, so subsequent moves' shrunken
+// allocations repay it and total game compute telescopes to N*income. Only the
+// positive side is capped at 8x.
 type effortBank struct {
 	income uint64
-	bank   uint64
+	bank   int64
 }
 
 func (b *effortBank) settle(spent uint64) {
-	total := b.bank + b.income
-	if spent >= total {
-		b.bank = 0
-	} else {
-		b.bank = total - spent
-	}
-	if cap := 8 * b.income; b.bank > cap {
+	b.bank += int64(b.income) - int64(spent)
+	if cap := int64(8 * b.income); b.bank > cap {
 		b.bank = cap
 	}
 }
@@ -104,33 +103,48 @@ func (b *effortBank) settle(spent uint64) {
 // ceiling = income + bank/8; hard max = min(4*income, income+bank); instability
 // target = min(3*income, hard max); easy-stop min spend = income/4). The engine
 // then raises the ceiling on-device via the panic/instability signals.
-func pokeAlloc(m *harness.Machine, defs chesstest.Defs, income, bank uint64, adaptive bool) uint64 {
+func pokeAlloc(m *harness.Machine, defs chesstest.Defs, income uint64, bank int64, adaptive bool) uint64 {
 	if !adaptive {
 		chesstest.SetBudget(m, defs, income, 24)
 		return income*3 + 2_000_000_000
 	}
-	baseCeiling := income + bank/8
-	maxCeiling := 4 * income
-	if lim := income + bank; maxCeiling > lim {
+	// Signed bank: a negative (debt) bank shrinks the base ceiling and hard max
+	// so the overspend is repaid; the minSpend floor (income/4) keeps a move
+	// from being starved to zero.
+	minSpend := int64(income / 4)
+	baseCeiling := int64(income) + bank/8
+	if baseCeiling < minSpend {
+		baseCeiling = minSpend
+	}
+	maxCeiling := int64(4 * income)
+	if lim := int64(income) + bank; maxCeiling > lim {
 		maxCeiling = lim
 	}
 	if maxCeiling < baseCeiling {
 		maxCeiling = baseCeiling
 	}
-	unstTarget := 3 * income
+	unstTarget := int64(3 * income)
 	if unstTarget > maxCeiling {
 		unstTarget = maxCeiling
 	}
-	chesstest.SetBudget(m, defs, baseCeiling, 24)
-	chesstest.SetAdaptive(m, defs, maxCeiling, unstTarget, income/4)
+	chesstest.SetBudget(m, defs, uint64(baseCeiling), 24)
+	chesstest.SetAdaptive(m, defs, uint64(maxCeiling), uint64(unstTarget), income/4)
 	// Hard abort is 2*maxCeiling on device; allow generous slack + fixed cost.
-	return maxCeiling*3 + 2_000_000_000
+	return uint64(maxCeiling)*3 + 2_000_000_000
 }
 
 // Result tallies from A's perspective.
 type Result struct {
 	Wins, Draws, Losses int
 	Errors              []string
+	// ACycles/BCycles are the total emulated cycles each side actually spent
+	// across all games (own-move search only). AMoves/BMoves are the own-move
+	// counts. In per-game bank mode the intended per-side budget is
+	// income*moves; own_total/own_intended is the adherence ratio (the leak the
+	// conserving/debt bank fixes), and ACycles≈BCycles is the equal-total-spend
+	// check that makes the adaptive-vs-flat A/B honest.
+	ACycles, BCycles uint64
+	AMoves, BMoves   int
 }
 
 func (r *Result) Games() int { return r.Wins + r.Draws + r.Losses }
@@ -273,13 +287,17 @@ func Run(cfg Config) *Result {
 			go func(opening int, aWhite bool) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				outcome, err := playGame(cfg, openings[opening%len(openings)], aWhite)
+				outcome, aCyc, bCyc, aMv, bMv, err := playGame(cfg, openings[opening%len(openings)], aWhite)
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
 					res.Errors = append(res.Errors, err.Error())
 					return
 				}
+				res.ACycles += aCyc
+				res.BCycles += bCyc
+				res.AMoves += aMv
+				res.BMoves += bMv
 				switch outcome {
 				case 1:
 					res.Wins++
@@ -295,19 +313,20 @@ func Run(cfg Config) *Result {
 	return res
 }
 
-// playGame returns +1/0/-1 from A's perspective.
-func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
+// playGame returns +1/0/-1 from A's perspective, plus the total emulated
+// cycles and own-move count each side spent across the game (own-move search).
+func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCyc uint64, aMv, bMv int, err error) {
 	ref, err := refchess.ParseFEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
 	if err != nil {
-		return 0, err
+		return
 	}
 	for _, ms := range opening {
 		mv, err := refchess.ParseMove(ms)
 		if err != nil {
-			return 0, err
+			return 0, aCyc, bCyc, aMv, bMv, err
 		}
 		if err := ref.Make(mv); err != nil {
-			return 0, err
+			return 0, aCyc, bCyc, aMv, bMv, err
 		}
 	}
 	seen := map[uint64]int{}
@@ -319,22 +338,22 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 	}
 	for range 400 {
 		if ref.HalfmoveClock() >= 100 || ref.InsufficientMaterial() {
-			return 0, nil
+			return 0, aCyc, bCyc, aMv, bMv, nil
 		}
 		seen[ref.ZobristKey()]++
 		if seen[ref.ZobristKey()] >= 3 {
-			return 0, nil
+			return 0, aCyc, bCyc, aMv, bMv, nil
 		}
 		legal := ref.LegalMoves()
 		aTurn := (ref.SideToMove() == 0) == aWhite
 		if len(legal) == 0 {
 			if !ref.InCheck() {
-				return 0, nil // stalemate
+				return 0, aCyc, bCyc, aMv, bMv, nil // stalemate
 			}
 			if aTurn {
-				return -1, nil
+				return -1, aCyc, bCyc, aMv, bMv, nil
 			}
-			return 1, nil
+			return 1, aCyc, bCyc, aMv, bMv, nil
 		}
 		features := cfg.FeaturesA
 		features2 := cfg.FeaturesA2
@@ -348,11 +367,11 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 		}
 		pos, err := chesstest.ParseFEN(ref.FEN())
 		if err != nil {
-			return 0, err
+			return 0, aCyc, bCyc, aMv, bMv, err
 		}
 		m, err := chesstest.NewMachine(bin, defs, pos, 0, nil)
 		if err != nil {
-			return 0, err
+			return 0, aCyc, bCyc, aMv, bMv, err
 		}
 		chesstest.SetFeatures(m, defs, features)
 		chesstest.SetFeatures2(m, defs, features2)
@@ -375,7 +394,15 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 		}
 		exited, code, err := m.Run(runCap)
 		if err != nil || !exited {
-			return 0, fmt.Errorf("engine run: exited=%v err=%v (fen %q)", exited, err, ref.FEN())
+			return 0, aCyc, bCyc, aMv, bMv, fmt.Errorf("engine run: exited=%v err=%v (fen %q)", exited, err, ref.FEN())
+		}
+		// Tally actual cycles + own-move count to the side that moved.
+		if aTurn {
+			aCyc += m.Cycles
+			aMv++
+		} else {
+			bCyc += m.Cycles
+			bMv++
 		}
 		if cfg.PerGame {
 			banks[aTurn].settle(m.Cycles) // actual emulated cycles spent
@@ -385,10 +412,10 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 		}
 		copy(auxes[aTurn], m.Mem.Aux[:])
 		if code == 2 {
-			return 0, fmt.Errorf("engine says no move but referee disagrees (fen %q)", ref.FEN())
+			return 0, aCyc, bCyc, aMv, bMv, fmt.Errorf("engine says no move but referee disagrees (fen %q)", ref.FEN())
 		}
 		if code != 0 {
-			return 0, fmt.Errorf("engine exit code %d (fen %q)", code, ref.FEN())
+			return 0, aCyc, bCyc, aMv, bMv, fmt.Errorf("engine exit code %d (fen %q)", code, ref.FEN())
 		}
 		from := m.Mem.Main[defs["BESTFROM"]]
 		to := m.Mem.Main[defs["BESTTO"]]
@@ -396,11 +423,11 @@ func playGame(cfg Config, opening []string, aWhite bool) (int, error) {
 		ms := chesstest.MoveUCI(from, to, flags)
 		mv, err := refchess.ParseMove(ms)
 		if err != nil {
-			return 0, err
+			return 0, aCyc, bCyc, aMv, bMv, err
 		}
 		if err := ref.Make(mv); err != nil {
-			return 0, fmt.Errorf("ILLEGAL MOVE %q (fen %q): %w", ms, ref.FEN(), err)
+			return 0, aCyc, bCyc, aMv, bMv, fmt.Errorf("ILLEGAL MOVE %q (fen %q): %w", ms, ref.FEN(), err)
 		}
 	}
-	return 0, nil
+	return 0, aCyc, bCyc, aMv, bMv, nil
 }

@@ -31,7 +31,7 @@ func TestEffortOffIdentical(t *testing.T) {
 				m, s := e.SearchCycleBudget(base, MaxPly-1)
 				return m, s, e.Cyc.Est, e.CompletedDepth
 			}
-			timedOff := func(bank uint64) (Move, int, uint64, int) {
+			timedOff := func(bank int64) (Move, int, uint64, int) {
 				e := NewEngine()
 				e.Features = FtAll | FtSEE | FtHistory
 				e.SetPosition(pos)
@@ -41,7 +41,7 @@ func TestEffortOffIdentical(t *testing.T) {
 				return m, s, spent, e.CompletedDepth
 			}
 			fm, fs, fc, fd := flat()
-			for _, bank := range []uint64{0, base, 4 * base, 100 * base} {
+			for _, bank := range []int64{0, int64(base), 4 * int64(base), 100 * int64(base)} {
 				tm, ts, tc, td := timedOff(bank)
 				if fm != tm || fs != ts || fc != tc || fd != td {
 					t.Errorf("base %d bank %d %s: OFF path differs from flat: flat (%v,%d,%d,d%d) vs timed (%v,%d,%d,d%d)",
@@ -93,7 +93,7 @@ func TestEffortExtendSpendsMore(t *testing.T) {
 		t.Fatal(err)
 	}
 	const base = 6_000_000
-	spend := func(tp *TimeParams, bank uint64) uint64 {
+	spend := func(tp *TimeParams, bank int64) uint64 {
 		e := NewEngine()
 		e.Features = FtAll | FtSEE | FtHistory
 		e.SetPosition(pos)
@@ -111,26 +111,110 @@ func TestEffortExtendSpendsMore(t *testing.T) {
 	}
 }
 
-// TestEffortBankConserves: over a synthetic sequence of spends the bank
-// conserves total effort (income == Base per move) and never exceeds the cap
-// nor goes negative.
+// TestEffortBankConserves: over a synthetic sequence of spends the SIGNED bank
+// conserves total effort (income == Base per move). An overspend drives the
+// bank NEGATIVE (debt) instead of clamping at zero, so the final bank equals
+// income - spent exactly whenever the positive cap was never hit. Only the
+// positive side is capped.
 func TestEffortBankConserves(t *testing.T) {
 	const base = 1000
 	b := EffortBank{Base: base}
 	spends := []uint64{200, 5000, 100, 100, 3000, 900, 0, 8000}
-	var income, spent uint64
+	var income, spent int64
 	for _, s := range spends {
 		income += base
 		b.settle(s)
-		spent += s
+		spent += int64(s)
 		if b.bank > 8*base {
-			t.Errorf("bank %d exceeded cap %d", b.bank, 8*base)
+			t.Errorf("bank %d exceeded positive cap %d", b.bank, 8*base)
 		}
 	}
-	// Final bank == income - spent, unless clamped at 0 or the cap along the
-	// way. Here total income 8000, total spent 17300 => bank floored at 0.
-	if b.bank != 0 {
-		t.Errorf("expected drained bank, got %d (income %d spent %d)", b.bank, income, spent)
+	// Positive cap never bit here (the bank runs negative after the 5000
+	// overspend), so the debt telescopes exactly to income - spent.
+	if want := income - spent; b.bank != want {
+		t.Errorf("bank did not conserve: got %d want %d (income %d spent %d)", b.bank, want, income, spent)
+	}
+}
+
+// TestEffortBankAdherence is the closed-loop budget-conservation gate. It
+// models the real per-game feedback (allocation drawn from the bank -> move
+// spends up to its ceiling, or runs to the device hard-abort = 2*maxCeiling on
+// FORCED-PANIC moves that overspend a thin bank -> settle), then compares the
+// session own_total against own_intended = N*income. The OLD clamp-at-zero bank
+// FORGAVE the hard-abort overspends (measured ~1.13 ratio). The signed/debt
+// bank claws them back, so the ratio drops to ~1.0; the only residual is the
+// minSpend floor (income/4), which this test quantifies.
+func TestEffortBankAdherence(t *testing.T) {
+	const income = 30_000_000
+	minSpend := int64(income / 4)
+	// A move sequence: most easy (spend the min), some panic (run to the device
+	// hard-abort). This is the adversarial pattern the old clamp leaked on.
+	panicMove := []bool{false, false, true, false, true, false, false, true,
+		false, false, true, false, false, false, true, false, false, false, true, false}
+
+	sim := func(clampAtZero bool) (total, intended int64) {
+		bank := int64(0)
+		for _, isPanic := range panicMove {
+			// Host-side allocation exactly as pokeAlloc / SearchTimed compute it.
+			baseCeiling := int64(income) + bank/8
+			if baseCeiling < minSpend {
+				baseCeiling = minSpend
+			}
+			maxCeiling := int64(4 * income)
+			if lim := int64(income) + bank; maxCeiling > lim {
+				maxCeiling = lim
+			}
+			if maxCeiling < baseCeiling {
+				maxCeiling = baseCeiling
+			}
+			// Device spend model: an easy move spends its base ceiling; a panic
+			// move runs to the on-device hard-abort = 2*maxCeiling (ABORTL),
+			// which on a thin/empty bank exceeds income+bank.
+			var spent int64
+			if isPanic {
+				spent = 2 * maxCeiling
+			} else {
+				spent = baseCeiling
+			}
+			total += spent
+			intended += income
+			// settle
+			if clampAtZero {
+				tot := bank + income
+				if spent >= tot {
+					bank = 0
+				} else {
+					bank = tot - spent
+				}
+				if bank > 8*income {
+					bank = 8 * income
+				}
+			} else {
+				bank += income - spent
+				if bank > 8*income {
+					bank = 8 * income
+				}
+			}
+		}
+		return total, intended
+	}
+
+	oldTot, oldInt := sim(true)
+	newTot, newInt := sim(false)
+	oldRatio := float64(oldTot) / float64(oldInt)
+	newRatio := float64(newTot) / float64(newInt)
+	t.Logf("closed-loop adherence: OLD clamp ratio=%.4f (%d/%d), NEW debt ratio=%.4f (%d/%d), residual=%.2f%%",
+		oldRatio, oldTot, oldInt, newRatio, newTot, newInt, (newRatio-1)*100)
+	// The debt bank must claw back the bulk of the overspend: the residual
+	// excess (from the minSpend floor only) must be less than half the old
+	// clamp's leak. (The exact residual under the real device is quantified by
+	// the gauntlet's TIME-SESSION-SUMMARY; this synthetic pattern is deliberately
+	// more panic-heavy than reality.)
+	if newRatio >= oldRatio {
+		t.Errorf("debt bank did not reduce overspend: old %.4f new %.4f", oldRatio, newRatio)
+	}
+	if (newRatio - 1) >= (oldRatio-1)*0.5 {
+		t.Errorf("debt bank clawed back <half the leak: old excess %.4f new excess %.4f", oldRatio-1, newRatio-1)
 	}
 }
 

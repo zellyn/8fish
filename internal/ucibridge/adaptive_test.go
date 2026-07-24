@@ -69,7 +69,7 @@ func TestBridgeAdaptive(t *testing.T) {
 	if b.clock == nil {
 		t.Fatal("adaptive mode did not create the BankedClock")
 	}
-	if bank := b.clock.Bank(); bank > 8*b.clock.Base {
+	if bank := b.clock.Bank(); bank > int64(8*b.clock.Base) {
 		t.Errorf("bank %d exceeds cap %d", bank, 8*b.clock.Base)
 	}
 	t.Logf("adaptive bridge: 3 legal moves; final bank=%d (base=%d)", b.clock.Bank(), b.clock.Base)

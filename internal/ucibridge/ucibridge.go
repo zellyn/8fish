@@ -568,24 +568,25 @@ func (b *Bridge) think(args []string) (string, error) {
 		if b.clock == nil || b.clock.Base != income {
 			b.clock = &chesstest.BankedClock{Base: income}
 		}
-		budget = b.clock.Alloc() // base ceiling = income + bank/8
+		budget = b.clock.Alloc() // base ceiling = income + bank/8, floored at minSpend
 		if b.Adaptive {
 			// Movable-ceiling params, computed exactly as mirror.SearchTimed:
 			// hard max = min(4*income, income+bank), clamped >= base ceiling;
 			// instability target = min(3*income, hard max); min spend =
-			// income/4. The engine raises the ceiling on-device from these.
-			maxCeiling := 4 * income
-			if lim := income + b.clock.Bank(); maxCeiling > lim {
+			// income/4. A NEGATIVE (debt) bank lowers income+bank so the move
+			// draws less until the debt is repaid. Signed arithmetic.
+			maxCeiling := int64(4 * income)
+			if lim := int64(income) + b.clock.Bank(); maxCeiling > lim {
 				maxCeiling = lim
 			}
-			if maxCeiling < budget {
-				maxCeiling = budget
+			if maxCeiling < int64(budget) {
+				maxCeiling = int64(budget)
 			}
-			unstTarget := 3 * income
+			unstTarget := int64(3 * income)
 			if unstTarget > maxCeiling {
 				unstTarget = maxCeiling
 			}
-			adapt = &adaptiveAlloc{maxCeiling: maxCeiling, unstTarget: unstTarget, minSpend: income / 4}
+			adapt = &adaptiveAlloc{maxCeiling: uint64(maxCeiling), unstTarget: uint64(unstTarget), minSpend: income / 4}
 		}
 	}
 	seed := -1
@@ -610,7 +611,7 @@ func (b *Bridge) think(args []string) (string, error) {
 	// bank carries the residual forward so the per-game total settles near
 	// income*moves. Accumulated for the per-game/session adherence lines.
 	if b.Log != nil && income != 0 {
-		bank := uint64(0)
+		bank := int64(0)
 		if b.clock != nil {
 			bank = b.clock.Bank()
 		}

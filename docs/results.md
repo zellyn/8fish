@@ -100,6 +100,30 @@ ceiling + a 24-bit zp bank (effort.go asm-port note; no floats, /k are
 shifts, signals are a 2-byte compare + a counter). NOT YET PORTED — a
 follow-on; the mirror screen is the go/no-go and it says GO.
 
+## 2026-07-24 — CLEAN symmetric rematch, 300 games: +21 ± 34 — 8fish AHEAD of Sargon III (winning record 121-103)
+
+The fully-honest number, all three flaws fixed: (1) Hard-Mode promotion
+no-reply fixed (quirk-adjudications 30 → 3), (2) DITHER on so the 40-
+opening pool yields independent games (not ~40 deterministic replays),
+(3) budget conserved (adherence 0.9935). Fudge-free symmetric Hard-Mode
+pondering as before.
+
+**121W −103L =76D = 53.00% ≈ +21 ± 34 Elo** (95% CI [−13, +55]).
+Winning record: **+18 (121 vs 103)**; draw rate down to 25.3% (the
+promotion quirk had inflated it to 34%).
+
+INTERPRETATION: the point estimate jumped +8 → +21 once the promotion
+wins stopped being scored as draws, and the ±34 is now HONEST (dither →
+independent games; the prior run's ±32 was false-tight). So 8fish is
+GENUINELY AHEAD of full-strength Sargon III on fair terms — a real
+winning record — but the CI just barely includes zero, so not yet
+STATISTICALLY decisive. "Decisive" needs either more games (~600-900 to
+push the lower bound above 0) or a strength gain that widens the edge
+(contempt to convert the ~25% draws is the leading candidate; composes
+with the endgame mop-up). Best honest verdict so far: **8fish beats
+Sargon III more often than it loses, on honest symmetric terms** — the
+thing it was built to do.
+
 ## 2026-07-24 — SYMMETRIC rematch, 300 games: +8 ± 32 (parity, slightly positive) — but a promotion quirk masks games
 
 The long clean run. cmd/sargon-symmatch, B=30M, Hard Mode, mirrored

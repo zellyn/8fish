@@ -3,6 +3,94 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-25 — PASSED-PAWN TABLE: THE "NON-MONOTONE BUG" IS NOT A BUG — NO CHANGE (3 monotone candidates all neutral-to-negative)
+
+Investigation of the suspected weight bug in the Texel-tuned passed-pawn
+bonus `{0, 15, 0, 21, 50, 52, 20, 0}` (cmd/gentables/main.go, consumed by
+`WPASSB`/`BPASSB` in asm/eval.s pawnterm and by `mirror.Weights.Passed`).
+**Verdict: the shipped table stays. Nothing changed in the engine.**
+
+**Indexing (pinned by `TestPassedBonusIndexing`, internal/mirror).** Index
+N = the pawn's 0x88 rank for white and `7 - rank` for black, i.e. N =
+advancement, chess rank N+1. So index 6 (=20) really is a passer one
+square from promoting and index 5 (=52) is the 6th rank. Index 0 and 7 are
+unreachable (no pawn stands on rank 1 or 8) and correctly 0. The docs'
+`passed2..passed7` names = chess rank = index 1..6.
+
+**Why it is not a bug: the bonus is only a TOP-UP on the PeSTO pawn
+PSQT**, which already carries the advancement curve. File-averaged pawn
+placement value (base value removed) plus the bonus — the real value of a
+passer, `TestPassedEffectiveCurve`:
+
+| chess rank | psqt MG | psqt EG | bonus | eff MG | eff EG |
+|---|---|---|---|---|---|
+| 2 | −6.8 | 5.9 | 15 | 8.2 | 20.9 |
+| 3 | −2.1 | −1.0 | 0 | −2.1 | −1.0 |
+| 4 | −1.8 | −0.1 | 21 | 19.2 | 20.9 |
+| 5 | 6.9 | 13.8 | 50 | 56.9 | 63.8 |
+| 6 | 23.0 | 77.6 | 52 | 75.0 | **129.6** |
+| 7 | 75.6 | 159.2 | 20 | 95.6 | **179.2** |
+
+The effective curve is strictly increasing from the 4th rank up in BOTH
+phases: PeSTO alone adds +81.6 EG / +52.6 MG between the 6th and the 7th,
+so the tuner spent less top-up exactly where the base eval already pays.
+The one genuine inversion in the effective curve is rank 2 → rank 3
+(20.9 → −1.0 EG), worth ~22 cp, and it is the thing the screens below
+tried to fix. `TestPassedEffectiveCurve` now asserts the rank-4-and-up
+invariant so this is not re-opened.
+
+**The sparse-data theory is false.** The diversified corpus
+(`testdata/texel-rows-2026-07-19.gz`, 108,908 rows = 101,202 self-play +
+7,706 pool — it is already the UNION, do not append the 07-18 file to it)
+constrains every bucket: nonzero rows per bucket — rank 2 9,206 (8.45%),
+rank 3 9,829 (9.03%), rank 4 11,001 (10.10%), rank 5 10,055 (9.23%),
+rank 6 9,239 (8.48%), **rank 7 5,443 (5.00%)**. A 1-D loss scan puts each
+shipped value at its own argmin (15/0/20/50/50/20 vs shipped
+15/0/21/50/52/20), and an unconstrained re-tune from the shipped point
+reproduces `{0,15,0,21,50,52,20,0}` **exactly**. Bucket 3's optimum is at
+the 0 clamp (the fit wants negative). Raising rank 7 to 110 costs
++0.000288 loss — larger than the entire self-play→diversified re-tune gain
+(0.000285) and far outside the tuning entry's bootstrap CI [15, 31].
+
+**Candidates and Texel loss** (K=0.85, shipped loss 0.103654):
+
+| curve | passed table | Δloss |
+|---|---|---|
+| shipped | {0,15,0,21,50,52,20,0} | — |
+| effmono (minimal effective-monotone fix) | {0,15,22,25,50,52,20,0} | +0.000053 |
+| mono (monotonicity-constrained re-tune) | {0,15,15,23,52,52,52,0} | +0.000055 |
+| handset (task's suggested shape) | {0,10,15,25,45,70,110,0} | +0.000322 |
+
+**SCREEN — cycle-budget self-play**, `-cbudget 143000000`, asm-matched
+0x1f + recap2 QS + mop-up ON both sides, candidate weights vs shipped
+weights, everything else identical (pure weight change: zero cycle cost,
+no tax model needed), seeds 11111 + 22222:
+
+| curve | games | +W =D −L | Elo ± err |
+|---|---|---|---|
+| effmono | 2000 | +704 =607 −689 | **+3 ± 13** |
+| mono | 2000 | +690 =603 −707 | **−3 ± 13** |
+| handset | 1000 | +338 =306 −356 | **−6 ± 18** |
+
+(per batch: effmono −12 ± 18 / +17 ± 18; mono +3 ± 18 / −9 ± 18; handset
+−0 ± 26 / −13 ± 25.)
+
+Nothing wins. Imposing monotonicity on the base table is neutral at best
+and the naive steep curve is the worst of the three — consistent with the
+loss table and with the effective curve already being monotone where it
+matters. **No asm regeneration, no SPRT.** `asm/tables.s` md5
+1a8aa476dd81a82ea27474cf49bfe610 / `asm/engine.bin` md5
+c6147d39e799995e16334c49f3492626 unchanged. Gates re-run green:
+mirror `-short`, TestPStructParity (4,045 positions), TestPStructMirrorParity
+(600), TestTablePacking.
+
+Note for the endgame technique (currently gated OFF at −9 ± 24): its
+separate monotone top-up `{0,0,10,20,40,60,100,0}` was justified in that
+entry by "pawnterm's table is non-monotone". That justification is wrong
+as stated — the base eval's effective curve is monotone — so if that term
+is ever revisited, its Pass sub-term needs its own screen rather than
+inheriting this rationale.
+
 ## 2026-07-25 — TT MATE-ZONE BUG FIXED (asm/tt.s): unsigned `cmp #$74` corrupted every negative score; SPRT +8 ± 22 over 600 games
 
 The bug flagged at the bottom of the check-extension entry, confirmed,

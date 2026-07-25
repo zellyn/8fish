@@ -17,10 +17,14 @@ package mirror
 //	    proximity to the nearest pawn of either color ("the king is a
 //	    fighting piece in the endgame").
 //	(2) PASSED-PAWN TECHNIQUE. pawnterm's Texel-tuned PASSEDBONUS is
-//	    {0,15,0,21,50,52,20,0} by advancement — NOT monotone, and it
-//	    values a pawn on the 7th (20) BELOW one on the 5th (50). That is a
-//	    self-play tuning artifact (both sides push symmetrically) and it
-//	    is exactly the shape that fails to convert. EGPass adds an
+//	    {0,15,0,21,50,52,20,0} by advancement — NOT monotone on its own,
+//	    and it values a pawn on the 7th (20) BELOW one on the 5th (50).
+//	    CAVEAT (2026-07-25 investigation, see docs/results.md): that is
+//	    NOT the tuning artifact it looks like — the bonus is a top-up on
+//	    the PeSTO pawn PSQT, and PSQT+bonus (what a passer is really
+//	    worth) IS strictly increasing from the 4th rank up; the free
+//	    Texel re-tune reproduces the shipped table exactly and monotone
+//	    replacements screen neutral-to-negative. EGPass adds an
 //	    endgame-only, monotone, advancement-scaled top-up. Plus the two
 //	    king/passer relations (our king escorting, their king blockading)
 //	    and the rule of the square (an unstoppable passer is worth a

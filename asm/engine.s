@@ -678,6 +678,10 @@ EGBBST = $0218
 ; monotone replacement for pawnterm's Texel-tuned PASSEDBONUS
 ; {0,15,0,21,50,52,20,0}, whose non-monotone shape (7th rank worth less
 ; than the 5th) is exactly what failed to convert.
+; CAVEAT (2026-07-25, docs/results.md): PASSEDBONUS is a top-up on the
+; PSQT, and PSQT+bonus IS monotone from the 4th rank up, so "the base
+; table is broken" is not a valid justification for this table; if
+; FT2_EGTECH is ever revisited, EGPASS needs its own screen.
 EGPASS: .byte 0, 0, 10, 20, 40, 60, 100, 0
 
 ; EGCD8: per-coordinate centre distance {3,2,1,0,0,1,2,3}; CMD(square) =

@@ -88,15 +88,12 @@ func main() {
 	castleMask[0x70] = 0x07 // a8: black loses queenside
 	castleMask[0x77] = 0x0B // h8: black loses kingside
 
-	var b strings.Builder
-	b.WriteString(tableComment)
-	b.WriteString("\n.segment \"TABLES\"\n\n.align 256\n")
-	emit(&b, "ATTACKTAB", attack[:])
-	b.WriteString("\n.align 256\n")
-	emit(&b, "DELTATAB", delta[:])
+	// ---- Derived table data. Computation order is load-bearing only
+	// inside buildZobrist (its PRNG stream fixes every key value); the
+	// emission ORDER further down is a pure layout choice — see the
+	// LAYOUT note there.
 
 	// SLOTTAB[b] = piece-list slot for piece byte b: index | (color ? 16 : 0).
-	// Page-aligned so lda SLOTTAB,y never crosses.
 	var slotTab [256]byte
 	for i := range slotTab {
 		s := i >> 4
@@ -105,13 +102,11 @@ func main() {
 		}
 		slotTab[i] = byte(s)
 	}
-	b.WriteString("\n.align 256\n")
-	emit(&b, "SLOTTAB", slotTab[:])
 
 	// TYPEATK2[piece&$0F] = the attack bit this piece contributes.
 	// Pawns get their color's direction bit, so wrong-direction pawns
 	// fast-reject through the same AND as every other piece — no
-	// special case in attacked(). (Starts page-aligned after SLOTTAB.)
+	// special case in attacked().
 	var typeAtk2 [16]byte
 	atkBits := []byte{0, 0 /*per color below*/, atkKnight, atkDiag, atkOrtho, atkDiag | atkOrtho, atkKing, 0}
 	for typ := 1; typ <= 6; typ++ {
@@ -120,7 +115,6 @@ func main() {
 	}
 	typeAtk2[1] = atkWPawn
 	typeAtk2[8|1] = atkBPawn
-	emit(&b, "TYPEATK2", typeAtk2[:])
 
 	// Pawn-structure tables (pawnterm's rank-bitmask form). Per file,
 	// pawnterm builds an 8-bit mask of occupied ranks; these tables
@@ -159,15 +153,6 @@ func main() {
 		bBlockM[bits] = byte(1<<(lo+1) - 1)
 		bPassB[bits] = byte(passedBonus[7-lo])
 	}
-	b.WriteString("\n.align 256\n")
-	emit(&b, "RANKBIT", rankBit[:])
-	emit(&b, "WBLOCKM", wBlockM[:])
-	b.WriteString("\n.align 256\n")
-	emit(&b, "WPASSB", wPassB[:])
-	b.WriteString("\n.align 256\n")
-	emit(&b, "BBLOCKM", bBlockM[:])
-	b.WriteString("\n.align 256\n")
-	emit(&b, "BPASSB", bPassB[:])
 
 	// DBLTAB[bits] = 12 if the file holds two or more pawns (the flat
 	// doubled-pawn penalty magnitude; pawnterm applies the sign), else 0.
@@ -179,8 +164,6 @@ func main() {
 			dblTab[bits] = 12
 		}
 	}
-	b.WriteString("\n.align 256\n")
-	emit(&b, "DBLTAB", dblTab[:])
 
 	// Per-file pawn-term cache support (deep optimization review r4
 	// integration pass): FILEBIT[sq] = 1 << file for on-board 0x88
@@ -198,18 +181,15 @@ func main() {
 	for i := range spreadTab {
 		spreadTab[i] = byte(i | i<<1 | i>>1)
 	}
-	b.WriteString("\n.align 256\n")
-	emit(&b, "SPREADTAB", spreadTab[:])
-	b.WriteString("\n.align 128\n")
-	emit(&b, "FILEBIT", fileBit[:])
 
 	// Quarter-square multiply tables for the taper (eval's evmul):
 	// SQRLO/HI[i] = floor(i*i/4), ISQLO/HI[i] = floor((i-32)*(i-32)/4).
 	// a*b = f(a+b) - f(a-b) (exact for integers: a+b and a-b share
 	// parity). eval self-modifies the operand low byte to a (a byte of
-	// |MG-EG|) and indexes with Y = w and X = 32-w, so SQR reads index
-	// a+w (max 255+31 = 286) and ISQ reads a-w+32 (range 1..286);
-	// 512 entries cover both with room, page-aligned for abs,y.
+	// |MG-EG|) and indexes with Y = w (0..32, PHASEWX's capped weight)
+	// and X = 32-w, so SQR reads index a+w (max 255+32 = 287) and ISQ
+	// reads a-w+32 (max 255+31 = 286); 512 entries cover both with room,
+	// page-aligned for abs,y.
 	var sqrLo, sqrHi, isqLo, isqHi [512]byte
 	for i := range 512 {
 		q := i * i / 4
@@ -218,11 +198,6 @@ func main() {
 		q = d * d / 4
 		isqLo[i], isqHi[i] = byte(q), byte(q>>8)
 	}
-	b.WriteString("\n.align 256\n")
-	emit(&b, "SQRLO", sqrLo[:])
-	emit(&b, "SQRHI", sqrHi[:])
-	emit(&b, "ISQLO", isqLo[:])
-	emit(&b, "ISQHI", isqHi[:])
 
 	// TT addressing: TTPTR = TTBASE + index*8, index = (HASH1&0x0F)<<8 | HASH0.
 	// SHL3TAB/SHR5TAB split HASH0*8 across the pointer bytes; TTHITAB puts
@@ -233,21 +208,98 @@ func main() {
 		shr5Tab[i] = byte(i >> 5)
 		ttHiTab[i] = byte((i & 0x0F) << 3)
 	}
+
+	// PHASEWX[phase] = the /32 taper weight, with the >= 24 cap baked in
+	// (promotions can push PHASE past 24; the absolute ceiling, 9 queens
+	// + 2 rooks + 2 minors per side, is 88). Page-aligned so eval indexes
+	// PHASE directly with no cap compare.
+	var phaseWX [256]byte
+	for p := range 256 {
+		c := min(p, 24)
+		phaseWX[p] = byte((c*32 + 12) / 24)
+	}
+
+	zob := buildZobrist()
+
+	// ------------------------------------------------------------------
+	// LAYOUT (space optimization round 1, 2026-07-25). TABLES is bigger
+	// than all the engine's code, and it had never been packed: `.align`
+	// directives left 977 bytes of pure fill scattered through it (240 B
+	// after TYPEATK2, 232 after PHASEVAL, 137 after RATTACK, 128 each
+	// after WBLOCKM and FILEBIT, 104 after ORTHOOFF). The tables are now
+	// grouped so that every alignment boundary falls exactly on the end
+	// of a group, and ALL the small unaligned tables (plus hashstm) are
+	// packed into one run at the tail:
+	//
+	//   A  12 x 256 B page-aligned tables, back to back   (3072, 0 fill)
+	//   B  the four 512 B quarter-square tables           (2048, 0 fill)
+	//   C  RANKBIT(128) + WBLOCKM(256) + FILEBIT(128)     ( 512, 0 fill)
+	//   D  PSQT: 12 pages                                 (3072, 0 fill)
+	//   E  ZKEYS: 24 pages                                (6144, 0 fill)
+	//   F  CASTLEMASK(128) + every unaligned small table  ( 413, 0 fill)
+	//
+	// Each group's size is a multiple of 256, so the `.align 256` at each
+	// boundary is a no-op that documents (and enforces) the invariant.
+	//
+	// CYCLE-IDENTITY RULE for anything added here: an `abs,x`/`abs,y`
+	// read costs +1 cycle when base+index crosses a page, so every table
+	// must keep the page-crossing behaviour it had. Page-aligned tables
+	// indexed 0..255 (group A) and 0..127 (RANKBIT/FILEBIT/CASTLEMASK at
+	// offset $00/$80) never cross; WBLOCKM keeps its offset $80 (it is
+	// indexed 0..255 and DOES cross, as before); the group-F smalls are
+	// each laid out so their whole indexed range sits inside one page.
+	// TestTablePacking (internal/chesstest) asserts all of this.
+	// ------------------------------------------------------------------
+	var b strings.Builder
+	b.WriteString(tableComment)
+	b.WriteString("\n.segment \"TABLES\"\n")
+
+	// ---- group A: exactly-256-byte page-aligned tables ----
 	b.WriteString("\n.align 256\n")
+	emit(&b, "ATTACKTAB", attack[:])
+	emit(&b, "DELTATAB", delta[:])
+	emit(&b, "SLOTTAB", slotTab[:])
+	emit(&b, "WPASSB", wPassB[:])
+	emit(&b, "BBLOCKM", bBlockM[:])
+	emit(&b, "BPASSB", bPassB[:])
+	emit(&b, "DBLTAB", dblTab[:])
+	emit(&b, "SPREADTAB", spreadTab[:])
 	emit(&b, "SHL3TAB", shl3Tab[:])
-	b.WriteString("\n.align 256\n")
 	emit(&b, "SHR5TAB", shr5Tab[:])
-	b.WriteString("\n.align 256\n")
 	emit(&b, "TTHITAB", ttHiTab[:])
-	b.WriteString("\n.align 128\n")
+	emit(&b, "PHASEWX", phaseWX[:])
+
+	// ---- group B: quarter-square multiply tables (512 B each) ----
+	b.WriteString("\n.align 256\n")
+	emit(&b, "SQRLO", sqrLo[:])
+	emit(&b, "SQRHI", sqrHi[:])
+	emit(&b, "ISQLO", isqLo[:])
+	emit(&b, "ISQHI", isqHi[:])
+
+	// ---- group C: the 128-byte square table + WBLOCKM at offset $80 ----
+	b.WriteString("\n.align 256\n")
+	emit(&b, "RANKBIT", rankBit[:])
+	emit(&b, "WBLOCKM", wBlockM[:])
+	emit(&b, "FILEBIT", fileBit[:])
+
+	// ---- group D: PSQT planes ----
+	b.WriteString("\n.align 256\n")
+	emitPSQT(&b)
+
+	// ---- group E: Zobrist piece-square planes ----
+	b.WriteString("\n.align 256\n")
+	emit(&b, "ZKEYS", zob.keys[:])
+
+	// ---- group F: CASTLEMASK + every unaligned small table ----
+	b.WriteString("\n.align 256\n")
 	emit(&b, "CASTLEMASK", castleMask[:])
-	b.WriteString("\n")
+	emit(&b, "TYPEATK2", typeAtk2[:])
 	emitInts(&b, "KNIGHTOFF", knightOffs)
 	emitInts(&b, "KINGOFF", kingOffs)
 	emitInts(&b, "DIAGOFF", diagOffs)
 	emitInts(&b, "ORTHOOFF", orthoOffs)
-	emitPSQT(&b)
-	emitZobrist(&b)
+	emitPSQTPages(&b)
+	emitZobristSmall(&b, zob)
 	emitMopup(&b)
 
 	if err := os.WriteFile("asm/tables.s", []byte(b.String()), 0o644); err != nil {
@@ -256,8 +308,8 @@ func main() {
 	}
 }
 
-// emitMopup writes the FT2_MOPUP endgame mop-up material table (appended
-// at the TABLES tail so no existing table shifts).
+// emitMopup writes the FT2_MOPUP endgame mop-up material table (part of
+// the group-F run of unaligned small tables).
 //
 // MOPMATLO/MOPMATHI[8]: material value per piece type (index 0 empty,
 // 1..6 = P N B R Q K, 7 unused) as a 16-bit little-endian pair, exactly
@@ -265,8 +317,9 @@ func main() {
 // material-edge gate (winning side leads by >= a rook = 450).
 //
 // The centre-manhattan corner-distance (mirror mopupCMD: 0 centre .. 6
-// corner) is NOT a table here: this image has only ~240 free bytes and a
-// 64-byte table plus the routine overflows MAIN, so mopupterm computes it
+// corner) is NOT a table here: when the term was ported the image had only
+// ~240 free bytes and a 64-byte table plus the routine overflowed MAIN, so
+// mopupterm computes it
 // inline as cornerdist(file)+cornerdist(rank) with cornerdist(c in 0..7) =
 // (c>=4)? c&3 : (~c)&3 -> {3,2,1,0,0,1,2,3}. That reproduces mopupCMD's
 // values exactly; TestMopupEvalParity verifies the resulting eval to the
@@ -277,7 +330,6 @@ func emitMopup(b *strings.Builder) {
 	for i, v := range mat {
 		lo[i], hi[i] = byte(v), byte(v>>8)
 	}
-	b.WriteString("\n")
 	emit(b, "MOPMATLO", lo[:])
 	emit(b, "MOPMATHI", hi[:])
 }
@@ -303,7 +355,7 @@ func emit(b *strings.Builder, name string, data []byte) {
 // subtracts. TYPEPAGE0/1 give each type's table page for (zp),y access;
 // they are emitted as link-time expressions on PSQTBASE.
 func emitPSQT(b *strings.Builder) {
-	b.WriteString("\n.align 256\nPSQTBASE:\n")
+	b.WriteString("PSQTBASE:\n")
 	for t := range 6 {
 		var mglo, mghi, eglo, eghi [128]byte
 		for sq := range 128 {
@@ -326,8 +378,14 @@ func emitPSQT(b *strings.Builder) {
 		emit(b, fmt.Sprintf("PSQT_%s_EGLO", names[t]), eglo[:])
 		emit(b, fmt.Sprintf("PSQT_%s_EGHI", names[t]), eghi[:])
 	}
+}
+
+// emitPSQTPages writes the group-F companions of the PSQT block: the
+// per-type table-page pointers (link-time expressions on PSQTBASE) and
+// the per-type phase contribution.
+func emitPSQTPages(b *strings.Builder) {
 	// Table page pointers, indexed by piece type 1-6 (0 and 7 unused).
-	b.WriteString("\nTYPEPAGE0:\n        .byte 0")
+	b.WriteString("TYPEPAGE0:\n        .byte 0")
 	for t := range 6 {
 		fmt.Fprintf(b, ", >PSQTBASE+%d", t*2)
 	}
@@ -336,37 +394,35 @@ func emitPSQT(b *strings.Builder) {
 		fmt.Fprintf(b, ", >PSQTBASE+%d", t*2+1)
 	}
 	b.WriteString(", 0\n")
-	// Phase contribution per piece type, and phase -> /32 taper weight.
+	// Phase contribution per piece type.
 	b.WriteString("PHASEVAL:\n        .byte 0,0,1,1,2,4,0,0\n")
-	// PHASEWX[phase] over the whole byte range, with the >= 24 cap
-	// baked in (promotions can push PHASE past 24; the absolute
-	// ceiling, 9 queens + 2 rooks + 2 minors per side, is 88).
-	// Page-aligned so eval indexes PHASE directly with no cap compare.
-	var phaseWX [256]byte
-	for p := range 256 {
-		c := min(p, 24)
-		phaseWX[p] = byte((c*32 + 12) / 24)
-	}
-	b.WriteString(".align 256\n")
-	emit(b, "PHASEWX", phaseWX[:])
 }
 
-// emitZobrist writes 32-bit Zobrist keys kind-major: ZKEYS + kind*512
-// holds plane0[128] plane1[128] plane2[128] plane3[128] for that kind
-// (white P..K = kinds 0-5, black = 6-11, 0x88 squares). Every block
-// starts on a page boundary, so a pointer to it has lo byte 0 — the
-// ZPTR invariant established in evalinit. ZKHI0[piece&$0F] gives the
-// block's page directly; DIRTYTAB/TYPEPG0X/TYPEPG1X/PHASEV16 are
-// companion piece&$0F-indexed tables for the fused make-path updates.
-// Also emitted: side-to-move, castling-rights, and ep-file keys.
-func emitZobrist(b *strings.Builder) {
+// zobrist holds the generated Zobrist key material. The PRNG draw order
+// (piece-square planes, then side-to-move, then 16 castling-rights keys,
+// then 8 ep-file keys) is LOAD-BEARING — it fixes every key value, and
+// the hash-parity tests pin those values — so it is kept exactly as it
+// was when the keys were first generated, independently of the layout
+// order the tables are emitted in.
+type zobrist struct {
+	keys     [12 * 512]byte
+	stm      [4]byte
+	castling [16][4]byte
+	ep       [8][4]byte
+}
+
+// buildZobrist draws all key material. ZKEYS is kind-major: ZKEYS +
+// kind*512 holds plane0[128] plane1[128] plane2[128] plane3[128] for that
+// kind (white P..K = kinds 0-5, black = 6-11, 0x88 squares). Every block
+// starts on a page boundary, so a pointer to it has lo byte 0 — the ZPTR
+// invariant established in evalinit.
+func buildZobrist() *zobrist {
 	rnd := rand.New(rand.NewPCG(0x6502c4e5, 0x0a11babe))
 	key := func() [4]byte {
 		v := rnd.Uint32()
 		return [4]byte{byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)}
 	}
-
-	var keys [12 * 512]byte
+	z := &zobrist{}
 	for kind := range 12 {
 		for sq := range 128 {
 			if sq&0x88 != 0 {
@@ -374,13 +430,26 @@ func emitZobrist(b *strings.Builder) {
 			}
 			k := key()
 			for p := range 4 {
-				keys[kind*512+p*128+sq] = k[p]
+				z.keys[kind*512+p*128+sq] = k[p]
 			}
 		}
 	}
-	b.WriteString("\n.align 256\n")
-	emit(b, "ZKEYS", keys[:])
+	z.stm = key()
+	for i := range z.castling {
+		z.castling[i] = key()
+	}
+	for i := range z.ep {
+		z.ep[i] = key()
+	}
+	return z
+}
 
+// emitZobristSmall writes the group-F Zobrist companions: ZKHI0[piece&$0F]
+// (the piece's ZKEYS block page, so the hash update needs no multiply),
+// the DIRTYTAB/TYPEPG0X/TYPEPG1X/PHASEV16 piece&$0F-indexed tables for the
+// fused make-path updates, and the side-to-move / castling / ep keys plus
+// the unrolled hashstm routine.
+func emitZobristSmall(b *strings.Builder, z *zobrist) {
 	// The piece&$0F-indexed tables (color bit 3 + type bits 0-2).
 	pieceIdx := func(name string, val func(typ, kind int) string) {
 		fmt.Fprintf(b, "%s:\n        .byte ", name)
@@ -434,26 +503,23 @@ func emitZobrist(b *strings.Builder) {
 		return fmt.Sprintf("%d", phaseVals[typ])
 	})
 
-	stm := key()
 	fmt.Fprintf(b, "STMKEY:\n        .byte $%02X,$%02X,$%02X,$%02X\n",
-		stm[0], stm[1], stm[2], stm[3])
+		z.stm[0], z.stm[1], z.stm[2], z.stm[3])
 	// Unrolled side-to-move hash update (runs on every make/unmakenull;
 	// the immediate forms halve the looped version's cost).
 	b.WriteString("hashstm:\n")
-	for i, kb := range stm {
+	for i, kb := range z.stm {
 		fmt.Fprintf(b, "        lda HASH%d\n        eor #$%02X\n        sta HASH%d\n", i, kb, i)
 	}
 	b.WriteString("        rts\n")
 	// Castling keys: one 4-byte key per rights nibble value.
 	b.WriteString("CASTKEYS:\n")
-	for range 16 {
-		k := key()
+	for _, k := range z.castling {
 		fmt.Fprintf(b, "        .byte $%02X,$%02X,$%02X,$%02X\n", k[0], k[1], k[2], k[3])
 	}
 	// EP keys: by file; plus EPNONE = 0 handled by skipping the xor.
 	b.WriteString("EPKEYS:\n")
-	for range 8 {
-		k := key()
+	for _, k := range z.ep {
 		fmt.Fprintf(b, "        .byte $%02X,$%02X,$%02X,$%02X\n", k[0], k[1], k[2], k[3])
 	}
 }

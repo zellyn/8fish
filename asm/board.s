@@ -1247,4 +1247,51 @@ RATTACK:
         .byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00
         .byte $00,$00,$00,$00,$00,$00,$00
+
+; ---------------------------------------------------------------
+; mopfin / mopcd (FT2_MOPUP): the mop-up term's tail (close term + signed
+; apply) and its corner-distance helper. Placed HERE, immediately after
+; RATTACK, to fill the page-alignment fill between RATTACK's 375 bytes and
+; the page-aligned start of the generated tables (137 bytes that would
+; otherwise be wasted). Moving these 48 bytes out of CODE's tail is what
+; drops CODE below $7900 and the whole page-aligned TABLES base with it
+; (space round 1, 2026-07-25). mopupterm (engine.s, also TABLES) reaches
+; mopfin by `jmp mopfin` with A = manhattan(kings) and mopcd by
+; `jsr mopcd` — both absolute, so the move is transparent. Cold: nothing
+; here runs unless FT2_MOPUP is set.
+; ---------------------------------------------------------------
+mopfin: ; A = manhattan(losing,winning king); T2 = Edge*CMD (running B);
+        ; MULCNT = winner (0 white / 1 black). Add Close*(14-md), then apply.
+        sta T0                  ; md
+        lda #14
+        sec
+        sbc T0                  ; 14 - md (>= 0, md <= 14)
+        asl
+        asl                     ; *4 = Close*(14-md); C=0 (value <= 52)
+        adc T2                  ; B = Edge*CMD + Close term (<= 116, positive)
+        sta T2
+        ; apply B to SCORE, sign-extended, negated for a black winner
+        ; (B > 0, so -B is a negative byte -> hi = $FF). One 16-bit add.
+        ldy #0
+        lda T2
+        ldx MULCNT
+        beq :+
+        eor #$FF                ; -B (two's complement)
+        clc
+        adc #1
+        ldy #$FF                ; sign extension
+:       clc
+        adc SCORE
+        sta SCORE
+        tya
+        adc SCORE+1
+        sta SCORE+1
+        rts
+; mopcd: A = coordinate 0..7 -> centre corner distance (~c)&3 for c<4 else
+; c&3, i.e. {3,2,1,0,0,1,2,3}. Shared by the two CMD terms.
+mopcd:  cmp #4
+        bcs :+
+        eor #$FF
+:       and #$03
+        rts
 .segment "CODE"

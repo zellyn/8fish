@@ -284,20 +284,23 @@ FT_LMR    = $10         ; PVS zero-window scouts + late move reductions
 ;  for the mop-up + adaptive ports. The extraterm subroutine + RKCNT/XSTRUCT
 ;  scratch are gone; PWBITS/PBBITS and WBLOCKM/BBLOCKM (shared with pawnterm)
 ;  are untouched.
-FT_ASP    = $40         ; aspiration windows at the iterative-deepening
-                        ;  root (budget mode only): after iteration d
-                        ;  completes with score s (not a mate, d >= 1),
-                        ;  open iteration d+1 with (s-ASPDELTA, s+ASPDELTA)
-                        ;  and re-search on a fail-low/high, opening ONLY
-                        ;  the failing bound (asymmetric) until the score
-                        ;  lands inside the window, a mate appears, or the
-                        ;  third fail forces the full window. Root-only
-                        ;  cold code (aspiterate, engine.s); zero cost when
-                        ;  the bit is clear. Mirrors mirror.aspIterate with
-                        ;  AspirationParams{Delta:25, Policy:AspAsym}.
-                        ;  (bit was reserved for the canceled LMP port.)
-FT_CKVERIFY = $80       ; debug: verify make's gives-check against a
-                        ; full scan at every node (exit 101 on mismatch)
+; $40 free: was FT_ASP (aspiration windows at the ID root). REJECTED by
+;  its own asm SPRT (-21 +/- 32, 2026-07-21) and gated off ever since;
+;  removed 2026-07-25 in the space-optimization pass (SPACE round 1) to
+;  reclaim CODE for the pending check-extension/endgame-technique ports.
+;  The wrapper (aspiterate/aspbump/aspfull/itsearch) and its RAM state
+;  (ASPAL/AH/BL/BH/ASPFAIL at $0233-$0237) are gone; the budget-mode ID
+;  driver calls the plain `iterate` path again, which is byte-for-byte the
+;  FT_ASP-off tree. Re-porting is a mirror-verified exercise if the
+;  verdict ever flips (mirror.aspIterate is untouched).
+FT_CKVERIFY = $80       ; debug: verify make's gives-check against a full
+                        ; scan at every node (exit 101 on mismatch). The
+                        ; verify code itself is ASSEMBLY-TIME optional: the
+                        ; shipped image omits it entirely and only a
+                        ; `ca65 -D CKVERIFY` variant build (see
+                        ; internal/asmbuild.BuildVariant, same pattern as
+                        ; PTNOCACHE) contains it. The bit is still reserved
+                        ; so the variant's FEATURES encoding is unchanged.
 
 ; ---- Second feature byte (FEATURES2) ----
 FT2_ADAPT  = $04        ; adaptive time/effort management (mirror.SearchTimed
@@ -356,7 +359,6 @@ TT_EXACT = 3
 INF       = 32000
 MATE      = 30000
 TEMPO     = 10          ; side-to-move eval bonus, centipawns
-ASPDELTA  = 25          ; FT_ASP initial aspiration half-window (centipawns)
 
 ; ---- Absolute data ----
 PIECESQ    = $0800      ; 32 bytes: slots 0-15 white (0=king), 16-31 black
@@ -463,15 +465,8 @@ ITSTART0   = $0230      ; 24-bit CLOCK snapshot at iteration start
 ITSTART1   = $0231      ;  (predictive gate: est next = 2x last cost)
 ITSTART2   = $0232
 
-; FT_ASP aspiration state (budget-mode ID root; aspiterate in engine.s).
-; Cold once-per-(re)search code, so plain RAM: the live root window bounds
-; (ALPHA[0]/BETA[0] get clobbered as alpha is raised during the search, so
-; the window is held here across re-searches) and a fail counter.
-ASPAL      = $0233      ; 16-bit window alpha (score space)
-ASPAH      = $0234
-ASPBL      = $0235      ; 16-bit window beta
-ASPBH      = $0236
-ASPFAIL    = $0237      ; fails this iteration (0..3; 3 forces full window)
+; $0233-$0237 is free driver-scratch RAM (was FT_ASP's ASPAL/AH/BL/BH +
+; ASPFAIL aspiration-window state, removed 2026-07-25 with the feature).
 
 ; FT2_IMPROV improving-heuristic per-ply eval stack (improving.go's
 ; evalStack/evalValid). 16-bit static eval per ply, plus a per-ply

@@ -195,9 +195,16 @@ sdraw:  lda #0
         sta SCORE+1
         rts
 sdrawend:
+; debug (FT_CKVERIFY): cross-check the propagated in-check flag against a
+; full scan; a mismatch kills the run with code 101. ASSEMBLY-TIME
+; optional (space round 1, 2026-07-25): this is a pure debug assertion
+; that costs the shipped image 24 bytes of a nearly-full MAIN, so it is
+; built only into the `ca65 -D CKVERIFY` variant (asmbuild.BuildVariant,
+; same pattern as PTNOCACHE/RKNOCACHE); TestGiveCheckVerify builds that
+; variant. FEATURES bit $80 stays reserved so the variant's feature
+; encoding is unchanged.
+.ifdef CKVERIFY
 .ifndef NOEVAL
-        ; debug (FT_CKVERIFY): cross-check the propagated in-check flag
-        ; against a full scan; a mismatch kills the run with code 101
         lda FEATURES
         and #FT_CKVERIFY
         beq ckvdone
@@ -210,6 +217,7 @@ sdrawend:
         lda #101
         sta EXIT_TRAP
 ckvdone:
+.endif
 .endif
         ldy PLY
         lda #0                  ; (INCHK,y is NOT cleared here: it was

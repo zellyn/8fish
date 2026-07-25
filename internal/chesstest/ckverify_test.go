@@ -1,11 +1,38 @@
 package chesstest
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
 
-// TestGiveCheckVerify searches varied positions with FT_CKVERIFY set:
-// every node cross-checks make's propagated in-check flag against a
-// full attacked() scan and exits 101 on any mismatch.
+	"github.com/zellyn/chess6502/internal/asmbuild"
+)
+
+// buildCkVerify assembles the CKVERIFY engine variant: the give-check
+// cross-check is assembly-time optional (space round 1, 2026-07-25 — it
+// cost the shipped image 24 bytes of a nearly-full MAIN), so the assertion
+// exists only in this build. Same pattern as PTNOCACHE (ptcache_test.go).
+func buildCkVerify(t *testing.T) []byte {
+	t.Helper()
+	root := filepath.Join("..", "..")
+	if err := asmbuild.BuildVariant(root, "engine_ckverify", "CKVERIFY"); err != nil {
+		if err == asmbuild.ErrCA65NotInstalled {
+			t.Skip("ca65 not installed")
+		}
+		t.Fatal(err)
+	}
+	bin, err := os.ReadFile(filepath.Join("..", "..", "asm", "engine_ckverify.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+// TestGiveCheckVerify searches varied positions with FT_CKVERIFY set in the
+// CKVERIFY variant build: every node cross-checks make's propagated in-check
+// flag against a full attacked() scan and exits 101 on any mismatch.
 func TestGiveCheckVerify(t *testing.T) {
+	bin := buildCkVerify(t)
 	fens := []string{
 		"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
 		"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
@@ -20,7 +47,7 @@ func TestGiveCheckVerify(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		m, err := NewMachine(loadEngine(t), defs, pos, 0, nil)
+		m, err := NewMachine(bin, defs, pos, 0, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

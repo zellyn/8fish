@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"sort"
 	"sync"
@@ -10,82 +11,109 @@ import (
 
 // egPos is one endgame the engine must convert (or hold). The HERO is the
 // side to move in fen — every diagnosis FEN is 8fish-to-move from 8fish's
-// POV, so this convention keeps the corpus honest. want is the correct
-// result for the hero.
+// POV, so this convention keeps the corpus honest.
+//
+// `want` is the OBJECTIVELY CORRECT hero result, taken from an external
+// Stockfish 18 verification of every FEN (6 s/position; the `sf` field
+// records its hero-POV verdict). This is NOT optional bookkeeping: the
+// first version of this corpus was labelled from chess intuition plus the
+// loss diagnosis' prose, and an adversarial review found EIGHT labels
+// wrong — most embarrassingly `kpk-front` ("king in front of the pawn:
+// won"), which with WHITE to move is the textbook mutual-zugzwang DRAW
+// (1.Kc3 Kc5), and the three diagnosis FENs, which are all objectively
+// LOST for 8fish at the harvested ply rather than even-or-better. Labels
+// derived from our own shallow eval would have made this suite measure
+// "the ON engine beats its handicapped twin" and call it conversion.
+//
+// want values:
+//
+//	"win"  hero is objectively winning: converting is the correct result
+//	"draw" hero should hold exactly a draw
+//	"lost" hero is objectively LOST — kept in the corpus because the points
+//	       metric is a valid paired A/B on any position, but EXCLUDED from
+//	       the correct-result rate, since "correct" there means losing.
 type egPos struct {
 	name string
 	fen  string
-	want string // "win" | "draw"
+	want string // "win" | "draw" | "lost"
+	sf   string // external Stockfish 18 verdict, hero POV
 	note string
 }
 
 // convEndgame is the conversion corpus: the loss-diagnosis failures
-// (2026-07-25) plus textbook should-win / should-hold endgames. Every FEN
-// is hero-to-move and inside the phase gate (TestEndgameCorpusValid).
+// (2026-07-25) plus unconverted wins mined from the 300-game match log plus
+// textbook endgames. Every FEN is hero-to-move, legal, and inside the phase
+// gate (TestEndgameCorpusValid).
 var convEndgame = []egPos{
-	// ---- The diagnosis positions (8fish to move; it lost or drew these).
-	{"diag-g137", "8/2p2p2/3P4/1Pp2kp1/6p1/3K4/6PP/8 b - - 0 1", "win",
-		"8fish UP a pawn in a pure K+P ending; played c7d6 and LOST"},
-	{"diag-g246", "8/8/8/4N1pk/1K3p1p/1P3P2/P5n1/8 w - - 0 1", "draw",
-		"minor-piece ending, material even; 8fish LOST"},
-	{"diag-g61", "8/5p2/pk1P4/8/P5p1/3Pp1P1/2r1b1BP/4R1K1 b - - 0 1", "draw",
-		"R+B each, even and 8fish knew it; 8fish LOST"},
+	// ---- The diagnosis positions (8fish to move; it lost these). NOTE all
+	// three are objectively LOST at this ply, so the diagnosis' "even or
+	// better" framing describes the material count, not the position: the
+	// point of no return was EARLIER. They stay as regression ballast.
+	{"diag-g137", "8/2p2p2/3P4/1Pp2kp1/6p1/3K4/6PP/8 b - - 0 1", "lost", "cp -444 @d16",
+		"8fish UP a pawn in material, but the K+P ending is lost; it played c7d6 and LOST"},
+	{"diag-g246", "8/8/8/4N1pk/1K3p1p/1P3P2/P5n1/8 w - - 0 1", "lost", "cp -501 @d?",
+		"minor-piece ending, material even but objectively lost; 8fish LOST"},
+	{"diag-g61", "8/5p2/pk1P4/8/P5p1/3Pp1P1/2r1b1BP/4R1K1 b - - 0 1", "lost", "cp -362 @d?",
+		"R+B each, 8fish thought it was even; objectively lost; 8fish LOST"},
 
 	// ---- Unconverted wins HARVESTED from the same 300-game match log by
-	// TestHarvestEndgames: the 8fish-to-move, phase-gated endgame position
-	// where 8fish's own depth-6 score peaked, in games it then drew or lost.
-	// These are literally the half-points the diagnosis says we leak.
-	{"peak-g163", "8/2p5/2p3p1/8/7k/6p1/5r2/6K1 b - - 15 1", "win",
-		"g163 DRAW; peak +29997 (a seen mate, shuffled away)"},
-	{"peak-g34", "1b2k3/1P4p1/4p2p/4P3/3Q4/6P1/5P2/6K1 w - - 5 1", "win",
-		"g34 DRAW; peak +1029 (Q+2P vs B+2P)"},
-	{"peak-g194", "3r3k/R1R5/6P1/8/8/8/5PK1/8 w - - 5 1", "win",
-		"g194 DRAW; peak +914 (2R+2P vs R)"},
-	{"peak-g196", "8/8/8/3K1k2/3B4/8/5P2/8 w - - 7 1", "win",
-		"g196 DRAW; peak +434 (K+B+P vs K)"},
-	{"peak-g91", "8/b7/8/5p2/1k6/1P1K3p/3N1p1P/8 b - - 1 1", "win",
-		"g91 LOSS; peak +390 (B+3P vs N+2P, hero black)"},
-	{"peak-g229", "8/8/8/1K6/P1Pk4/8/8/6r1 b - - 0 1", "win",
-		"g229 DRAW; peak +373 (R vs 2P, hero black)"},
-	{"peak-g234", "8/4k3/R3P3/2P3K1/8/2r5/8/8 w - - 7 1", "win",
-		"g234 DRAW; peak +351 (R+2P vs R — rook technique)"},
-	{"peak-g132", "2R5/1P2p3/3k2pp/4p3/8/1r5P/3K2P1/8 w - - 3 1", "win",
-		"g132 DRAW; peak +335 (R+b7 passer vs R)"},
-	{"peak-g2", "8/P4k2/5p1p/3b4/6P1/3pK3/3B4/8 w - - 4 1", "win",
-		"g2 DRAW; peak +233 (bishops, a7 passer)"},
-	{"peak-g8", "8/p3k2p/Ppr3pP/2P2p2/1B2p3/4P3/4KPP1/8 w - - 1 1", "win",
-		"g8 DRAW / g288 LOSS from the same position; peak +229"},
-	{"peak-g48", "3r4/pp5p/3bk1pP/P1pR1p2/2P1p3/1PB1P3/4KPP1/8 w - - 1 1", "win",
-		"g48 DRAW; peak +120 (R+B each, h6 passer)"},
+	// TestHarvestEndgames (the 8fish-to-move, phase-gated position where its
+	// own depth-6 score peaked, in games it drew or lost). CAVEAT: these are
+	// selected on the OFF engine's own inflated peak score, so several turn
+	// out not to be wins at all — the Stockfish column is what decides.
+	{"peak-g163", "8/2p5/2p3p1/8/7k/6p1/5r2/6K1 b - - 15 1", "win", "mate",
+		"g163 DRAW; 8fish saw mate (+29997) and shuffled it away"},
+	{"peak-g34", "1b2k3/1P4p1/4p2p/4P3/3Q4/6P1/5P2/6K1 w - - 5 1", "win", "decisive",
+		"g34 DRAW; Q+2P vs B+2P"},
+	{"peak-g194", "3r3k/R1R5/6P1/8/8/8/5PK1/8 w - - 5 1", "win", "decisive",
+		"g194 DRAW; 2R+2P vs R"},
+	{"peak-g196", "8/8/8/3K1k2/3B4/8/5P2/8 w - - 7 1", "win", "decisive",
+		"g196 DRAW; K+B+P vs K"},
+	{"peak-g91", "8/b7/8/5p2/1k6/1P1K3p/3N1p1P/8 b - - 1 1", "draw", "cp 0 @d58",
+		"g91 LOSS; 8fish's eval said +390, Stockfish says DRAWN"},
+	{"peak-g229", "8/8/8/1K6/P1Pk4/8/8/6r1 b - - 0 1", "win", "decisive",
+		"g229 DRAW; R vs 2P, hero black"},
+	{"peak-g234", "8/4k3/R3P3/2P3K1/8/2r5/8/8 w - - 7 1", "draw", "cp 0 @d76",
+		"g234 DRAW; R+2P vs R — a CORRECT draw, our +351 was wrong"},
+	{"peak-g132", "2R5/1P2p3/3k2pp/4p3/8/1r5P/3K2P1/8 w - - 3 1", "win", "decisive",
+		"g132 DRAW; R+b7 passer vs R"},
+	{"peak-g2", "8/P4k2/5p1p/3b4/6P1/3pK3/3B4/8 w - - 4 1", "draw", "cp 0 @d54",
+		"g2 DRAW; bishops + a7 passer — a CORRECT draw"},
+	{"peak-g8", "8/p3k2p/Ppr3pP/2P2p2/1B2p3/4P3/4KPP1/8 w - - 1 1", "lost", "cp -349 @d27",
+		"g8 DRAW / g288 LOSS; our +229 was badly wrong — the hero is losing"},
+	{"peak-g48", "3r4/pp5p/3bk1pP/P1pR1p2/2P1p3/1PB1P3/4KPP1/8 w - - 1 1", "draw", "cp -25 @d25",
+		"g48 DRAW; our +120 was wrong, it is level-to-slightly-worse"},
 
-	// ---- Textbook K+P: the class g137 belongs to.
-	{"kpk-front", "8/8/8/3k4/8/3K4/3P4/8 w - - 0 1", "win",
-		"king in front of the pawn: won"},
-	{"kpk-file-e", "8/8/4k3/8/8/4K3/4P3/8 w - - 0 1", "win",
+	// ---- Textbook K+P.
+	{"kpk-front", "8/8/8/3k4/8/3K4/3P4/8 w - - 0 1", "draw", "cp 0 @d67",
+		"MUTUAL ZUGZWANG: with WHITE to move this is DRAWN (1.Kc3 Kc5). " +
+			"NOTE mopup_conversion_test.go's KPK-win carries the same FEN " +
+			"labelled a win — that label is wrong too"},
+	{"kpk-file-e", "8/8/4k3/8/8/4K3/4P3/8 w - - 0 1", "win", "decisive",
 		"king in front, pawn on the 2nd, reserve tempo: won"},
-	{"kpk-rookdraw", "8/8/8/8/8/k7/P7/K7 w - - 0 1", "draw",
+	{"kpk-rookdraw", "8/8/8/8/8/k7/P7/K7 w - - 0 1", "draw", "cp 0",
 		"rook pawn, defender in the corner: drawn — must NOT be over-valued"},
-	{"kpk-blocked", "8/8/8/3k4/3p4/3K4/8/8 w - - 0 1", "draw",
+	{"kpk-blocked", "8/8/8/3k4/3p4/3K4/8/8 w - - 0 1", "draw", "cp 0",
 		"blocked pawn, hero is the DEFENDER: must hold"},
 
-	// ---- Rule of the square (the cheap unstoppable-passer knowledge).
-	{"square-win", "8/6k1/8/8/8/8/P4K2/8 w - - 0 1", "win",
+	// ---- Rule of the square.
+	{"square-win", "8/6k1/8/8/8/8/P4K2/8 w - - 0 1", "win", "decisive",
 		"black king OUTSIDE the square of the a-pawn: won by running it"},
-	{"square-draw", "8/5k2/8/8/8/8/P4K2/8 w - - 0 1", "draw",
+	{"square-draw", "8/5k2/8/8/8/8/P4K2/8 w - - 0 1", "draw", "cp 0",
 		"black king INSIDE the square by one file: drawn — the term must not lie"},
 
 	// ---- Outside / distant passer.
-	{"outside-passer", "8/8/8/5k2/1P4p1/8/6K1/8 w - - 0 1", "win",
-		"distant b-pawn decoys the king off the g-pawn"},
-	{"two-connected", "8/8/8/1k6/8/8/PP4K1/8 w - - 0 1", "win",
+	{"outside-passer", "8/8/8/5k2/1P4p1/8/6K1/8 w - - 0 1", "draw", "cp 0 @d64",
+		"looks like a distant-passer win; Stockfish says DRAWN"},
+	{"two-connected", "8/8/8/1k6/8/8/PP4K1/8 w - - 0 1", "win", "decisive",
 		"K+2P connected vs bare king"},
-	{"k2p-vs-kp", "8/8/3k4/4p3/P3P3/2K5/8/8 w - - 0 1", "win",
+	{"k2p-vs-kp", "8/8/3k4/4p3/P3P3/2K5/8/8 w - - 0 1", "win", "decisive",
 		"K+2P vs K+P: outside a-pawn decoys, then the king eats e5"},
 
 	// ---- Rook endings.
-	{"lucena", "1K6/1P1k4/8/8/8/8/7r/2R5 w - - 0 1", "win",
+	{"lucena", "1K6/1P1k4/8/8/8/8/7r/2R5 w - - 0 1", "win", "decisive",
 		"Lucena: R+P vs R, bridge-building win"},
-	{"rook-behind", "7r/7p/8/1P6/8/6k1/1R6/6K1 w - - 0 1", "draw",
+	{"rook-behind", "7r/7p/8/1P6/8/6k1/1R6/6K1 w - - 0 1", "draw", "cp 0 @d34+",
 		"R+P each, both rooks behind their own passer (Tarrasch); must not be thrown"},
 }
 
@@ -106,7 +134,10 @@ func egPlayOut(t *testing.T, fen string, white, black PlayerCfg, maxPlies int, s
 	t.Helper()
 	start, err := ParseFEN(fen)
 	if err != nil {
-		t.Fatalf("fen %q: %v", fen, err)
+		// Errorf, NOT Fatalf: runEGSuite calls this from worker goroutines,
+		// where FailNow is a testing misuse (it would leak the run).
+		t.Errorf("fen %q: %v", fen, err)
+		return "parse-error", 0.5, 0
 	}
 	we, be := white.engine(), black.engine()
 	rnd := rand.New(rand.NewPCG(seed, 0x5eed))
@@ -214,6 +245,8 @@ func runEGSuite(t *testing.T, heroEG, oppEG EndgameParams, cbudget uint64, runs,
 				t.Errorf("%s: %v", pos.name, err)
 				return
 			}
+			// NOTE egPlayOut must not FailNow from this goroutine; it takes
+			// the same t only to Errorf. See egPlayOut.
 			heroWhite := p.Side == 0
 			hero, opp := egCfg(heroEG, cbudget), egCfg(oppEG, cbudget)
 			w, b := hero, opp
@@ -247,16 +280,135 @@ func runEGSuite(t *testing.T, heroEG, oppEG EndgameParams, cbudget uint64, runs,
 	return out
 }
 
-// egScoreOf turns a tally into the hero's points and the count of results
-// matching `want`.
-func egScoreOf(o *egOutcome, want string) (pts float64, correct int) {
+// egScoreOf turns a tally into three DISTINCT numbers, kept separate on
+// purpose because the review of the first version showed they were being
+// conflated:
+//
+//	pts       the hero's MATCH SCORE (win 1, draw 0.5) against the fixed
+//	          defender. Needs no ground truth, so it is the honest A/B
+//	          metric — but it REWARDS beating a weaker twin in an
+//	          objectively drawn position, so it is not a "conversion rate".
+//	correct   results that reach at least the objectively correct outcome.
+//	          Only counted for want "win"/"draw"; positions where the hero is
+//	          objectively LOST are excluded (counted==false), because there
+//	          "correct" would mean losing.
+//	over      results BETTER than the objective outcome — wins in a drawn
+//	          position, or anything but a loss in a lost one. This is the
+//	          part of a pts gain that is "outplayed the handicapped twin",
+//	          NOT endgame technique, and it must be reported separately or
+//	          the headline overstates the feature.
+func egScoreOf(o *egOutcome, want string) (pts float64, correct int, over int, counted bool) {
 	pts = float64(o.wins) + 0.5*float64(o.draws)
-	if want == "win" {
-		correct = o.wins
-	} else {
-		correct = o.wins + o.draws
+	switch want {
+	case "win":
+		return pts, o.wins, 0, true
+	case "draw":
+		return pts, o.wins + o.draws, o.wins, true
+	default: // "lost": no defensible "correct" target
+		return pts, 0, o.wins + o.draws, false
 	}
-	return
+}
+
+// egPaired is a PAIRED comparison of two arms over the corpus. The unit of
+// independence is the POSITION, not the game: the runs within a position
+// differ only in the dither seed and are strongly correlated, so an
+// error bar computed over 500 games would be fraudulently tight (the review
+// caught exactly this). N here is 25.
+type egPaired struct {
+	n             int
+	meanDelta     float64 // mean per-position pts delta (out of egConvRuns)
+	stderr        float64
+	totalDelta    float64
+	better, worse int
+	correctDelta  int
+	overA, overB  int
+	// ptsByClass splits the pts delta by the position's OBJECTIVE class, so
+	// the share of the gain that comes from actually converting WON endings is
+	// visible next to the share that is merely beating a weaker twin in a
+	// drawn or lost one.
+	ptsByClass map[string]float64
+	nByClass   map[string]int
+	ptsA, ptsB float64
+	okA, okB   int
+	okDenom    int
+	wA, dA, lA int
+	wB, dB, lB int
+}
+
+// lo/hi are the 95% paired CI on the mean per-position delta.
+func (p *egPaired) lo() float64 { return p.meanDelta - 1.96*p.stderr }
+func (p *egPaired) hi() float64 { return p.meanDelta + 1.96*p.stderr }
+
+// sig reports whether the paired CI excludes zero.
+func (p *egPaired) sig() string {
+	switch {
+	case p.lo() > 0:
+		return "SIG+"
+	case p.hi() < 0:
+		return "SIG-"
+	}
+	return "ns"
+}
+
+func (p *egPaired) String() string {
+	return fmt.Sprintf("pts %.1f -> %.1f (total %+.1f); per-position delta %+.2f +/- %.2f [%+.2f,%+.2f] %s (%d better / %d worse of %d); "+
+		"pts delta BY OBJECTIVE CLASS: won %+.1f (n=%d) / drawn %+.1f (n=%d) / lost %+.1f (n=%d); "+
+		"correct %d -> %d of %d (%+d); better-than-objective %d -> %d; W/D/L %d/%d/%d -> %d/%d/%d",
+		p.ptsA, p.ptsB, p.totalDelta, p.meanDelta, p.stderr, p.lo(), p.hi(), p.sig(),
+		p.better, p.worse, p.n,
+		p.ptsByClass["win"], p.nByClass["win"], p.ptsByClass["draw"], p.nByClass["draw"],
+		p.ptsByClass["lost"], p.nByClass["lost"],
+		p.okA, p.okB, p.okDenom, p.correctDelta,
+		p.overA, p.overB, p.wA, p.dA, p.lA, p.wB, p.dB, p.lB)
+}
+
+// egCompare builds the paired summary of arm B against arm A.
+func egCompare(t *testing.T, resA, resB map[string]*egOutcome) *egPaired {
+	t.Helper()
+	p := &egPaired{ptsByClass: map[string]float64{}, nByClass: map[string]int{}}
+	var deltas []float64
+	for _, pos := range convEndgame {
+		a, b := resA[pos.name], resB[pos.name]
+		if a == nil || b == nil {
+			t.Errorf("%s: missing from an arm — the corpus entry failed to run", pos.name)
+			continue
+		}
+		pa, ca, oa, counted := egScoreOf(a, pos.want)
+		pb, cb, ob, _ := egScoreOf(b, pos.want)
+		d := pb - pa
+		deltas = append(deltas, d)
+		p.totalDelta += d
+		switch {
+		case d > 0:
+			p.better++
+		case d < 0:
+			p.worse++
+		}
+		p.ptsA, p.ptsB = p.ptsA+pa, p.ptsB+pb
+		p.ptsByClass[pos.want] += d
+		p.nByClass[pos.want]++
+		p.overA, p.overB = p.overA+oa, p.overB+ob
+		if counted {
+			p.okA, p.okB = p.okA+ca, p.okB+cb
+			p.correctDelta += cb - ca
+			p.okDenom += egConvRuns
+		}
+		p.wA, p.dA, p.lA = p.wA+a.wins, p.dA+a.draws, p.lA+a.losses
+		p.wB, p.dB, p.lB = p.wB+b.wins, p.dB+b.draws, p.lB+b.losses
+	}
+	p.n = len(deltas)
+	if p.n == 0 {
+		return p
+	}
+	p.meanDelta = p.totalDelta / float64(p.n)
+	if p.n > 1 {
+		var ss float64
+		for _, d := range deltas {
+			ss += (d - p.meanDelta) * (d - p.meanDelta)
+		}
+		p.stderr = math.Sqrt(ss/float64(p.n-1)) / math.Sqrt(float64(p.n))
+	}
+	return p
 }
 
 const (
@@ -285,27 +437,29 @@ func TestEndgameConversion(t *testing.T) {
 	t.Logf("=== ARM B: hero EG ON  vs defender OFF (the term under test) ===")
 	resOn := runEGSuite(t, on, off, egConvBudget, egConvRuns, egConvPlies, egConvWork)
 
-	var ptsOff, ptsOn float64
-	var okOff, okOn int
-	t.Logf("%-15s %-5s | %-9s %-6s | %-9s %-6s | delta", "position", "want", "OFF W/D/L", "moves", "ON W/D/L", "moves")
+	t.Logf("%-15s %-5s %-14s | %-9s %-6s | %-9s %-6s | delta",
+		"position", "want", "stockfish", "OFF W/D/L", "moves", "ON W/D/L", "moves")
 	for _, pos := range convEndgame {
 		a, b := resOff[pos.name], resOn[pos.name]
 		if a == nil || b == nil {
 			continue
 		}
-		pa, ca := egScoreOf(a, pos.want)
-		pb, cb := egScoreOf(b, pos.want)
-		ptsOff += pa
-		ptsOn += pb
-		okOff += ca
-		okOn += cb
-		t.Logf("%-15s %-5s | %d/%d/%d       %-6s | %d/%d/%d       %-6s | %+.1f pts %+d correct",
-			pos.name, pos.want, a.wins, a.draws, a.losses, a.avgMoves(),
-			b.wins, b.draws, b.losses, b.avgMoves(), pb-pa, cb-ca)
+		pa, ca, _, counted := egScoreOf(a, pos.want)
+		pb, cb, _, _ := egScoreOf(b, pos.want)
+		corr := fmt.Sprintf("%+d correct", cb-ca)
+		if !counted {
+			corr = "(lost: excluded)"
+		}
+		t.Logf("%-15s %-5s %-14s | %d/%d/%d       %-6s | %d/%d/%d       %-6s | %+.1f pts %s",
+			pos.name, pos.want, pos.sf, a.wins, a.draws, a.losses, a.avgMoves(),
+			b.wins, b.draws, b.losses, b.avgMoves(), pb-pa, corr)
 	}
-	n := len(convEndgame) * egConvRuns
-	t.Logf("TOTAL: OFF %.1f/%d pts, %d/%d correct  ->  ON %.1f/%d pts, %d/%d correct  (delta %+.1f pts, %+d correct)",
-		ptsOff, n, okOff, n, ptsOn, n, okOn, n, ptsOn-ptsOff, okOn-okOff)
+	p := egCompare(t, resOff, resOn)
+	t.Logf("HEADLINE (hero ON vs hero OFF, common fixed OFF defender):")
+	t.Logf("  %s", p)
+	t.Logf("  NOTE the error bar is paired over the %d POSITIONS (runs within a "+
+		"position share everything but the dither seed, so a per-GAME error bar "+
+		"would be fraudulently tight).", p.n)
 	for _, pos := range convEndgame {
 		t.Logf("  %-15s %s", pos.name, pos.note)
 	}
@@ -322,21 +476,43 @@ func TestEndgameConversionBoth(t *testing.T) {
 	off, on := EndgameParams{}, DefaultEndgame
 	resOff := runEGSuite(t, off, off, egConvBudget, egConvRuns, egConvPlies, egConvWork)
 	resOn := runEGSuite(t, on, on, egConvBudget, egConvRuns, egConvPlies, egConvWork)
-	var ptsOff, ptsOn float64
-	var okOff, okOn int
 	for _, pos := range convEndgame {
 		a, b := resOff[pos.name], resOn[pos.name]
-		pa, ca := egScoreOf(a, pos.want)
-		pb, cb := egScoreOf(b, pos.want)
-		ptsOff, ptsOn = ptsOff+pa, ptsOn+pb
-		okOff, okOn = okOff+ca, okOn+cb
+		if a == nil || b == nil {
+			continue
+		}
 		t.Logf("%-15s want=%-5s bothOFF %d/%d/%d (%s)  bothON %d/%d/%d (%s)",
 			pos.name, pos.want, a.wins, a.draws, a.losses, a.avgMoves(),
 			b.wins, b.draws, b.losses, b.avgMoves())
 	}
-	n := len(convEndgame) * egConvRuns
-	t.Logf("TOTAL both-sides: OFF %.1f/%d (%d correct) -> ON %.1f/%d (%d correct)  delta %+.1f pts %+d correct",
-		ptsOff, n, okOff, ptsOn, n, okOn, ptsOn-ptsOff, okOn-okOff)
+	t.Logf("BOTH-SIDES: %s", egCompare(t, resOff, resOn))
+}
+
+// egRunArms runs each arm's hero against the fixed OFF defender and reports
+// every arm PAIRED against the first arm (which must be the OFF baseline),
+// with a per-position error bar. Without the error bar these tables invite
+// exactly the mistake the review caught: reading a 2-3 pts difference on a
+// 25-position screen as a verdict.
+func egRunArms(t *testing.T, arms []struct {
+	name string
+	eg   EndgameParams
+}) {
+	t.Helper()
+	var baseRes map[string]*egOutcome
+	for i, arm := range arms {
+		res := runEGSuite(t, arm.eg, EndgameParams{}, egConvBudget, egConvRuns, egConvPlies, egConvWork)
+		if i == 0 {
+			baseRes = res
+			p := egCompare(t, res, res)
+			t.Logf("%-10s  pts %.1f  correct %d/%d  W/D/L %d/%d/%d  (baseline)",
+				arm.name, p.ptsA, p.okA, p.okDenom, p.wA, p.dA, p.lA)
+			continue
+		}
+		p := egCompare(t, baseRes, res)
+		t.Logf("%-10s  pts %.1f (%+.1f)  per-pos %+.2f +/- %.2f %-4s  correct %d/%d (%+d)  W/D/L %d/%d/%d",
+			arm.name, p.ptsB, p.totalDelta, p.meanDelta, p.stderr, p.sig(),
+			p.okB, p.okDenom, p.correctDelta, p.wB, p.dB, p.lB)
+	}
 }
 
 // TestEndgameConversionAblate runs the isolated (hero-only) conversion
@@ -366,20 +542,7 @@ func TestEndgameConversionAblate(t *testing.T) {
 		{"rbehind", only(func(p *EndgameParams) { p.RookBehind = base.RookBehind })},
 		{"all", base},
 	}
-	n := len(convEndgame) * egConvRuns
-	for _, arm := range arms {
-		res := runEGSuite(t, arm.eg, EndgameParams{}, egConvBudget, egConvRuns, egConvPlies, egConvWork)
-		var pts float64
-		var ok, w, d, l int
-		for _, pos := range convEndgame {
-			o := res[pos.name]
-			p, c := egScoreOf(o, pos.want)
-			pts += p
-			ok += c
-			w, d, l = w+o.wins, d+o.draws, l+o.losses
-		}
-		t.Logf("%-10s  %.1f/%d pts   %d/%d correct   W/D/L %d/%d/%d", arm.name, pts, n, ok, n, w, d, l)
-	}
+	egRunArms(t, arms)
 }
 
 // TestEndgameConversionDropOne is the leave-one-out screen: the full set
@@ -413,20 +576,7 @@ func TestEndgameConversionDropOne(t *testing.T) {
 		{"pking-x2", drop(func(p *EndgameParams) { p.PassKingOur, p.PassKingThem = 12, 8 })},
 		{"phase8", drop(func(p *EndgameParams) { p.PhaseMax = 8 })},
 	}
-	n := len(convEndgame) * egConvRuns
-	for _, arm := range arms {
-		res := runEGSuite(t, arm.eg, EndgameParams{}, egConvBudget, egConvRuns, egConvPlies, egConvWork)
-		var pts float64
-		var ok, w, d, l int
-		for _, pos := range convEndgame {
-			o := res[pos.name]
-			p, c := egScoreOf(o, pos.want)
-			pts += p
-			ok += c
-			w, d, l = w+o.wins, d+o.draws, l+o.losses
-		}
-		t.Logf("%-10s  %.1f/%d pts   %d/%d correct   W/D/L %d/%d/%d", arm.name, pts, n, ok, n, w, d, l)
-	}
+	egRunArms(t, arms)
 }
 
 // TestEndgameConversionRound2 refines on top of round 1's verdict (the
@@ -464,20 +614,7 @@ func TestEndgameConversionRound2(t *testing.T) {
 			}
 		})},
 	}
-	n := len(convEndgame) * egConvRuns
-	for _, arm := range arms {
-		res := runEGSuite(t, arm.eg, EndgameParams{}, egConvBudget, egConvRuns, egConvPlies, egConvWork)
-		var pts float64
-		var ok, w, d, l int
-		for _, pos := range convEndgame {
-			o := res[pos.name]
-			p, c := egScoreOf(o, pos.want)
-			pts += p
-			ok += c
-			w, d, l = w+o.wins, d+o.draws, l+o.losses
-		}
-		t.Logf("%-10s  %.1f/%d pts   %d/%d correct   W/D/L %d/%d/%d", arm.name, pts, n, ok, n, w, d, l)
-	}
+	egRunArms(t, arms)
 }
 
 // TestEndgameSmoke is the quick wiring/timing check.
@@ -544,4 +681,39 @@ func TestEndgameHarnessPOV(t *testing.T) {
 			t.Logf("%-12s hero=%.1f reason=%s moves=%d", c.name, res, reason, moves)
 		}
 	}
+}
+
+// TestEndgameConversionDecide pairs the SHIPPED set directly against the
+// variants it was chosen over, so the two ship/kill decisions get a CI on
+// the decision-relevant DIFFERENCE rather than on each arm's gap to OFF.
+// (The review's point: on a 25-position screen a 2-3 pts table difference is
+// not a verdict.)
+func TestEndgameConversionDecide(t *testing.T) {
+	if testing.Short() {
+		t.Skip("decision screen is slow")
+	}
+	ship := DefaultEndgame
+	withUnstop := ship
+	withUnstop.Unstoppable = EndgameDesigned.Unstoppable
+	withUnstop80 := ship
+	withUnstop80.Unstoppable = 80
+	withRB := ship
+	withRB.RookBehind = EndgameDesigned.RookBehind
+
+	shipRes := runEGSuite(t, ship, EndgameParams{}, egConvBudget, egConvRuns, egConvPlies, egConvWork)
+	for _, c := range []struct {
+		name string
+		eg   EndgameParams
+	}{
+		{"+unstop250", withUnstop},
+		{"+unstop80", withUnstop80},
+		{"+rbehind20", withRB},
+		{"=designed(both)", EndgameDesigned},
+	} {
+		res := runEGSuite(t, c.eg, EndgameParams{}, egConvBudget, egConvRuns, egConvPlies, egConvWork)
+		p := egCompare(t, shipRes, res)
+		t.Logf("shipped -> shipped%-16s  per-position delta %+.2f +/- %.2f [%+.2f,%+.2f] %-4s  pts %+.1f  correct %+d",
+			c.name, p.meanDelta, p.stderr, p.lo(), p.hi(), p.sig(), p.totalDelta, p.correctDelta)
+	}
+	t.Log("A NEGATIVE delta here means the extra term makes the shipped set WORSE.")
 }

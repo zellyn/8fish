@@ -171,8 +171,39 @@ func TestEndgameSanity(t *testing.T) {
 			"7k/8/8/8/8/8/P7/K7 w - - 0 1", "8/8/8/8/8/1k6/P7/K7 w - - 0 1", true},
 		{"king ahead of its own passer beats king blocking from behind",
 			"8/3k4/8/4K3/3P4/8/8/8 w - - 0 1", "8/3k4/8/8/3P4/3K4/8/8 w - - 0 1", true},
-		{"rook behind our own passer beats rook in front of it",
-			"7k/8/8/3P4/8/8/8/3RK3 w - - 0 1", "3R3k/8/8/3P4/8/8/8/4K3 w - - 0 1", true},
+	}
+	// RookBehind and Unstoppable need ISOLATED cases: the review found the
+	// original "rook behind" case passed on the strength of Unstoppable's
+	// +250 (position b blocked the pawn's path with the rook, killing the
+	// square rule), so it would still have passed with RookBehind's sign
+	// inverted. Screen each alone.
+	egOnly := func(fen string, f func(*EndgameParams)) int {
+		e := NewEngine()
+		e.EG = EndgameParams{Enable: true, PhaseMax: EndgameDesigned.PhaseMax}
+		f(&e.EG)
+		e.SetPosition(mustFEN(t, fen))
+		return e.egEval()
+	}
+	rb := func(fen string) int {
+		return egOnly(fen, func(p *EndgameParams) { p.RookBehind = EndgameDesigned.RookBehind })
+	}
+	// Same pawn, same kings, ONLY the rook moves: behind (d1) vs beside (a5).
+	if a, b := rb("7k/8/8/3P4/8/8/8/3R1K2 w - - 0 1"), rb("7k/8/8/R2P4/8/8/8/5K2 w - - 0 1"); a <= b {
+		t.Errorf("RookBehind not isolated-correct: behind=%+d beside=%+d (want behind > beside)", a, b)
+	} else {
+		t.Logf("%-52s eg(a)=%+5d eg(b)=%+5d", "RookBehind alone: rook behind our passer > beside it", a, b)
+	}
+	// THEIR rook behind OUR passer must score for THEM (negative for us).
+	if a := rb("7k/8/8/3P4/8/8/8/3r1K2 w - - 0 1"); a >= 0 {
+		t.Errorf("RookBehind sign: enemy rook behind our passer scored %+d, want < 0", a)
+	}
+	// Unstoppable alone, with the path clear in BOTH positions so only the
+	// square rule can differ.
+	un := func(fen string) int {
+		return egOnly(fen, func(p *EndgameParams) { p.Unstoppable = EndgameDesigned.Unstoppable })
+	}
+	if a, b := un("7k/8/8/8/8/8/P7/K7 w - - 0 1"), un("8/8/8/8/8/1k6/P7/K7 w - - 0 1"); a <= b {
+		t.Errorf("Unstoppable not isolated-correct: outside=%+d inside=%+d", a, b)
 	}
 	for _, c := range cases {
 		ea, eb := egOf(c.a), egOf(c.b)

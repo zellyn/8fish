@@ -94,22 +94,39 @@ type EndgameParams struct {
 // on reports whether the endgame-technique term is active.
 func (p *EndgameParams) on() bool { return p.Enable }
 
-// DefaultEndgame is the SCREENED endgame-technique set (conversion suite,
-// 500 games/arm, hero-only; docs/results.md 2026-07-25). Gate phase <= 6,
-// matching the mop-up's endgame definition (phase 8 measured identical:
-// 332.5 vs 333.5 pts, so the tighter gate is kept).
+// DefaultEndgame is the SCREENED endgame-technique set (conversion suite, 25
+// positions x 20 dither seeds, hero-only vs a fixed OFF defender;
+// docs/results.md 2026-07-25). Versus the shipped engine it is
+// **+2.08 +/- 0.71 match points per position, 95% CI [+0.69,+3.47]** — the
+// error bar is PAIRED OVER POSITIONS, since the 20 runs within a position
+// share everything but the dither seed (an earlier version quoted a
+// per-GAME bar over 500 games, which was fraudulently tight).
 //
-// Two designed terms measured NEGATIVE or neutral and are shipped OFF (the
-// knobs stay so the negative result is reproducible — see
-// TestEndgameConversionDropOne / Round2):
+// Gate phase <= 6, matching the mop-up. Phase 8 measured indistinguishable
+// (+1.26 +/- 0.70 vs +1.30 +/- 0.70), so the tighter gate is kept on the
+// principle that a narrower gate cannot hurt the middlegame.
 //
-//   - Unstoppable (rule of the square): 250 cost −17.5 pts and 80 cost
-//     −12.0 pts versus leaving it out. Mechanism: the bonus flips with the
-//     side to move (the defender's free tempo), so it makes the leaf eval
+// Two designed terms are shipped OFF (knobs kept so the result stays
+// reproducible — TestEndgameConversionDecide pairs them against this set
+// directly, which is the decision-relevant comparison):
+//
+//   - Unstoppable (rule of the square): adding it at 250 costs
+//     **-0.66 +/- 0.34 per position, CI [-1.32,-0.00]** (SIG-, and -0.78
+//     +/- 0.36 together with RookBehind); at 80 it is -0.46 +/- 0.31 (same
+//     sign, not significant). Mechanism: the bonus flips with the side to
+//     move (the defender's free tempo), making the leaf eval
 //     tempo-dependent beyond Tempo — poison for alpha-beta — and it is
 //     redundant with the search, which sees a 4-move pawn race directly.
-//   - RookBehind (Tarrasch): +2.5 pts / +1 correct, i.e. neutral, and it
-//     costs a per-passer file walk in the asm. Not worth porting.
+//   - RookBehind (Tarrasch): **-0.10 +/- 0.15, CI [-0.40,+0.20]** — a
+//     genuine null. Dropped for COST, not strength: it is the only term
+//     needing a board walk, and it is the only reason the asm design would
+//     need a per-passer file scan.
+//
+// Honest scope limit: of the +52.0 total match points, only **+24.5 come
+// from the 11 objectively WON positions**; +11.5 comes from drawn and +16.0
+// from lost ones, i.e. from out-playing a knowledge-removed twin rather
+// than from conversion technique. See the class decomposition in
+// TestEndgameConversion.
 var DefaultEndgame = EndgameParams{
 	Enable:       true,
 	PhaseMax:     6,
@@ -156,9 +173,11 @@ type egFeatures struct {
 	kpDistW, kpDistB int // king Chebyshev distance to the nearest pawn
 }
 
-// egScan does the single piece-list pass.
-func egScan(p *Position, wk, bk byte) *egFeatures {
-	f := &egFeatures{kpDistW: 99, kpDistB: 99}
+// egScan does the single piece-list pass, filling the caller's buffer (the
+// Engine keeps one, so a gated eval does not allocate: this runs at every
+// endgame leaf).
+func egScan(f *egFeatures, p *Position, wk, bk byte) *egFeatures {
+	*f = egFeatures{kpDistW: 99, kpDistB: 99}
 	for i := range 8 {
 		f.pwmin[i], f.pbmin[i] = 15, 15
 	}
@@ -230,7 +249,7 @@ func (e *Engine) egEval() int {
 		e.Cyc.EGEvals++
 		e.Cyc.Est += uint64(e.Costs.EGTerm)
 	}
-	f := egScan(p, wk, bk)
+	f := egScan(&e.egBuf, p, wk, bk)
 	score := 0
 
 	// (1) King activity.

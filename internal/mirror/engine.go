@@ -135,6 +135,9 @@ type Engine struct {
 	// Zero value = OFF: a byte-identical no-op versus the asm's current
 	// eval. See endgame.go.
 	EG EndgameParams
+	// egBuf is egEval's scratch for its single piece-list pass, reused so a
+	// gated endgame leaf allocates nothing.
+	egBuf egFeatures
 
 	Best      Move // root best move (BESTFROM/BESTTO/BESTFLAGS)
 	RootScore int

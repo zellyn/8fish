@@ -1261,6 +1261,34 @@ ssearch:                        ; (re)search entry; Y = child ply
         pla
         sta MAXDEPTH
         jmp spostsr
+        ; ---- check extension (FT_CKEXT): the move just made gives check
+        ; (INCHK[child], set by make), so search the child ONE PLY DEEPER -
+        ; MAXDEPTH+1 for the subtree instead of the usual horizon - capped at
+        ; ONE extension per root-to-leaf path (NUMEXT, incremented/decremented
+        ; in lockstep so the budget is exact and a scout re-search through
+        ; ssearch re-derives the same decision). Never in quiescence: a qs
+        ; capture node's children take the plain path (QSKIND[parent]), while an
+        ; in-check evasion node past the horizon is full-width in both engines
+        ; and DOES extend - mirror.checkExt's qsKind test exactly. Reached only
+        ; from the mode 0/1 path, so an extension can never coexist with an LMR
+        ; reduction (a checking move is mode < 2 anyway: the smset reduction
+        ; gate tests INCHK+1). Mirrors mirror.checkExt with MaxExt = 1.
+sckext: lda FEATURES
+        and #FT_CKEXT
+        beq snoxt
+        lda NUMEXT              ; per-path budget spent? (MaxExt = 1)
+        bne snoxt
+        lda QSKIND-1,y          ; parent is a qs capture node: never extend
+        bne snoxt
+ckexted:                        ; (labelled for the parity harness's probe)
+        inc NUMEXT
+        inc MAXDEPTH            ; one ply deeper for the whole child subtree
+        jsr search
+        dec MAXDEPTH
+        dec NUMEXT
+        jmp spostsr
+snoxt:  jsr search
+        jmp spostsr
 swfull: sec                     ; full window: ALPHA[c] = -BETA[p]
         lda #0
         sbc BETALO-1,y
@@ -1268,7 +1296,9 @@ swfull: sec                     ; full window: ALPHA[c] = -BETA[p]
         lda #0
         sbc BETAHI-1,y
         sta ALPHAHI,y
-snored: jsr search
+snored: lda INCHK,y             ; Y = child ply: does the move give check?
+        bne sckext              ;  yes: check-extension candidate (out of line)
+        jsr search
 spostsr:
         jsr unmake
         ; scout results: a fail-high zero-window score is not final

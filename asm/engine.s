@@ -195,6 +195,9 @@ iterate:
         lda #0
         sta PLY
         sta HVALID              ; hash watermark: HASH = root position
+        sta NUMEXT              ; FT_CKEXT: per-iterate reset of the check-
+                                ;  extension path budget (the balanced
+                                ;  increment/decrement keeps it 0 anyway)
         jsr curincheck          ; root in-check state (make propagates
         lda #0                  ; it for every deeper ply)
         rol

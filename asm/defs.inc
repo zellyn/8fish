@@ -284,7 +284,27 @@ FT_LMR    = $10         ; PVS zero-window scouts + late move reductions
 ;  for the mop-up + adaptive ports. The extraterm subroutine + RKCNT/XSTRUCT
 ;  scratch are gone; PWBITS/PBBITS and WBLOCKM/BBLOCKM (shared with pawnterm)
 ;  are untouched.
-; $40 free: was FT_ASP (aspiration windows at the ID root). REJECTED by
+FT_CKEXT  = $40         ; check extensions in the MAIN search (mirror
+                        ;  CheckExtParams{MaxExt: 1}: +12.6 +/- 9.0 on the
+                        ;  4000-game cycle-budget screen). When the move just
+                        ;  made GIVES CHECK (INCHK[child], already computed by
+                        ;  make) the child subtree is searched one ply DEEPER
+                        ;  (MAXDEPTH+1, balanced restore) instead of one ply
+                        ;  shallower - capped at ONE extension per root-to-leaf
+                        ;  path by NUMEXT ($0233), incremented/decremented in
+                        ;  lockstep with the extension so the path budget is
+                        ;  exact (and a scout re-search re-derives the same
+                        ;  decision). Never in quiescence: QSKIND[parent] gates
+                        ;  it, so a qs capture node's children never extend,
+                        ;  while an in-check EVASION node past the horizon is a
+                        ;  full-width node in both engines and DOES extend -
+                        ;  exactly mirror.checkExt's qsKind test. Never together
+                        ;  with an LMR reduction: a checking move is already
+                        ;  excluded from reduction by the smset gate's INCHK+1
+                        ;  test, so extension and reduction are mutually
+                        ;  exclusive by construction. Zero tree effect when
+                        ;  clear (the gate costs one INCHK load per child).
+; ($40 was FT_ASP, aspiration windows at the ID root. REJECTED by
 ;  its own asm SPRT (-21 +/- 32, 2026-07-21) and gated off ever since;
 ;  removed 2026-07-25 in the space-optimization pass (SPACE round 1) to
 ;  reclaim CODE for the pending check-extension/endgame-technique ports.
@@ -465,7 +485,13 @@ ITSTART0   = $0230      ; 24-bit CLOCK snapshot at iteration start
 ITSTART1   = $0231      ;  (predictive gate: est next = 2x last cost)
 ITSTART2   = $0232
 
-; $0233-$0237 is free driver-scratch RAM (was FT_ASP's ASPAL/AH/BL/BH +
+NUMEXT     = $0233      ; FT_CKEXT: check extensions applied along the CURRENT
+                        ;  root-to-leaf path (mirror Engine.numExt). Reset to 0
+                        ;  per ID iteration (iterate); incremented before an
+                        ;  extended child search and decremented after, so it
+                        ;  always equals the live path's extension count and the
+                        ;  MaxExt=1 cap is exactly "NUMEXT != 0 -> no extension".
+; $0234-$0237 is free driver-scratch RAM (was FT_ASP's ASPAL/AH/BL/BH +
 ; ASPFAIL aspiration-window state, removed 2026-07-25 with the feature).
 
 ; FT2_IMPROV improving-heuristic per-ply eval stack (improving.go's

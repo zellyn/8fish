@@ -141,6 +141,35 @@ ceiling + a 24-bit zp bank (effort.go asm-port note; no floats, /k are
 shifts, signals are a 2-byte compare + a counter). NOT YET PORTED — a
 follow-on; the mirror screen is the go/no-go and it says GO.
 
+## 2026-07-25 — check extensions: +12.6 ± 9.0 (mirror, cycle-budgeted) — PORT-worthy, batched with endgame work
+
+Single-ply extension when a move gives check (gives-check is already
+computed in make, so the signal is free). Cycle-budgeted asm-matched
+screens:
+
+| variant | Elo ± err | games |
+|---|---|---|
+| **MaxExt=1, all checks** | **+12.6 ± 9.0** | 4000 |
+| MaxExt=2 | +7.1 ± 12.6 | 2000 |
+| MaxExt=2, captures-only | −0.3 ± 17.8 | 1000 |
+
+Findings: one extension is enough (chains >2 are rare; cap3≈cap2), and
+gating to checking CAPTURES kills the gain — the **quiet forcing checks**
+carry the value (matters for the port: no cheap captures-only shortcut).
+Fixed-depth tree growth is moderate (+12–27% at cap1). Never reduced and
+extended simultaneously (LMR already excludes checking moves). Off is
+byte-identical.
+
+Note vs the loss diagnosis: it predicted this would underperform (only
+4% of losses are tactical) — correct in rank order (endgame technique is
+the bigger lever) but it is still a real positive, so the diagnosis
+informed priority without vetoing.
+
+PORT DEFERRED-AND-BATCHED with the endgame-technique port: MAIN has only
+~278 bytes of headroom (the previous two features overflowed it by 169 B
+and forced the FT_ROOKX audit), so two features = one space negotiation,
+one union rebuild, one SPRT campaign.
+
 ## 2026-07-25 — LOSS DIAGNOSIS: we lose to TECHNIQUE, not tactics; contempt is dead, endgame conversion is the lever
 
 Clustered all 103 losses (96 distinct games) from the clean 300-game

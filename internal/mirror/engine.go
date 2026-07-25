@@ -65,20 +65,17 @@ type Engine struct {
 	// CheckExts counts extensions actually applied (diagnostic; the asm
 	// parity harness compares it against the asm's own count).
 	CheckExts uint64
-	// TTPlyQuirk models a real asm defect in the TT's node-relative mate
-	// bookkeeping (asm/tt.s ttstore/ttprobe): the classification
-	// `lda scoreHi : cmp #$74 : bcc ...` is an UNSIGNED compare, so EVERY
-	// NEGATIVE score (high byte $80-$FF) takes the winning-mate path and gets
-	// +Ply on store / -Ply on probe (and the losing-mate branch is dead code).
-	// The round trip is self-consistent at a fixed ply, so the asm is not
-	// broken, but a score stored at ply s and read at ply p is off by s-p
-	// centipawns whenever it is negative. The mirror's own arithmetic is
-	// signed-correct; setting this makes it byte-faithful to the asm instead,
-	// which is what the asm<->mirror tree-parity gates need once a feature
-	// (check extensions) deepens the tree enough for the shift to flip a
-	// cutoff. Default OFF: flipping it changes every mirror screen's baseline,
-	// so it is opt-in until the asm bug itself is fixed (which changes the
-	// shipped tree and therefore needs its own SPRT).
+	// TTPlyQuirk models a HISTORICAL asm defect in the TT's node-relative
+	// mate bookkeeping (asm/tt.s ttstore/ttprobe): the classification
+	// `lda scoreHi : cmp #$74 : bcc ...` was an UNSIGNED compare, so EVERY
+	// NEGATIVE score (high byte $80-$FF) took the winning-mate path and got
+	// +Ply on store / -Ply on probe (and the losing-mate branch was dead
+	// code). A score stored at ply s and read at ply p came back off by s-p
+	// centipawns whenever it was negative, and a losing mate was shifted the
+	// WRONG WAY. The asm now uses a signed zone test (MATEZONEHI /
+	// NMATEZONEHI, the same shape as search.s' RFP guard), so the mirror's
+	// own signed-correct arithmetic — this flag OFF — is the faithful model.
+	// Kept only so the pre-fix trees can still be reproduced for archaeology.
 	TTPlyQuirk bool
 
 	// CM configures the countermove heuristic in the five-pass moveLoop

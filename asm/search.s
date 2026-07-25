@@ -247,6 +247,8 @@ ckvdone:
         sta TTBF,y
         ; full-width node: probe the transposition table
         jsr ttprobe
+ttpdone:                        ; test hook: carry = hit, TTENTRY+5/6 = the
+                                ;  ply-adjusted score (TestTTScoreRoundTrip)
         bcc snodej
         ldy PLY
         lda TTENTRY+3

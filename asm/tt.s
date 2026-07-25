@@ -41,22 +41,25 @@ ttprobe:
         jsr ttfetch             ; LC-resident: verify + copy, cc = miss
         bcs :+
         rts                     ; carry clear: miss
-:       ; mate-score adjustment: stored scores are node-relative
-        lda TTENTRY+6
-        cmp #$74                ; >= +29696: winning mate
-        bcc ttpneg
+:       ; mate-score adjustment: stored scores are node-relative.
+        ; SIGNED zone test (same shape as search.s' RFP guard): a negative
+        ; hi byte ($80-$FF) is >= MATEZONEHI ($74) UNSIGNED, so the
+        ; winning-mate compare must run only on the hi >= 0 path - the old
+        ; unsigned cmp sent EVERY negative score down it (and left the
+        ; losing-mate arm dead).
+ttadj:  lda TTENTRY+6
+        bmi ttpneg
+        cmp #MATEZONEHI         ; >= +29696: winning mate, score -= PLY
+        bcc tthit               ; ordinary non-negative score: unchanged
         lda TTENTRY+5
         sec
         sbc PLY
         sta TTENTRY+5
         bcs tthit
         dec TTENTRY+6
-        sec
-        rts
-ttpneg: cmp #$8C                ; <= $8B..: losing mate
-        bcs tthit
-        cmp #$80
-        bcc tthit               ; positive non-mate
+        bcc tthit               ; always (carry clear here)
+ttpneg: cmp #NMATEZONEHI        ; hi $80-$8B: losing mate, score += PLY
+        bcs tthit               ; ordinary negative score: unchanged
         lda TTENTRY+5
         clc
         adc PLY
@@ -90,21 +93,20 @@ ttstore:
         asl
         ora T0
         sta TTENTRY+7
-        ; mate adjustment (inverse of probe)
-        lda TTENTRY+6
-        cmp #$74
-        bcc tspneg
+        ; mate adjustment (inverse of probe); same SIGNED zone test
+tsadj:  lda TTENTRY+6
+        bmi tspneg
+        cmp #MATEZONEHI         ; winning mate: score += PLY
+        bcc tsgo                ; ordinary non-negative score: unchanged
         lda TTENTRY+5
         clc
         adc PLY
         sta TTENTRY+5
         bcc tsgo
-        inc TTENTRY+6
+        inc TTENTRY+6           ; hi was $74-$7F, so inc can't reach 0
         bne tsgo                ; always
-tspneg: cmp #$8C
-        bcs tsgo
-        cmp #$80
-        bcc tsgo
+tspneg: cmp #NMATEZONEHI        ; losing mate: score -= PLY
+        bcs tsgo                ; ordinary negative score: unchanged
         lda TTENTRY+5
         sec
         sbc PLY

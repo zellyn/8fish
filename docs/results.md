@@ -3,6 +3,184 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-25 — ENDGAME TECHNIQUE (mirror): conversion suite +52 pts / +78 correct results; self-play +10 +/- 9 over 4000 games
+
+The top lever from the same-day loss diagnosis, built and screened.
+`internal/mirror/endgame.go`, phase-gated, mirror-only (asm port is a
+follow-on). Commit 56da578.
+
+**Why this and not more search.** The diagnosis measured `blindGap`
+(shallow eval minus a 5x-deeper oracle) at a median of **57cp** on the 28
+thrown-away endgames — our eval AGREES with a much deeper search all the
+way down, so depth cannot fix them. The gap is KNOWLEDGE. mopup.go
+(shipped, FT2_MOPUP) only knows "drive a lone king to a corner"; nothing
+in the eval knew anything about endgames that still have pawns.
+
+**The terms** (white POV, added in eval() like PStruct/mopup, ALL gated on
+`Pos.Phase <= 6` — the mop-up's endgame definition, N=1/B=1/R=2/Q=4 per
+side, so 6 = R+B vs R+B or less):
+
+| term | formula | weight |
+|---|---|---|
+| KingCent | `CMD[theirK] - CMD[ourK]` (the mop-up's 64-byte centre-manhattan table, 0 centre .. 6 corner) | 8 |
+| KingPawn | `chebDistToNearestPawn(theirK) - (ourK)`, pawns of EITHER color | 6 |
+| Pass | endgame-only top-up by advancement, same index as pawnterm's PASSEDBONUS | `{0,0,10,20,40,60,100,0}` |
+| PassKingOur | per own passer: `4 - cheb(ourK, frontSq)` | 6 |
+| PassKingThem | per own passer: `cheb(theirK, frontSq) - 4` | 4 |
+| KingAhead | per own passer: +flat if our king is strictly ahead of it within 1 file; -flat if it sits directly behind on the same file | 15 |
+
+The **Pass** table exists because pawnterm's Texel-tuned PASSEDBONUS is
+`{0,15,0,21,50,52,20,0}` — NOT monotone, and it rates a pawn on the 7th
+(20) BELOW one on the 5th (50). That is a self-play tuning artifact (both
+sides push symmetrically) and it is precisely the shape that fails to
+convert. Removing the top-up costs **-33.5 pts** on the conversion suite,
+the second-biggest single contribution.
+
+**Two designed terms measured OUT and ship OFF** (knobs kept as
+`EndgameDesigned` so the negative result stays reproducible):
+- **Unstoppable (rule of the square)** — the cheap "is their king outside
+  the square of the passer" test. **-17.5 pts at 250cp, -12.0 at 80cp**
+  versus leaving it out. Mechanism: the bonus flips with the side to move
+  (the defender's free tempo), making the leaf eval tempo-dependent beyond
+  Tempo — poison for alpha-beta — and the search already sees a 4-move
+  pawn race directly. Correlated symptom: in the 6-seed pilot of the FULL
+  designed set, KPK DEFENSE broke (`8/8/8/3k4/3p4/3K4/8/8 w`, hero = the
+  side DOWN the pawn, went 0/6/0 draws to 0/3/3 — it started LOSING a drawn
+  ending); with unstop dropped it holds 0/20/0. Attribution to unstop is an
+  inference from that coincidence, not an isolated measurement.
+- **RookBehind (Tarrasch, rook behind the passer)** — **+2.5 pts / +1
+  correct = neutral**, and it is the only term needing a board walk. Not
+  worth the asm cost. (Rook-endgame technique therefore stays UNPORTED:
+  "cutting off the enemy king" was not attempted — it needs an attack scan,
+  which the cost history says dies.)
+
+**SCREEN A — CONVERSION SUITE (the metric that maps to the diagnosis).**
+25 endgames: the 3 diagnosis FENs + **11 unconverted wins harvested from
+the 300-game match log** (`TestHarvestEndgames` replays each non-win game
+and takes the 8fish-to-move, phase-gated position where its own depth-6
+score peaked) + 11 textbook should-win/should-hold. 20 dither seeds each,
+**30M cyc/move** (the Sargon-match operating point), HERO's terms ON vs OFF
+against a FIXED reference defender that always has them OFF — an isolated
+screen, because a both-sides screen cancels symmetric knowledge.
+
+| | pts /500 | correct /500 | W / D / L |
+|---|---|---|---|
+| terms OFF (shipped engine, mop-up on) | 301.0 | 238 (47.6%) | 158 / 286 / 56 |
+| **terms ON** | **353.0** | **316 (63.2%)** | **247 / 212 / 41** |
+| delta | **+52.0** | **+78** | **+89 wins, -15 losses** |
+
+Wins **+56%**, losses **-27%**. Per-position (OFF -> ON, W/D/L; blank =
+unchanged):
+
+| position | want | OFF | ON | moves-to-win |
+|---|---|---|---|---|
+| diag-g246 (even minor ending 8fish LOST) | draw | 0/6/14 | **15/3/2** | - -> 23 |
+| kpk-file-e | win | 4/16/0 | **19/1/0** | 16 -> 15 |
+| two-connected (K+2P vs K) | win | 4/16/0 | **20/0/0** | 21 -> 18 |
+| kpk-front | win | 0/20/0 | **12/8/0** | - -> 20 |
+| peak-g91 (g91 LOSS, +390) | win | 0/20/0 | **9/11/0** | - -> 29 |
+| rook-behind | draw | 3/17/0 | 11/9/0 | 33 -> 25 |
+| k2p-vs-kp (outside passer) | win | 0/20/0 | **6/14/0** | - -> 19 |
+| peak-g229 (g229 DRAW, +373) | win | 0/20/0 | **5/15/0** | - -> 17 |
+| diag-g137 (the headline K+P loss) | win | 0/1/19 | 0/6/14 | still lost |
+| peak-g194 (g194 DRAW, +914) | win | 16/4/0 | **20/0/0** | **18 -> 8** |
+| peak-g132 | win | 20/0/0 | 20/0/0 | 22 -> 18 |
+| peak-g8 | win | 20/0/0 | 20/0/0 | 18 -> 15 |
+| square-win | win | 18/2/0 | 20/0/0 | 12 -> 13 |
+| lucena | win | 5/15/0 | 6/14/0 | 26 -> 26 |
+| **peak-g48 (REGRESSION)** | win | 5/12/3 | **1/14/5** | 41 -> 59 |
+| kpk-rookdraw / kpk-blocked / square-draw | draw | 0/20/0 | 0/20/0 | held |
+| diag-g61, peak-g234, peak-g2, outside-passer | | unchanged | | |
+
+Honest negatives: **peak-g48 got worse** (-3 pts, 3 losses -> 5) and
+**diag-g137 and diag-g61 are still lost 14/20 and 20/20** — the two
+hardest diagnosis positions are not fixed, only softened (g137's draws
+went 1 -> 6). Six positions are untouched (peak-g234 0/20/0, peak-g2
+0/20/0, outside-passer 0/20/0 — all still 100% drawn — plus peak-g163,
+peak-g34 and peak-g196 which OFF already won 20/20).
+
+**Ablation** (same suite, 500 games/arm, hero-only, isolated):
+
+| arm | pts /500 | correct | W/D/L |
+|---|---|---|---|
+| OFF | 301.0 | 238 | 158/286/56 |
+| kcent alone | 305.0 | 253 | 178/254/68 |
+| kpawn alone | 310.0 | 251 | 172/276/52 |
+| pass alone | 304.0 | 245 | 164/280/56 |
+| **pking alone** | **319.0** | 263 | 181/276/43 |
+| kahead alone | 301.5 | 234 | 160/283/57 |
+| unstop alone | 308.0 | 252 | 171/274/55 |
+| rbehind alone | 304.0 | 242 | 169/270/61 |
+| all 8 designed | 333.5 | 278 | 218/231/51 |
+| **shipped set (all - unstop - rbehind)** | **353.0** | **316** | 247/212/41 |
+
+Leave-one-out on the shipped set (pts lost by removing the term):
+**kahead -38.0**, pass -33.5, both king-activity terms -34.0 (kcent -15.5,
+kpawn -14.0), pking -15.0, rbehind +2.5. Note **kahead is worth +0.5 alone
+but -38 to remove** — the terms are strongly complementary; screening them
+one at a time would have thrown away the biggest contributor. Weight
+probes: `pking` doubled -15.0, `pass` doubled -41.0, gate at phase 8
+identical to 6 (332.5 vs 333.5), so the tighter gate is kept.
+
+**Both-sides view** (the mop-up precedent): both arms ON vs both OFF gives
+**+20.0 pts / +32 correct** — less than half the isolated +52.0/+78,
+because the knowledge is symmetric. That is the mechanism that makes
+self-play under-report this feature class.
+
+**SCREEN B — SELF-PLAY CYCLE BUDGET.** asm-matched config on BOTH sides (mask
+0x1f, recap2 QS, Default weights, corrected-guard RFP 120/500, **mop-up ON**
+— the real shipped engine), A = terms ON taxed at 438 cyc/gated eval,
+B = terms OFF, `-cbudget 143000000`, 4 seed batches of 1000 games
+(`runs/mirror-endgame.sh 500 <out> default 3 143000000`):
+
+| seed | +W =D -L | Elo +/- err |
+|---|---|---|
+| 6502 | +377 =288 -335 | +15 +/- 18 |
+| 1337 | +368 =302 -330 | +13 +/- 18 |
+| 4242 | +345 =315 -340 | +2 +/- 18 |
+| 9001 | +383 =266 -351 | +11 +/- 18 |
+| **pooled 4000** | **+1473 =1171 -1356 (51.46%)** | **+10 +/- 9, CI [+1,+19]** |
+
+Read this HONESTLY: **+10 +/- 9 is weakly positive, not decisive** — the
+lower bound only just clears zero. As with the mop-up (self-play -7 +/- 32),
+self-play systematically UNDER-reports this feature class, and here we
+measured why rather than asserting it: the both-sides conversion delta
+(+20.0) is under half the isolated one (+52.0), because both arms carry the
+same knowledge into the same endgames and only a fraction of self-play games
+reach a gated position at all. So the pass condition for this feature class
+is met and then some — a strong conversion gain with a self-play number that
+is not merely non-negative but leaning positive, unlike the mop-up's flat 0.
+
+**MIDDLEGAME UNTOUCHED (proof).** `TestEndgameNoMiddlegameLeak`: over
+**35,567 positions** from 300 random-play games, EG-ON eval == EG-OFF eval
+at every position with phase > 6 — **0 leaks**; 278 positions differ, all
+inside the gate (plus positive controls: g137/g61 must differ, the opening
+and a 4-knights middlegame must not). `TestEndgameOffIdentical`: with
+`EndgameParams{}` the depth-5 tree (best move, score, node count) is
+IDENTICAL to an engine with no EG config, at masks 0x00/0x07/0x1f with the
+mop-up both on and off. Every asm gate green unchanged: TestMicroAB,
+TestMicroABAdopted(+Probes), TestMicroABImproving, TestSearchMirrorParity
+(+Improving), TestMopupEvalParity, TestPStructParity/MirrorParity,
+TestAspirationMirrorParity, TestAdaptiveParity, TestBookProbeParity.
+
+**Cost.** Charged honestly at `EvalTermsCost(2) = 438 cyc` per gated eval
+call in every screen above; measured share of a real endgame search:
+**3.9-5.1%** of estimated cycles (0% in the middlegame — the gate is one
+compare). The asm design (below) is ~120 cyc + ~65/passer, so the screened
+numbers are a PESSIMISTIC bound on the ported feature.
+
+**PORT RECOMMENDATION: PORT IT** (FT2_EGTECH), same rationale as the
+mop-up: a large conversion win with a non-negative self-play number, in
+exactly the bucket the diagnosis says costs the most points (29% of losses
++ 82% of draws). Design sketch is in the asm-port comment at the bottom of
+endgame.go. The one decision that makes it cheap: have pawnterm stash its
+per-file most-advanced ranks (PWMAX/PBMIN, 16 B) in the loop it ALREADY
+runs, so the endgame term needs no piece-list pass of its own. Then
+KingCent is a CMD-table subtract, KingPawn is an 8-file min-of-Chebyshev
+walk, and Pass/PassKing/KingAhead ride along inside pawnterm's existing
+per-file passed test. ~250-350 B of code + 16 B of tables; the image had
+278 B headroom at the last audit, so it needs a feature-audit slot.
+
 ## 2026-07-24 — FIXED the Sargon Hard-Mode promotion "no reply" quirk (root cause: forced-reply detection, not promotion entry)
 
 Resolved the bug that drew ~10% of the 300-game symmetric run (g10 f7f8r,

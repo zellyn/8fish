@@ -195,6 +195,9 @@ iterate:
         lda #0
         sta PLY
         sta HVALID              ; hash watermark: HASH = root position
+        sta NUMEXT              ; FT_CKEXT: per-iterate reset of the check-
+                                ;  extension path budget (the balanced
+                                ;  increment/decrement keeps it 0 anyway)
         jsr curincheck          ; root in-check state (make propagates
         lda #0                  ; it for every deeper ply)
         rol
@@ -600,3 +603,465 @@ raise:
         lda RTARGET2
         sta BUDGET2
 @done:  rts
+
+; ===================================================================
+; FT2_EGTECH endgame TECHNIQUE eval term (port of internal/mirror/
+; endgame.go, DefaultEndgame: KingCent 8, KingPawn 6, Pass
+; {0,0,10,20,40,60,100,0}, PassKingOur 6, PassKingThem 4, KingAhead 15,
+; gate PHASE <= 6; mirror screen +10 +/- 9 over 4000 cycle-budgeted
+; games, +2.08 +/- 0.71 match points/position on the conversion suite).
+; White-POV bonus added straight into SCORE beside the mop-up, BEFORE
+; eval's side-to-move negation, so the signs line up with every other
+; term. The two REJECTED designed terms (Unstoppable = harmful,
+; RookBehind = null) are deliberately NOT ported - dropping them also
+; removes the only board-walking loop.
+;
+; Appended at the TABLES tail like mopupterm/adaptmaybe: it is cold in
+; the middlegame (never called above the phase gate) and putting it here
+; keeps CODE's page count - and every hot-path address - unchanged.
+;
+; DATA IT READS, all already maintained, so the term needs NO piece-list
+; pass (the mirror's egScan is replaced entirely):
+;   - PWBITS/PBBITS ($0200-$020F): the per-file pawn rank-occupancy
+;     bitmaps pawnterm uses. They are maintained by pbtoggle XOR toggles
+;     in make/unmake on EVERY pawn placement change, INDEPENDENT of
+;     FT_PSTRUCT and of pawnterm's lazy PDIRTY deferral, so they are
+;     always current here. This is the decision that makes the port
+;     cheap: the per-file most-advanced rank is the index of the highest
+;     (white) / lowest (black) set bit of one byte - a 5-byte shift loop,
+;     run only for an actual passer - so the sketched PWMAX/PBMIN stash
+;     in pawnterm is not needed at all, and (unlike that stash) the
+;     nearest-pawn distance below stays EXACT on doubled files.
+;   - WBLOCKM/BBLOCKM: pawnterm's own passed-pawn masks, so the passer
+;     test here is bit-identical to pawnterm's (and term-exact with the
+;     mirror's egMax3(pbmax) < r / egMin3(pwmin) > r).
+;   - RANKBIT, PIECESQ, PHASE (the gate).
+;
+; ONE loop over the 8 files does everything: the nearest-pawn distance
+; for BOTH kings and both colors' passer terms, so the per-file overhead
+; is paid once (~19 cycles for a pawnless file).
+;
+; Scratch: A,X,Y and the eval-tail-dead bytes T0-T3, EVTMP, MULCNT,
+; MUL0-MUL2, PSQSQ, PSQPIECE, PSP0+1, PSP1+1 (the PSQT pointer HIGH
+; bytes; the lo bytes must stay 0 and are untouched), plus 6 bytes of
+; free MAIN scratch at $0213 for the two kings' nearest-pawn state.
+; Same contract as mopupterm plus T3/MUL*/PSP*+1 - all provably dead in
+; eval's POV/tempo/seed tail, and every psqt user re-stores PSP0+1/
+; PSP1+1 before use.
+; ===================================================================
+EGWK   = PSQSQ                  ; white king square
+EGBK   = PSQPIECE               ; black king square
+EGFILE = T0                     ; the passer's file (X mirror)
+EGBITS = T1                     ; this file's own-color rank bits
+EGR    = T2                     ; the passer's absolute rank
+EGOK   = T3                     ; the passer owner's king square
+EGTK   = EVTMP                  ; the defender's king square
+EGSIGN = PSP1+1                 ; 0 = white passer (add), 1 = black (negate)
+EGTMP  = PSP0+1                 ; egpass byte temp
+EGT    = MUL0                   ; egcheb temps
+EGT2   = MUL1
+EGSQB  = MUL2                   ; egcheb: the second square
+EGU    = MULCNT                 ; this file's pawns of EITHER color
+EGDF   = T2                     ; nearest-pawn scan: |file - kingfile|
+EGWLIM = T3                     ;  ... and the rank-window index limit
+                                ; (both alias passer bytes that are dead
+                                ;  while the per-file scan runs)
+EGWKF  = $0213                  ; white king file / rank*8 / best distance
+EGWKR8 = $0214
+EGWBST = $0215
+EGBKF  = $0216                  ; black king file / rank*8 / best distance
+EGBKR8 = $0217
+EGBBST = $0218
+
+; EGPASS: the endgame-only passed-pawn top-up by ADVANCEMENT (white: the
+; pawn's rank 1..6, black: 7-rank), mirror DefaultEndgame.Pass - the
+; monotone replacement for pawnterm's Texel-tuned PASSEDBONUS
+; {0,15,0,21,50,52,20,0}, whose non-monotone shape (7th rank worth less
+; than the 5th) is exactly what failed to convert.
+EGPASS: .byte 0, 0, 10, 20, 40, 60, 100, 0
+
+; EGCD8: per-coordinate centre distance {3,2,1,0,0,1,2,3}; CMD(square) =
+; EGCD8[file] + EGCD8[rank], the mop-up's mopcd computed by table instead
+; of by branch (4 lookups per eval beat 4 jsr round trips).
+EGCD8:  .byte 3, 2, 1, 0, 0, 1, 2, 3
+
+; RWIN: rank-window masks for the nearest-pawn scan. RWIN[kr*8+d] = the
+; ranks within d of rank kr, clamped to the board - so "is any pawn on
+; this file within d ranks of the king?" is one AND. d = 7 always covers
+; the whole file, which is why a pawn on the board is always found.
+RWIN:
+        .byte $01, $03, $07, $0F, $1F, $3F, $7F, $FF   ; king rank 0
+        .byte $02, $07, $0F, $1F, $3F, $7F, $FF, $FF   ; king rank 1
+        .byte $04, $0E, $1F, $3F, $7F, $FF, $FF, $FF   ; king rank 2
+        .byte $08, $1C, $3E, $7F, $FF, $FF, $FF, $FF   ; king rank 3
+        .byte $10, $38, $7C, $FE, $FF, $FF, $FF, $FF   ; king rank 4
+        .byte $20, $70, $F8, $FC, $FE, $FF, $FF, $FF   ; king rank 5
+        .byte $40, $E0, $F0, $F8, $FC, $FE, $FF, $FF   ; king rank 6
+        .byte $80, $C0, $E0, $F0, $F8, $FC, $FE, $FF   ; king rank 7
+
+; -------------------------------------------------------------------
+; endterms (FT2_MOPUP / FT2_EGTECH): both endgame eval terms share ONE
+; phase-gate compare, so a middlegame eval pays exactly the 7 cycles it
+; already paid for the mop-up alone.
+; -------------------------------------------------------------------
+endterms:
+        lda PHASE
+        cmp #7                  ; PHASE <= 6 ? (the shared endgame gate)
+        bcs endout
+        lda FEATURES2
+        and #FT2_MOPUP
+        beq endeg
+        jsr mopupterm           ; (re-checks the same gate: 7 cycles, and it
+                                ;  keeps mopupterm a self-contained entry)
+endeg:  lda FEATURES2
+        and #FT2_EGTECH
+        beq endout
+        jmp egterm
+endout: rts
+
+; -------------------------------------------------------------------
+; EGKPDF: one file's contribution to ONE king's nearest-pawn distance,
+; expanded twice (once per king) inside the file loop. EGU = this file's
+; pawns of either color (nonzero), X = the file.
+;   cand = max(|file - kingfile|, min over pawn ranks r of |r - kingrank|)
+;   best = min(best, cand)
+; Two prunes make this cheap and bound the work: a file whose |df| already
+; reaches `best` cannot improve it (skip before any rank work), and the
+; rank window only grows while d < best. The window masks come from RWIN
+; (ranks within d of the king's rank), so a step is 17 cycles.
+; Clobbers A,Y,EGDF,EGWLIM; preserves X.
+; -------------------------------------------------------------------
+.macro EGKPDF kf, kr8, best
+        .local skip, walk, hit
+        txa                     ; |file - kingfile|
+        sec
+        sbc kf
+        bcs :+
+        eor #$FF
+        adc #1
+:       cmp best
+        bcs skip                ; already >= best: this file cannot improve
+        sta EGDF
+        clc
+        lda kr8
+        adc best
+        sta EGWLIM              ; stop the window at d = best
+        ldy kr8                 ; Y = kingrank*8 + d, d = 0
+walk:   lda EGU
+        and RWIN,y              ; any pawn within d ranks of the king?
+        bne hit
+        iny
+        cpy EGWLIM
+        bcc walk
+        bcs skip                ; always: nothing within best-1 ranks
+hit:    tya
+        sec
+        sbc kr8                 ; d
+        cmp EGDF
+        bcs :+
+        lda EGDF                ; cand = max(|df|, d)
+:       sta best                ; (< best by construction of both prunes)
+skip:
+.endmacro
+
+egterm:
+        lda PIECESQ+0           ; king-capture guard: a pseudo-legal node can
+        cmp #NOSQ               ;  have captured a king (the illegal-move
+        bne :+                  ;  refutation); the score is irrelevant there,
+egret:  rts                     ;  and the mirror's egEval bails the same way
+:       sta EGWK
+        lda PIECESQ+16
+        cmp #NOSQ
+        beq egret
+        sta EGBK
+        ; ---- KingCent: 8 * (CMD[theirK] - CMD[ourK]), white POV
+        ; = 8 * (CMD[bk] - CMD[wk]). CMD is the mop-up's centre-manhattan
+        ; distance (0 centre .. 6 corner) = EGCD8[file] + EGCD8[rank].
+        lda EGBK
+        and #$07
+        tay
+        lda EGCD8,y
+        sta EGT
+        lda EGBK
+        lsr
+        lsr
+        lsr
+        lsr
+        tay
+        lda EGCD8,y
+        clc
+        adc EGT
+        sta EGT2                ; CMD[bk]
+        lda EGWK
+        and #$07
+        tay
+        lda EGCD8,y
+        sta EGT
+        lda EGWK
+        lsr
+        lsr
+        lsr
+        lsr
+        tay
+        lda EGCD8,y
+        clc
+        adc EGT                 ; CMD[wk]
+        sta EGT
+        lda EGT2
+        sec
+        sbc EGT                 ; -6..6
+        beq egkc0
+        asl
+        asl
+        asl                     ; *8 = -48..48 (fits a signed byte)
+        jsr egadd
+egkc0:  ; ---- per-king nearest-pawn state (file, rank*8, best-so-far).
+        ; best = 8 means "no pawn on the board"; the two 8s then cancel in
+        ; the KingPawn difference below, which is exactly the mirror's
+        ; nPawns == 0 silence.
+        lda EGWK
+        and #$07
+        sta EGWKF
+        lda EGWK
+        and #$70
+        lsr                     ; rank*8 (RWIN row base)
+        sta EGWKR8
+        lda EGBK
+        and #$07
+        sta EGBKF
+        lda EGBK
+        and #$70
+        lsr
+        sta EGBKR8
+        lda #8
+        sta EGWBST
+        sta EGBBST
+        ; ---- the single file pass: nearest-pawn distances for both kings
+        ; and both colors' passer terms.
+        ldx #7
+egfl:   lda PWBITS,x
+        sta EGBITS              ; white pawns on this file
+        ora PBBITS,x
+        bne egfgo
+egflnx: dex                     ; (the pawnless-file path is this tight loop:
+        bpl egfl                ;  18 cycles, no work at all)
+        jmp egkp
+egfgo:  sta EGU
+        EGKPDF EGWKF, EGWKR8, EGWBST
+        EGKPDF EGBKF, EGBKR8, EGBBST
+        lda EGBITS
+        beq egflb               ; no white pawn here
+        lda PBBITS,x            ; black pawns on files f-1..f+1
+        cpx #0
+        beq :+
+        ora PBBITS-1,x
+:       cpx #7
+        beq :+
+        ora PBBITS+1,x
+:       ldy EGBITS
+        and WBLOCKM,y           ; any black pawn at rank >= our best?
+        bne egflb               ; blocked: not a passer
+        ldy #$FF                ; r = the most advanced white pawn's rank
+        lda EGBITS              ;  = index of the HIGHEST set bit
+:       iny
+        lsr
+        bne :-
+        sty EGR
+        stx EGFILE
+        lda EGWK
+        sta EGOK
+        lda EGBK
+        sta EGTK
+        lda #0
+        sta EGSIGN              ; white owner: owner POV == white POV
+        jsr egpass
+        ldx EGFILE              ; egadd/egadds clobber X
+egflb:  lda PBBITS,x
+        bne :+
+        jmp egflnx
+:       sta EGBITS
+        lda PWBITS,x            ; white pawns on files f-1..f+1
+        cpx #0
+        beq :+
+        ora PWBITS-1,x
+:       cpx #7
+        beq :+
+        ora PWBITS+1,x
+:       ldy EGBITS
+        and BBLOCKM,y           ; any white pawn at rank <= their best?
+        beq :+
+        jmp egflnx
+:
+        ldy #$FF                ; r = the most advanced black pawn's rank
+        lda EGBITS              ;  = index of the LOWEST set bit
+:       iny
+        lsr
+        bcc :-
+        sty EGR
+        stx EGFILE
+        lda EGBK
+        sta EGOK
+        lda EGWK
+        sta EGTK
+        lda #1
+        sta EGSIGN              ; black owner: negate each owner-POV term
+        jsr egpass
+        ldx EGFILE
+        jmp egflnx
+        ; ---- KingPawn: 6 * (dist(theirK) - dist(ourK)) to the nearest pawn
+        ; of EITHER color, white POV = 6 * (bestB - bestW).
+egkp:   lda EGBBST
+        sec
+        sbc EGWBST              ; -7..7 (0 when the board has no pawns)
+        beq egout
+        asl                     ; *2
+        sta EGT
+        asl                     ; *4
+        clc
+        adc EGT                 ; *6 = -42..42
+        jsr egadd
+egout:  rts
+
+; -------------------------------------------------------------------
+; egpass: score ONE passer from its OWNER's POV, adding each sub-term
+; into SCORE via egadds (which flips the sign for a black owner). EGR =
+; the pawn's absolute rank, EGFILE = its file, EGOK/EGTK = owner/
+; defender king squares, EGSIGN = 0 white / 1 black. Each sub-term fits
+; a signed byte but their SUM does not (100+24+12+15 = 151), so they are
+; added one at a time; two's-complement addition is order-independent,
+; so the total is exactly the mirror's egPasser sum.
+; -------------------------------------------------------------------
+egpass:
+        ldy EGR                 ; advancement index: white r, black 7-r
+        lda EGSIGN
+        beq :+
+        tya
+        eor #$07
+        tay
+:       lda EGPASS,y
+        beq :+                  ; zero top-up: skip the add
+        jsr egadds
+:       ldy EGSIGN              ; front square: the pawn's next step
+        bne :+
+        lda EGR
+        clc
+        adc #1                  ; white: r+1
+        jmp :++
+:       lda EGR
+        sec
+        sbc #1                  ; black: r-1
+:       cmp #8
+        bcs egpka               ; off board: no front square, no king terms
+        asl
+        asl
+        asl
+        asl
+        ora EGFILE
+        sta EGSQB               ; front square
+        lda EGOK                ; PassKingOur: 6 * (4 - cheb(ourK, front))
+        jsr egcheb
+        sta EGTMP
+        lda #4
+        sec
+        sbc EGTMP               ; -3..4
+        beq :+
+        asl                     ; *2
+        sta EGTMP
+        asl                     ; *4
+        clc
+        adc EGTMP               ; *6 = -18..24
+        jsr egadds
+:       lda EGTK                ; PassKingThem: 4 * (cheb(theirK, front) - 4)
+        jsr egcheb
+        sec
+        sbc #4                  ; -4..3
+        beq egpka
+        asl
+        asl                     ; *4 = -16..12
+        jsr egadds
+egpka:  ; KingAhead: our king strictly AHEAD of the pawn within one file
+        ; (+15: the cheap key-square proxy); our king directly BEHIND it on
+        ; the same file (-15: blocking its own pawn).
+        lda EGOK
+        and #$07
+        sec
+        sbc EGFILE
+        bcs :+
+        eor #$FF
+        adc #1                  ; |kingfile - pawnfile| (C=0: adds exactly 1)
+:       sta EGTMP
+        lda EGOK
+        lsr
+        lsr
+        lsr
+        lsr                     ; king rank
+        cmp EGR
+        beq egpkb               ; same rank: not ahead
+        ldy EGSIGN              ; (ldy/bne leave C from the cmp intact)
+        bne :+
+        bcs egpka1              ; white: ahead iff kr > r
+        bcc egpkb
+:       bcc egpka1              ; black: ahead iff kr < r
+egpkb:  lda EGTMP               ; behind: penalty only on the pawn's own file
+        bne egpkd
+        lda #<-15
+        jmp egadds
+egpka1: lda EGTMP               ; ahead: bonus within one file
+        cmp #2
+        bcs egpkd
+        lda #15
+        jmp egadds
+egpkd:  rts
+
+; egadds: add the signed byte in A into SCORE, negated first when the
+; passer belongs to BLACK (EGSIGN != 0) - the mirror's score -= egPasser.
+egadds: ldy EGSIGN
+        beq egadd
+        eor #$FF
+        clc
+        adc #1                  ; -A
+; egadd: SCORE += the signed byte in A, sign-extended. Clobbers A,X,(Y).
+egadd:  ldx #0
+        cmp #$80
+        bcc :+
+        dex                     ; negative: high byte $FF
+:       clc
+        adc SCORE
+        sta SCORE
+        txa
+        adc SCORE+1
+        sta SCORE+1
+        rts
+
+; egcheb: A = one 0x88 square, EGSQB = the other -> A = their Chebyshev
+; distance max(|dr|,|df|), 0..7. Clobbers A, EGT, EGT2; preserves X,Y.
+egcheb: sta EGT
+        and #$07
+        sta EGT2
+        lda EGSQB
+        and #$07
+        sec
+        sbc EGT2
+        bcs :+
+        eor #$FF
+        adc #1                  ; |df| (C=0 here, so this adds exactly 1)
+:       sta EGT2
+        lda EGT
+        and #$70
+        sta EGT
+        lda EGSQB
+        and #$70
+        sec
+        sbc EGT                 ; rank difference, still in <<4 units
+        bcs :+
+        eor #$FF
+        adc #1
+:       lsr
+        lsr
+        lsr
+        lsr                     ; |dr|
+        cmp EGT2
+        bcs :+
+        lda EGT2                ; max(|dr|,|df|)
+:       rts
+

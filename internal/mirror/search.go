@@ -814,6 +814,7 @@ func (e *Engine) checkExt(qs bool, ply int) int {
 	if e.CheckExt.CapturesOnly && e.undo[ply].cap == 0 {
 		return 0
 	}
+	e.CheckExts++
 	return 1
 }
 
@@ -852,7 +853,13 @@ func (e *Engine) ttprobe() (*ttEntry, int, bool) {
 	}
 	// Mate scores are stored node-relative.
 	score := int(ent.score)
-	if score >= mateZoneLo {
+	if e.TTPlyQuirk {
+		// asm tt.s: hi >= $74 unsigned, i.e. a winning mate OR any negative
+		// score, takes the -Ply path; nothing else is adjusted.
+		if score >= mateZoneLo || score < 0 {
+			score -= p.Ply
+		}
+	} else if score >= mateZoneLo {
 		score -= p.Ply
 	} else if score <= nmateZoneHi {
 		score += p.Ply
@@ -877,7 +884,11 @@ func (e *Engine) ttstore(bound int, from, to byte, score int) {
 	if depth > 31 {
 		depth = 31
 	}
-	if score >= mateZoneLo {
+	if e.TTPlyQuirk {
+		if score >= mateZoneLo || score < 0 {
+			score += p.Ply // asm tt.s' unsigned hi >= $74 classification
+		}
+	} else if score >= mateZoneLo {
 		score += p.Ply
 	} else if score <= nmateZoneHi {
 		score -= p.Ply

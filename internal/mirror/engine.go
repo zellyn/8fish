@@ -62,6 +62,24 @@ type Engine struct {
 	// search and reset to 0 at each iterate.
 	CheckExt CheckExtParams
 	numExt   int
+	// CheckExts counts extensions actually applied (diagnostic; the asm
+	// parity harness compares it against the asm's own count).
+	CheckExts uint64
+	// TTPlyQuirk models a real asm defect in the TT's node-relative mate
+	// bookkeeping (asm/tt.s ttstore/ttprobe): the classification
+	// `lda scoreHi : cmp #$74 : bcc ...` is an UNSIGNED compare, so EVERY
+	// NEGATIVE score (high byte $80-$FF) takes the winning-mate path and gets
+	// +Ply on store / -Ply on probe (and the losing-mate branch is dead code).
+	// The round trip is self-consistent at a fixed ply, so the asm is not
+	// broken, but a score stored at ply s and read at ply p is off by s-p
+	// centipawns whenever it is negative. The mirror's own arithmetic is
+	// signed-correct; setting this makes it byte-faithful to the asm instead,
+	// which is what the asm<->mirror tree-parity gates need once a feature
+	// (check extensions) deepens the tree enough for the shift to flip a
+	// cutoff. Default OFF: flipping it changes every mirror screen's baseline,
+	// so it is opt-in until the asm bug itself is fixed (which changes the
+	// shipped tree and therefore needs its own SPRT).
+	TTPlyQuirk bool
 
 	// CM configures the countermove heuristic in the five-pass moveLoop
 	// (zero value = off: a byte-identical no-op). See countermove.go.

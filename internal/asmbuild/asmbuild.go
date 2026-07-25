@@ -65,6 +65,34 @@ func Build(root string) error {
 	return nil
 }
 
+// BuildStandalone assembles and links a standalone asm/<name>.s image
+// (with its own asm/<name>.cfg) into asm/<name>.bin — the small
+// self-contained test drivers such as entropytest.s, which include only
+// defs.inc and one module and so need none of the engine build. It does
+// not regenerate the tables.
+func BuildStandalone(root, name string) error {
+	if _, err := exec.LookPath("ca65"); err != nil {
+		return ErrCA65NotInstalled
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	asm := filepath.Join(root, "asm")
+	run := func(cmdName string, args ...string) error {
+		cmd := exec.Command(cmdName, args...)
+		cmd.Dir = asm
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("%s %s (in %s): %w\n%s", cmdName, strings.Join(args, " "), asm, err, out)
+		}
+		return nil
+	}
+	if err := run("ca65", name+".s", "-o", name+".o"); err != nil {
+		return err
+	}
+	return run("ld65", "-C", name+".cfg", name+".o", "-o", name+".bin")
+}
+
 // BuildVariant assembles engine.s with extra ca65 -D defines into a
 // distinct binary + label file under asm/, named "<out>.bin"/"<out>.lbl"
 // (e.g. out="engine_noptcache", defines=["PTNOCACHE"]). It assumes the

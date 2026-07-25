@@ -371,6 +371,32 @@ FT2_MOPUP = $02         ; phase-gated endgame mop-up eval term (mirror
                         ;  clear (mopupterm never runs). Computed live in eval
                         ;  by mopupterm (CODE tail). A/B via FEATURES2 0x02.
 
+FT2_EGTECH = $08        ; endgame TECHNIQUE eval terms (mirror endgame.go
+                        ;  DefaultEndgame: KingCent 8, KingPawn 6, Pass
+                        ;  {0,0,10,20,40,60,100,0}, PassKingOur 6,
+                        ;  PassKingThem 4, KingAhead 15; PHASE <= 6). Six
+                        ;  white-POV terms added to SCORE beside the mop-up,
+                        ;  before the side-to-move negation: extra king
+                        ;  centralization (8*(CMD[theirK]-CMD[ourK]), CMD =
+                        ;  the mop-up's centre-manhattan distance via mopcd),
+                        ;  king proximity to the nearest pawn of either color
+                        ;  (6*(theirDist-ourDist), Chebyshev), an endgame-only
+                        ;  monotone passed-pawn top-up by advancement, our
+                        ;  king escorting each own passer (6*(4-cheb(ourK,
+                        ;  frontSq))), their king failing to reach it
+                        ;  (4*(cheb(theirK,frontSq)-4)), and KingAhead
+                        ;  (+/-15 for our king ahead of / directly behind our
+                        ;  own passer). Reads only maintained state - the
+                        ;  PWBITS/PBBITS per-file pawn bitmaps, WBLOCKM/
+                        ;  BBLOCKM, PIECESQ, PHASE - so there is NO piece-list
+                        ;  pass; the passer test is pawnterm's own. The two
+                        ;  designed terms the mirror screen REJECTED
+                        ;  (Unstoppable = harmful, RookBehind = null) are not
+                        ;  ported. Zero cost / byte-identical eval when clear
+                        ;  (the gate is shared with FT2_MOPUP: one compare).
+                        ;  Code + EGPASS table live at the TABLES tail
+                        ;  (engine.s), like mopupterm. A/B via FEATURES2 0x08.
+
 ; TT bound codes (in entry byte 7, low 2 bits; 0 = empty entry)
 TT_UPPER = 1
 TT_LOWER = 2

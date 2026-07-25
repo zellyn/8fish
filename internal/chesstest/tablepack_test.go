@@ -77,6 +77,12 @@ func TestTablePacking(t *testing.T) {
 		{"CASTKEYS", 63}, // (rights nibble)<<2, +3 for the key byte
 		{"EPKEYS", 31},   // file<<2, +3
 		{"MOPMATLO", 7}, {"MOPMATHI", 7},
+		// FT2_EGTECH tables (engine.s TABLES tail): EGPASS/EGCD8 indexed 0..7,
+		// RWIN indexed 0..63 (kingrank*8 + d). RWIN is read once per rank-window
+		// step of the nearest-pawn scan, so a page crossing there would be a
+		// per-endgame-eval cycle tax; the tables sit at the head of the block
+		// precisely to avoid it.
+		{"EGPASS", 7}, {"EGCD8", 7}, {"RWIN", 63},
 	}
 	for _, c := range noCross {
 		if lo := addr(c.name) & 0xFF; lo+c.maxIdx > 0xFF {

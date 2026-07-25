@@ -103,6 +103,12 @@ type CycleCosts struct {
 	// one piece-list pass plus per-file/per-passer work, so the honest
 	// pessimistic value is EvalTermsCost(2) = 438.
 	EGTerm float64
+	// MidTerm is the per-eval-call cost of the MIDDLEGAME terms
+	// (midgame.go), charged only on the calls where the phase gate fires
+	// (Phase >= PhaseMin) — which in a middlegame search is nearly every
+	// call, so this is a heavy and honest tax. Set via PlayerCfg.MidCost;
+	// the pessimistic default convention is EvalTermsCost(passes).
+	MidTerm float64
 }
 
 // DefaultCycleCosts is the ridge-regularized fit against TestMicroAB's 18
@@ -165,6 +171,7 @@ type CycleAccount struct {
 	Evals      uint64 // eval() calls (== the asm "eval" probe)
 	EvalsExtra uint64 // ... of which computed an EvalTerms (extra) sum
 	EGEvals    uint64 // ... of which computed an endgame-technique sum (gate fired)
+	MidEvals   uint64 // ... of which computed a middlegame-term sum (gate fired)
 
 	Attacked    uint64 // attacked() scans charged at Costs.Attacked
 	AttackedAll uint64 // ALL attacked() scans incl. in-make gives-check

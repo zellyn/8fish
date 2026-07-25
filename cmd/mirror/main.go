@@ -290,6 +290,10 @@ func match(args []string) {
 	bEG := fs.String("beg", "", "B endgame-technique terms")
 	aEGCost := fs.Float64("aegcost", 0, "A per-gated-eval-call cycle cost of the endgame terms (cycle mode only)")
 	bEGCost := fs.Float64("begcost", 0, "B per-gated-eval-call cycle cost of the endgame terms (cycle mode only)")
+	aMid := fs.String("amid", "", "A middlegame terms: \"default\"|\"ks\"|\"pos\"|key:val,... (empty = off)")
+	bMid := fs.String("bmid", "", "B middlegame terms")
+	aMidCost := fs.Float64("amidcost", 0, "A per-gated-eval-call cycle cost of the middlegame terms (cycle mode only)")
+	bMidCost := fs.Float64("bmidcost", 0, "B per-gated-eval-call cycle cost of the middlegame terms (cycle mode only)")
 	cbudget := fs.Uint64("cbudget", 0, "per-move CYCLE budget (>0 selects cycle-budgeted mode, both sides; overrides -budget)")
 	aCMCost := fs.Float64("acmcost", 0, "A per-node countermove cycle cost (cycle mode only)")
 	bCMCost := fs.Float64("bcmcost", 0, "B per-node countermove cycle cost (cycle mode only)")
@@ -312,6 +316,7 @@ func match(args []string) {
 		CheckExt: parseCheckExt(*aCkExt),
 		Extra:    parseExtra(*aExtra), EvalTermsCost: *aExtraCost,
 		Mopup: parseMopup(*aMop), EG: parseEG(*aEG), EGCost: *aEGCost,
+		Mid: parseMid(*aMid), MidCost: *aMidCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	b := mirror.PlayerCfg{Features: byte(*bMask), Weights: parseWeights(*bw), Depth: *depth,
 		FixFutility: *bFix, LMR: parseLMR(*bLMR), QS: parseQS(*bQS), KB: loadKB(*bKB), Fut: parseFut(*bFut), Ord: parseOrd(*bOrd),
@@ -320,6 +325,7 @@ func match(args []string) {
 		CheckExt: parseCheckExt(*bCkExt),
 		Extra:    parseExtra(*bExtra), EvalTermsCost: *bExtraCost,
 		Mopup: parseMopup(*bMop), EG: parseEG(*bEG), EGCost: *bEGCost,
+		Mid: parseMid(*bMid), MidCost: *bMidCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	start := time.Now()
 	res, err := mirror.Match(a, b, lines, *pairs, *workers, *seed)
@@ -331,9 +337,9 @@ func match(args []string) {
 	if *cbudget > 0 {
 		mode = fmt.Sprintf("budget %d cycles/move (maxiters %d)", *cbudget, *maxiters)
 	}
-	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q mop=%q eg=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q mop=%q eg=%q) %s: %s (%v)\n",
-		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aImp, *aSEE, *aCkExt, *aExtra, *aMop, *aEG,
-		byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bImp, *bSEE, *bCkExt, *bExtra, *bMop, *bEG,
+	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q mop=%q eg=%q mid=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q mop=%q eg=%q mid=%q) %s: %s (%v)\n",
+		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aImp, *aSEE, *aCkExt, *aExtra, *aMop, *aEG, *aMid,
+		byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bImp, *bSEE, *bCkExt, *bExtra, *bMop, *bEG, *bMid,
 		mode, res, time.Since(start).Round(time.Second))
 }
 
@@ -720,6 +726,69 @@ func parseEG(s string) mirror.EndgameParams {
 			t.RookBehind = val
 		default:
 			fmt.Fprintf(os.Stderr, "unknown endgame term key %q (want phase,kcent,kpawn,pass,pking,pkingt,kahead,unstop,rbehind)\n", k)
+			os.Exit(2)
+		}
+	}
+	return t
+}
+
+// parseMid parses the MIDDLEGAME term set (midgame.go): "default"/"all",
+// "ks" (king-safety group only), "pos" (positional group only), "off", or
+// key:val pairs to screen individual terms. Keys: phase, ksatk (scales the
+// built-in attack-unit table by val/8, val=8 = the default curve), ksdef,
+// ksopen, ksfull, ksgap, ksexp, outn, outb, back, phal, badb, blkctr.
+func parseMid(s string) mirror.MidParams {
+	switch s {
+	case "", "off":
+		return mirror.MidParams{}
+	case "default", "on", "all":
+		return mirror.DefaultMid
+	case "ks":
+		return mirror.MidKingSafety
+	case "pos":
+		return mirror.MidPositional
+	}
+	t := mirror.MidParams{Enable: true, PhaseMin: mirror.DefaultMid.PhaseMin}
+	for _, kv := range strings.Split(s, ",") {
+		k, v, ok := strings.Cut(kv, ":")
+		var val int
+		if !ok || func() bool { _, e := fmt.Sscanf(v, "%d", &val); return e != nil }() {
+			fmt.Fprintf(os.Stderr, "bad midgame term %q (want key:val)\n", kv)
+			os.Exit(2)
+		}
+		switch k {
+		case "phase":
+			t.PhaseMin = val
+		case "ksatk":
+			for i, p := range mirror.DefaultMid.KSAtk {
+				t.KSAtk[i] = p * val / 8
+			}
+		case "ksdef":
+			t.KSDefend = val != 0
+		case "ksopen":
+			t.KSOpen = val
+		case "ksfull":
+			t.KSFullOpen = val
+		case "ksgap":
+			t.KSGap = val
+		case "kspawn":
+			t.KSPawn = val
+		case "ksexp":
+			t.KSExposed = val
+		case "outn":
+			t.OutpostN = val
+		case "outb":
+			t.OutpostB = val
+		case "back":
+			t.Backward = val
+		case "phal":
+			t.Phalanx = val
+		case "badb":
+			t.BadBishop = val
+		case "blkctr":
+			t.BlockedCtr = val
+		default:
+			fmt.Fprintf(os.Stderr, "unknown midgame term key %q\n", k)
 			os.Exit(2)
 		}
 	}

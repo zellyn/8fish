@@ -296,6 +296,9 @@ func (e *Engine) eval() int {
 	if e.EG.on() {
 		score += e.egEval()
 	}
+	if e.Mid.on() {
+		score += e.midEval()
+	}
 	if p.Side != 0 {
 		score = -score
 	}

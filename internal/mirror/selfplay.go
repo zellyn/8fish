@@ -67,6 +67,14 @@ type PlayerCfg struct {
 	// untaxed (node-budget behavior).
 	EGCost float64
 
+	// Mid enables the phase-gated MIDDLEGAME terms (king safety +
+	// positional set, midgame.go). Zero value = OFF (byte-identical).
+	// Pair it with MidCost so cycle-budgeted screens pay the real 6502 tax.
+	Mid MidParams
+	// MidCost is the estimated per-gated-eval-call 6502 cost of the Mid
+	// terms, charged only in CycleBudget mode (Costs.MidTerm).
+	MidCost float64
+
 	// EvalTermsCost is the estimated per-eval-call 6502 cost of the Extra
 	// terms, charged only in CycleBudget mode (Costs.EvalTerm). 0 leaves the
 	// terms untaxed (node-budget behavior). For the ported rook set use
@@ -116,6 +124,10 @@ func (c *PlayerCfg) engine() *Engine {
 	e.EG = c.EG
 	if c.EGCost != 0 {
 		e.Costs.EGTerm = c.EGCost
+	}
+	e.Mid = c.Mid
+	if c.MidCost != 0 {
+		e.Costs.MidTerm = c.MidCost
 	}
 	if c.EvalTermsCost != 0 {
 		e.Costs.EvalTerm = c.EvalTermsCost

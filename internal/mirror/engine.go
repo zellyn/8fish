@@ -147,6 +147,13 @@ type Engine struct {
 	// gated endgame leaf allocates nothing.
 	egBuf egFeatures
 
+	// Mid holds the phase-gated MIDDLEGAME terms (king safety + the
+	// positional/squeeze set). Zero value = OFF: a byte-identical no-op
+	// versus the asm's current eval. See midgame.go.
+	Mid MidParams
+	// midBuf is midEval's scratch for its single piece-list pass.
+	midBuf midFeatures
+
 	Best      Move // root best move (BESTFROM/BESTTO/BESTFLAGS)
 	RootScore int
 

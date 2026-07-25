@@ -141,6 +141,7 @@ func (e *Engine) iterateWindow(depth, alpha, beta int) {
 	e.Pos.Ply = 0
 	e.Best = NoMove
 	e.aborted = false
+	e.numExt = 0 // per-iterate reset; balanced save/restore keeps it 0 anyway
 	e.inChk[0] = e.curInCheck()
 	e.alpha[0] = alpha
 	e.beta[0] = beta
@@ -639,6 +640,13 @@ func (e *Engine) moveLoop() int {
 				}
 			}
 
+			// Check extension: the move just made gives check (inChk[ply+1]),
+			// so search the child one ply deeper (don't decrement remaining
+			// depth), capped at CheckExt.MaxExt extensions per path. Never in
+			// quiescence, never simultaneously with an LMR reduction (a checking
+			// move is already mode < 2 via the !inChk[ply+1] reduction gate).
+			ext := e.checkExt(qs, ply)
+
 			var score int
 			for {
 				e.beta[ply+1] = -e.alpha[ply]
@@ -647,13 +655,17 @@ func (e *Engine) moveLoop() int {
 				} else {
 					e.alpha[ply+1] = -e.beta[ply]
 				}
+				// Child horizon delta: +ext for a check extension, or the LMR
+				// reduction for a reduced scout (mutually exclusive with ext).
+				dd := ext
 				if mode >= 2 {
-					e.MaxDepth -= mode - 1 // reduced scout: shrink the horizon
-					score = -e.search()
-					e.MaxDepth += mode - 1
-				} else {
-					score = -e.search()
+					dd = -(mode - 1) // reduced scout: shrink the horizon
 				}
+				e.MaxDepth += dd
+				e.numExt += ext
+				score = -e.search()
+				e.numExt -= ext
+				e.MaxDepth -= dd
 				e.unmake()
 				if e.aborted {
 					return e.alpha[ply] // node budget hit: unwind (result discarded)
@@ -785,6 +797,24 @@ func (e *Engine) done() int {
 	}
 	e.ttstore(bound, e.ttBF[ply], e.ttBT[ply], e.alpha[ply])
 	return e.alpha[ply]
+}
+
+// checkExt returns the child horizon extension (0 or 1) for the move just
+// made at parent ply (so p.Ply == ply+1, inChk[ply+1] and undo[ply] are set).
+// It extends by 1 when the feature is on, the node is not quiescence, the move
+// gives check, the per-path extension budget (numExt < MaxExt) is not spent,
+// and — with CapturesOnly — the checking move is also a capture.
+func (e *Engine) checkExt(qs bool, ply int) int {
+	if qs || !e.CheckExt.on() {
+		return 0
+	}
+	if !e.inChk[ply+1] || e.numExt >= e.CheckExt.MaxExt {
+		return 0
+	}
+	if e.CheckExt.CapturesOnly && e.undo[ply].cap == 0 {
+		return 0
+	}
+	return 1
 }
 
 func (e *Engine) killerMatch(ply int, m Move) bool {

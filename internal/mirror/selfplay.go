@@ -21,6 +21,10 @@ type PlayerCfg struct {
 	Ord         OrderParams
 	LMP         LMPParams
 	Asp         AspirationParams
+	// CheckExt enables check extensions in the main search (zero value = off,
+	// byte-identical). No cost knob is needed: the extension is taxed under a
+	// cycle budget purely through the extra nodes it searches.
+	CheckExt CheckExtParams
 	// CM enables the countermove heuristic (zero value = off). Pair it with
 	// CMCost so cycle-budgeted screens pay its real per-node 6502 tax.
 	CM CountermoveParams
@@ -103,6 +107,7 @@ func (c *PlayerCfg) engine() *Engine {
 	}
 	e.LMP = c.LMP
 	e.Asp = c.Asp
+	e.CheckExt = c.CheckExt
 	e.CM = c.CM
 	if c.CMCost != 0 {
 		e.Costs.Countermove = c.CMCost

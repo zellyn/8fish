@@ -283,6 +283,9 @@ the target machine).
   enabled); VBL timing path (D9) validated against the harness's
   cycle-fed $C019 first, then real or fully-emulated IIe (stage-2
   goapple2); optional hires board (D7); optional Super Serial bridge.
+  The UI must read every key through `entkey` (asm/entropy.inc) and call
+  `entseed` before each search: that keystroke-timing counter is the only
+  entropy source the machine has, and the eval dither needs it (D13).
   Pondering stays out of scope even here (it would invalidate the
   calibration story).
 

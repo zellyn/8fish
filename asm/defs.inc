@@ -429,8 +429,25 @@ SMODE      = $0DE0      ; child window mode for the move being searched:
                         ;  0 full window, 1 zero-window scout (PVS),
                         ;  2/3 scout reduced by 1/2 (LMR)
 
-; $0210-$0221 is free driver-scratch RAM (was FT_ROOKX's RKCNT[16] at
+; $0213-$0221 is free driver-scratch RAM (was FT_ROOKX's RKCNT[16] at
 ; $0210 and XSTRUCT at $0220, removed 2026-07-23 with the feature).
+
+; ---- Entropy collector (asm/entropy.inc; M8 keyboard/text UI driver) ----
+; The IIe has no clock and no RNG, so the eval dither's SEED is MANUFACTURED
+; from human keystroke timing: ENTCNT spins in the driver's keyboard-wait
+; loop (16 cycles/iteration, so its low byte turns over every ~4ms — far
+; below any human's timing jitter) and its low byte is folded into ENTROPY at
+; every keypress. ENTROPY's low byte becomes SEED at move time (entseed).
+; ENGINE code never reads or writes these three bytes: the collector lives
+; entirely in the driver, so the test harness (which pokes SEED directly)
+; and the on-device collector cannot collide.
+ENTCNT     = $0210      ; 16-bit free-running keyboard-wait loop counter
+                        ;  (LE; wraps every ~1.03s of waiting)
+ENTROPY    = $0212      ; accumulated entropy byte: ROL-then-EOR fold of
+                        ;  ENTCNT's low byte at each keypress. DELIBERATELY
+                        ;  never initialized — cold-boot RAM garbage and a
+                        ;  warm-restart carryover of the previous session's
+                        ;  value are both free entropy.
 
 ; Resident-book probe I/O (asm/book.s). Free driver-scratch RAM between
 ; PWBITS/PBBITS ($0200-$020F) and ITSTART ($0230). Touched only by the book
@@ -518,6 +535,12 @@ MOVESTACKTOP = $2000    ; exclusive end; generator overflow-checks this.
 
 ; Transposition table: 4096 x 8 bytes in AUX $0200-$81FF (see D6).
 TTBASE     = $0200
+
+; ---- Keyboard (real hardware; M8 driver + entropy collector) ----
+; The M8 UI drives these directly: monitor ROM is unmapped while LC RAM is
+; read-enabled, so there is no COUT/RDKEY to call.
+KBD        = $C000      ; read: bit7 = key waiting, bits 0-6 = ASCII
+KBDSTRB    = $C010      ; read: clear the keyboard strobe
 
 ; ---- Harness I/O (plain RAM on real hardware; see docs/testing.md) ----
 COUT_TRAP   = $BFF0

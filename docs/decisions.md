@@ -271,3 +271,59 @@ rewrote the measurement design; the four products, in order of rigor:
 4. **Period showdown (M7)**: emulated period engines at authentic 1 MHz,
    equal per-move emulated time, paired openings, pre-registered win
    criterion (>=65% over >=100 paired games).
+
+## D13: Eval-dither SEED manufactured from human keystroke timing — accepted, module landed (2026-07-25)
+
+The eval dither (`eval.s evseed`, `SEED` = $FD) needs a fresh per-move
+byte or the engine is fully deterministic and replays identical games
+from a repeated opening (measured: with dither off, a 300-game symmatch
+over a 40-opening pool is really ~40 distinct games; mirror measurement
+below: 20 repetitions of one opening produced **1** distinct game).
+The harness pokes `SEED` from the host, but the IIe has **no real-time
+clock, no timer, and no hardware RNG**, so the shipped M8 build has to
+manufacture entropy locally.
+
+**Source: when the human presses a key.** Nobody releases a key on a
+cycle boundary. `asm/entropy.inc`:
+
+- `ENTCNT` ($0210, 16-bit) spins in the driver's keyboard-wait loop
+  (`entkey`: `inc`/`bne`/`lda KBD`/`bpl` = **16 cycles/iteration**, so its
+  low byte turns over every 4096 cycles = **4.01ms** and the full 16 bits
+  every ~1.03s) — both far below human timing jitter, which makes the low
+  byte uniform over 0..255 for any real keypress.
+- At **every** keypress (menus, move entry, confirmations — the UI reads
+  all keys through `entkey`) the counter's low byte folds into `ENTROPY`
+  ($0212) with `ENTROPY = ROL(ENTROPY) EOR ENTCNT` (`entfold`). A 4-5
+  character move entry therefore mixes several independent inter-keystroke
+  intervals, and the accumulator is never cleared: entropy accumulates
+  across the session.
+- `entseed` installs `SEED = ENTROPY`, forced nonzero ($5A fallback, since
+  `SEED` = 0 means dither off), leaving the accumulator to keep folding.
+- `ENTCNT`/`ENTROPY` are deliberately **never initialized**: cold-boot RAM
+  garbage and a warm-restart carryover of the previous session are free
+  entropy. First move of a game is already covered because starting a game
+  is itself keystrokes (menu/setup); a machine-first game with literally no
+  prior keypress falls back to whatever RAM held (worst case a fixed first
+  move, which is a book move anyway).
+- Optional ponder hook: `entfold` also takes an arbitrary byte, so a driver
+  that ponders can fold `NODECNT`/`CLOCK` at the moment the human's first
+  keystroke interrupts the search — how far the search got is as
+  unpredictable as the keypress. Nothing in the search polls the keyboard,
+  so this costs the hot path nothing.
+
+**Separation from the engine.** The collector is driver-only cold code:
+no engine file includes `entropy.inc`, and `engine.bin` is byte-identical
+with this landed (verified: same sha256; `TestMicroAB` fingerprint gate
+unchanged). A given `SEED` still produces exactly the same tree — this
+decision changes only where the seed comes FROM.
+
+**Harness parity.** `internal/entropy` is the byte-for-byte host model of
+the same collector, proven identical to the real 6502 code by
+`TestASMParity` (the actual `entropy.inc` runs under the emulator with the
+harness input traps standing in for $C000, and the test plays the human).
+`ucibridge`'s `Dither` now derives its per-move seed through that model
+(`DitherSource: "entropy"`, the default) fed by the real elapsed time until
+the opponent's move arrives plus the emulated cycles our own search spent —
+so the gauntlet validates the shipping entropy plan instead of bypassing it
+with a PRNG the IIe could never have. `DitherSource: "prng"` +
+`DitherSeed` keeps a reproducible stream for tests.

@@ -66,8 +66,12 @@ restarting the process — and the a2run core is now the importable
 `harness` package (`harness.New` / `(*Machine).Run`); `cmd/a2run` is a
 thin CLI wrapper around it, and perft/gauntlet rigs (`internal/chesstest`)
 call it in-process instead of scraping CLI output. The UCI bridge
-(`cmd/uci`, M3) ended up not needing the input traps: no 6502 code reads
-`$BFF1`/`$BFF2` today — `cmd/uci` instead keeps one long-lived *Go*
+(`cmd/uci`, M3) ended up not needing the input traps: the only 6502 code
+that reads `$BFF1`/`$BFF2` is `asm/entropytest.s`, which assembles the M8
+entropy collector (`asm/entropy.inc`, D13) with `HARNESSKBD` so the input
+traps stand in for the real `$C000`/`$C010` and `internal/entropy`'s tests
+can play the human, choosing the emulated cycle at which each key arrives
+— `cmd/uci` instead keeps one long-lived *Go*
 process that pokes each position directly into a fresh `Machine` per
 move and carries the aux-bank TT bytes forward between them (see
 `internal/ucibridge`). Still planned: PC-trap callbacks, and a

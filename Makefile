@@ -10,7 +10,7 @@ ifneq ($(CC65_VERSION),$(TESTED_CC65))
 $(warning ca65 is $(CC65_VERSION); this repo was last tested with $(TESTED_CC65))
 endif
 
-.PHONY: all hello perft banktest engine tables test test-siblings clean
+.PHONY: all hello perft banktest entropytest engine tables test test-siblings clean
 
 all: hello perft engine test
 
@@ -26,6 +26,8 @@ perft: asm/perft.bin
 banktest: asm/banktest.bin
 	go run ./cmd/a2run -bin asm/banktest.bin
 
+entropytest: asm/entropytest.bin
+
 engine: asm/engine.bin
 
 tables: asm/tables.s
@@ -33,6 +35,12 @@ tables: asm/tables.s
 asm/banktest.bin: asm/banktest.s asm/banktest.cfg
 	cd asm && $(CA65) banktest.s -o banktest.o
 	cd asm && $(LD65) -C banktest.cfg banktest.o -o banktest.bin
+
+# Standalone driver that exercises the entropy collector (asm/entropy.inc)
+# under the harness emulator; driven by internal/entropy's tests.
+asm/entropytest.bin: asm/entropytest.s asm/entropy.inc asm/defs.inc asm/entropytest.cfg
+	cd asm && $(CA65) entropytest.s -o entropytest.o
+	cd asm && $(LD65) -C entropytest.cfg entropytest.o -o entropytest.bin
 
 asm/tables.s: cmd/gentables/main.go cmd/gentables/pesto.go
 	go run ./cmd/gentables

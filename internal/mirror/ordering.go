@@ -351,6 +351,12 @@ func (e *Engine) orderedMoveLoop() int {
 			}
 		}
 
+		// Check extension (see moveLoop / CheckExtParams): extend the child
+		// one ply when this move gives check, capped per path. Never in QS
+		// (orderedMoveLoop is full-width only, so qs=false here), never with an
+		// LMR reduction (a checking move is mode < 2 via the reduction gate).
+		ext := e.checkExt(false, ply)
+
 		var score int
 		for {
 			e.beta[ply+1] = -e.alpha[ply]
@@ -359,13 +365,15 @@ func (e *Engine) orderedMoveLoop() int {
 			} else {
 				e.alpha[ply+1] = -e.beta[ply]
 			}
+			dd := ext
 			if mode >= 2 {
-				e.MaxDepth -= mode - 1
-				score = -e.search()
-				e.MaxDepth += mode - 1
-			} else {
-				score = -e.search()
+				dd = -(mode - 1)
 			}
+			e.MaxDepth += dd
+			e.numExt += ext
+			score = -e.search()
+			e.numExt -= ext
+			e.MaxDepth -= dd
 			e.unmake()
 			if e.aborted {
 				return e.alpha[ply] // node budget hit: unwind (result discarded)

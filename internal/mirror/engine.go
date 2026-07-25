@@ -55,6 +55,14 @@ type Engine struct {
 	// loop (zero value = off).
 	LMP LMPParams
 
+	// CheckExt configures check extensions in the MAIN search (zero value =
+	// off: a byte-identical no-op). See CheckExtParams. numExt is the running
+	// count of check extensions applied on the current root-to-node path (the
+	// cap enforcer); it is balanced save/restored around every extended child
+	// search and reset to 0 at each iterate.
+	CheckExt CheckExtParams
+	numExt   int
+
 	// CM configures the countermove heuristic in the five-pass moveLoop
 	// (zero value = off: a byte-identical no-op). See countermove.go.
 	CM CountermoveParams
@@ -250,6 +258,39 @@ type LMPParams struct {
 func (p *LMPParams) lmpThreshold(d int) int {
 	return p.Base + p.Mult*d + p.Quad*d*d
 }
+
+// CheckExtParams configures check extensions in the MAIN search (never in
+// quiescence). When a move just made gives check, the child is searched one
+// ply DEEPER (remaining depth is not decremented for that move) so a forcing
+// checking sequence is seen past the normal horizon. This is the standard
+// check extension.
+//
+// Explosion guard: MaxExt caps the number of check extensions applied along a
+// single root-to-leaf path (numExt in Engine). A long checking sequence can
+// then deepen the search by at most MaxExt plies, so the tree cannot blow up
+// without bound. LMR interaction: a checking move (inChk[ply+1]) is already
+// never depth-reduced by the LMR gate (which requires !inChk[ply+1]), so an
+// extended move is never simultaneously reduced — the two are mutually
+// exclusive by construction. Futility interaction: the extension is applied
+// to the CHILD's remaining depth; the parent's RFP/futility pruning (which
+// keys off the parent node, not in check) is unaffected.
+//
+// Under a cycle budget the extension carries no direct per-node cost knob: it
+// simply produces a bigger tree, whose extra nodes are charged by the normal
+// chargeNode accounting — so the budget taxes it honestly and automatically.
+//
+// Zero value (MaxExt == 0) disables check extensions: a byte-identical no-op.
+type CheckExtParams struct {
+	// MaxExt caps check extensions along a root-to-leaf path. 0 = off.
+	MaxExt int
+	// CapturesOnly, when set, extends only checking moves that are also
+	// captures (a tighter variant to curb explosion — a checking capture is
+	// the most likely to be tactically forcing). Off = extend every check.
+	CapturesOnly bool
+}
+
+// on reports whether check extensions are enabled.
+func (c *CheckExtParams) on() bool { return c.MaxExt > 0 }
 
 // AspPolicy selects how an aspiration-window fail-low/high is widened for
 // the re-search.

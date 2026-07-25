@@ -3,6 +3,47 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-25 — CHECK EXTENSIONS (mirror): cap N=1, all checks = +12.6 ± 9.0 (4000g) — PORT
+
+Standard check extension in the MAIN search (never QS): when a move gives
+check (inChk[ply+1], already computed in make), search the child one ply
+deeper (don't decrement remaining depth), capped at MaxExt extensions per
+root-to-leaf path (numExt counter, balanced save/restore around the child
+search). LMR interaction: a checking move is already never depth-reduced
+(the mode≥2 gate requires !inChk[ply+1]), so extension and reduction are
+mutually exclusive by construction — no double-counting. Futility: the
+extension is on the CHILD horizon; the parent's RFP/futility (parent not in
+check) is untouched. Cost model: no cycle-cost knob — the extension is
+taxed purely through the extra nodes it searches (normal chargeNode), so
+the 143M cycle budget discounts it honestly.
+
+Fixed-depth-6 tree blow-up (asm-matched 0x1f, 3 positions):
+| variant       | nodes vs off |
+|---------------|--------------|
+| cap1 (N=1)    | +12.9% / +11.5% / +26.7% |
+| cap2 (N=2)    | +13.9% / +15.1% / +33.1% |
+| cap3 (N=3)    | +13.9% / +15.3% / +33.2% (≈ cap2: check chains >2 are rare) |
+| cap2 caps-only| +5.8% / +9.2% / +33.8% |
+
+Cycle-budget screen (cbudget 143M, asm-matched 0x1f both sides, ON vs OFF,
+self-play, aggregated across seeds):
+| variant (A=ON)          | Elo ± err | games |
+|-------------------------|-----------|-------|
+| **cap1 (N=1, all checks)** | **+12.6 ± 9.0** | 4000 |
+| cap2 (N=2, all checks)  | +7.1 ± 12.6 | 2000 |
+| cap2 captures-only      | −0.3 ± 17.8 | 1000 |
+
+Read: cap1 is the operating point — a SINGLE check extension captures the
+tactical benefit (+12.6 ± 9.0, lower bound +3.6) while adding the fewest
+expensive nodes, so the cycle budget taxes it least. cap2/cap3 add depth
+past the first check for little extra Elo but more cost (nets +7). Restricting
+to checking CAPTURES kills the gain (−0.3) — the QUIET forcing checks carry
+the value. RECOMMEND porting the plain single-ply check extension (MaxExt=1,
+all checks): cheap (gives-check is already in make), 6502-idiomatic (skip the
+depth decrement for a checking move, 1-ply path cap), modest but real. Mirror
+only; asm untouched. OFF path byte-identical (TestCheckExtOffIsNoop, both
+move loops, both budget kinds). Final gate remains the asm SPRT.
+
 ## 2026-07-24 — FIXED the Sargon Hard-Mode promotion "no reply" quirk (root cause: forced-reply detection, not promotion entry)
 
 Resolved the bug that drew ~10% of the 300-game symmetric run (g10 f7f8r,

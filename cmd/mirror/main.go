@@ -293,6 +293,8 @@ func match(args []string) {
 	bSEE := fs.String("bsee", "", "B SEE params")
 	aSEECost := fs.String("aseecost", "", "A SEE cycle costs: gate,call,rescanitem (cycle mode only)")
 	bSEECost := fs.String("bseecost", "", "B SEE cycle costs")
+	aCkExt := fs.String("ackext", "", "A check-extension params: maxext[,capturesonly] (empty = off)")
+	bCkExt := fs.String("bckext", "", "B check-extension params")
 	fs.Parse(args)
 
 	lines, err := mirror.GenOpenings(sprt.Openings, *pairs, *seed)
@@ -301,13 +303,15 @@ func match(args []string) {
 		FixFutility: *aFix, LMR: parseLMR(*aLMR), QS: parseQS(*aQS), KB: loadKB(*aKB), Fut: parseFut(*aFut), Ord: parseOrd(*aOrd),
 		LMP: parseLMP(*aLMP), Asp: parseAsp(*aAsp), CM: parseCM(*aCM), CMCost: *aCMCost, Improving: parseImp(*aImp),
 		SEE: parseSEE(*aSEE), SEECosts: parseSEECost(*aSEECost),
-		Extra: parseExtra(*aExtra), EvalTermsCost: *aExtraCost,
+		CheckExt: parseCheckExt(*aCkExt),
+		Extra:    parseExtra(*aExtra), EvalTermsCost: *aExtraCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	b := mirror.PlayerCfg{Features: byte(*bMask), Weights: parseWeights(*bw), Depth: *depth,
 		FixFutility: *bFix, LMR: parseLMR(*bLMR), QS: parseQS(*bQS), KB: loadKB(*bKB), Fut: parseFut(*bFut), Ord: parseOrd(*bOrd),
 		LMP: parseLMP(*bLMP), Asp: parseAsp(*bAsp), CM: parseCM(*bCM), CMCost: *bCMCost, Improving: parseImp(*bImp),
 		SEE: parseSEE(*bSEE), SEECosts: parseSEECost(*bSEECost),
-		Extra: parseExtra(*bExtra), EvalTermsCost: *bExtraCost,
+		CheckExt: parseCheckExt(*bCkExt),
+		Extra:    parseExtra(*bExtra), EvalTermsCost: *bExtraCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	start := time.Now()
 	res, err := mirror.Match(a, b, lines, *pairs, *workers, *seed)
@@ -319,8 +323,8 @@ func match(args []string) {
 	if *cbudget > 0 {
 		mode = fmt.Sprintf("budget %d cycles/move (maxiters %d)", *cbudget, *maxiters)
 	}
-	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q extra=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q extra=%q) %s: %s (%v)\n",
-		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aImp, *aSEE, *aExtra, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bImp, *bSEE, *bExtra,
+	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q) %s: %s (%v)\n",
+		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aImp, *aSEE, *aCkExt, *aExtra, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bImp, *bSEE, *bCkExt, *bExtra,
 		mode, res, time.Since(start).Round(time.Second))
 }
 
@@ -524,6 +528,22 @@ func parseImp(s string) mirror.ImprovingParams {
 		LMR:      lmr != 0,
 		LMRExtra: lmrextra,
 	}
+}
+
+// parseCheckExt parses "maxext[,capturesonly]" into a CheckExtParams;
+// empty means off (zero value). maxext caps check extensions per path;
+// capturesonly (0/1) restricts extensions to checking captures.
+func parseCheckExt(s string) mirror.CheckExtParams {
+	if s == "" {
+		return mirror.CheckExtParams{}
+	}
+	var maxext, capsOnly int
+	n, err := fmt.Sscanf(s, "%d,%d", &maxext, &capsOnly)
+	if (err != nil && n < 1) || n < 1 {
+		fmt.Fprintf(os.Stderr, "bad check-extension params %q (want maxext[,capturesonly])\n", s)
+		os.Exit(2)
+	}
+	return mirror.CheckExtParams{MaxExt: maxext, CapturesOnly: capsOnly != 0}
 }
 
 // parseSEE parses "mode,margin,deferfw,pruneqs,deferqs" into an

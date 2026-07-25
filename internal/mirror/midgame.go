@@ -102,8 +102,25 @@ func (t *MidParams) on() bool { return t.Enable }
 // value). Pawns and kings contribute nothing.
 var ksUnit = [8]int{Knight: 2, Bishop: 2, Rook: 3, Queen: 5}
 
-// DefaultMid is the hand-set starting point for BOTH groups (see
-// MidKingSafety / MidPositional for the single-group screens).
+// DefaultMid is the hand-set weight set for BOTH groups (see MidKingSafety
+// / MidPositional for the single-group screens).
+//
+// SCREENED — DO NOT PORT (docs/results.md 2026-07-25, cycle-budget self-play
+// at -cbudget 143000000, asm-matched 0x1f, ON vs OFF):
+//
+//	king safety, tax 657 (11.5% of all cycles)   -25 +/- 13  (2000 g)
+//	king safety, UNTAXED                         -19 +/- 13  (2000 g)
+//	  ... shield/open/exposed only, UNTAXED      -15 +/- 13  (2000 g)
+//	  ... attacker table + pawn storm, UNTAXED    +2 +/- 13  (2000 g)
+//	positional, tax 438 (7.9%), pooled 2 seeds   +12.9 +/- 7.3 (6000 g)
+//	  ... pawn-only half (Backward+Phalanx), free  -2.6 +/- 7.3 (6000 g)
+//	  ... piece-only half, tax 438                 +1.9 +/- 7.3 (6000 g)
+//	both groups, tax 876 (14.7%)                 -28 +/- 13  (2000 g)
+//
+// The king-safety group loses with its cost set to ZERO, so the knowledge is
+// wrong, not the price. The positional group's +12.9 is not reproduced by
+// either of its halves (-2.6 and +1.9 at the same 6000-game precision),
+// which is why the recorded verdict is "unconfirmed", not "port".
 var DefaultMid = MidParams{
 	Enable:     true,
 	PhaseMin:   7,

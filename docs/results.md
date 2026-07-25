@@ -3,6 +3,185 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-25 — MIDDLEGAME EVAL TERMS (mirror): king safety FAILS (-19 +/- 13 even UNTAXED), positional set +13 +/- 7 but its own halves do not reproduce it — DO NOT PORT YET
+
+The two biggest loss buckets from the same-day loss diagnosis (positional
+squeeze 42%, king-safety collapse 18%) built as `internal/mirror/midgame.go`,
+phase-gated to `Pos.Phase >= 7` — exactly ABOVE the endgame set's and mop-up's
+`Phase <= 6`, so the two are disjoint by construction. Mirror only; no asm
+change. Commit 480777f (feature+tests).
+
+**THE HEADLINE IS A NEGATIVE.** The king-safety group loses even when it is
+charged NOTHING for its cycles, and the positional group's gain does not
+survive decomposition. Neither is port-worthy today, and per byte both are
+an order of magnitude behind the check-extension port already queued.
+
+**The terms** (white POV; one shared 32-slot piece-list pass; all relational,
+because any term that is a pure function of one piece's square is already in
+the tapered Texel-tuned PSQT):
+
+| group | term | formula | weight |
+|---|---|---|---|
+| KS | KSAtk | superlinear table over ATTACK UNITS = sum over enemy N/B/R/Q of {N:2,B:2,R:3,Q:5}, full inside Chebyshev 2 of the king, half at 3 | `{0,2,8,18,32,50,72,98,128,162,200,242,288,338,392,450}` |
+| KS | KSDefend | subtract half the same unit sum for OUR pieces near OUR king, floored at 0 | on |
+| KS | KSPawn | +1 unit per enemy pawn within Chebyshev 2 of the king | 1 |
+| KS | KSOpen / KSFullOpen | per king-zone file (kf-1..kf+1) with no own pawn ahead of the king / additionally with no pawn of either colour | 12 / 8 |
+| KS | KSGap | per rank of distance to the nearest own pawn ahead on each zone file, capped 3 | 5 |
+| KS | KSExposed | `max(0, 3 - CMD[ourK])` while the enemy has a queen (halved with rooks but no queen) | 14 |
+| POS | OutpostN / OutpostB | N/B on the relative 4th-6th rank, protected by an own pawn, with NO enemy pawn on either adjacent file ahead of it (pure bitmask algebra) | 16 / 8 |
+| POS | Backward | pawn whose neighbours are ALL more advanced and whose advance square is controlled by an enemy pawn | 8 |
+| POS | Phalanx | pawn with an own pawn beside it or defending it | 5 |
+| POS | BadBishop | per bishop, `w * (own pawns on its complex - own pawns on the other)` (signed, centred) | 3 |
+| POS | BlockedCtr | own d/e pawn on its 2nd/3rd rank with an own NON-PAWN piece directly in front | 12 |
+
+State used: the piece list, PHASE, the two kings, per-file pawn RANK bitmasks
+(8 B per colour — NOT maintained today, but pawnterm's existing per-file scan
+can fill them at ~zero cost, and pawnterm is only recomputed when the pawn
+structure changes), and the mop-up's existing 64-byte CMD table.
+
+**SCREEN A — the diagnosis-FEN probe: THE KING-SAFETY TERM DOES NOT SEE THE
+DANGER.** Reproducing the diagnosis's own instrument (gap = shallow score at
+the 143M operating budget minus a 5x-deeper oracle at 715M, terms OFF for the
+oracle; positive = we over-rate the position):
+
+| FEN | phase | static eval OFF | ks delta | pos delta | gap OFF | gap ks | gap both | oracle |
+|---|---|---|---|---|---|---|---|---|
+| `8/3r1k2/2R3pp/p3bp2/N3p2P/3nP1P1/4KPB1/8 w` (blindGap 1860) | 8 | -133 | -42 | -20 | +12 | -18 | -20 | -105 |
+| `8/8/6p1/P2p1k2/5P2/3KQ3/1q6/8 w` (644) | 8 | +45 | **+32** | 0 | -700 | -700 | -700 | +709 |
+| `5k2/3n3Q/3r2p1/4p1K1/4P3/7P/3p2P1/8 w` (432) | 7 | +79 | -6 | +5 | +432 | +432 | +432 | -432 |
+| `5r1k/pR5p/3p3p/4pP2/3q3b/2rB4/4QPP1/3R2K1 w` | 18 | -7 | 0 | +11 | -6 | -6 | +5 | -6 |
+| `4rrk1/ppp2ppp/8/3PbN2/6P1/1Pq1P2P/4Q3/3R1RK1 w` | 18 | -66 | -27 | -25 | +4 | -23 | -35 | -81 |
+
+Read: on ks-644 the term moves the eval the WRONG WAY (+32 when white is the
+side in trouble) because attacker counting is symmetric — both kings are
+active at phase 8 and the term cannot tell whose attack lands first. On ks-432
+it moves -6, nowhere near the 432 gap, and the shallow SEARCH score does not
+move at all. Only ks-1860 and pos-b move the intended way. Note also that all
+three king-safety FENs are at phase 7-8, i.e. they are the tail of the bucket
+(blindGap 432..1860 vs the bucket median 301) and largely tactical.
+
+**SCREEN A at corpus scale (TestMidBlindGap) — THERE IS NO HORIZON BLINDNESS
+LEFT TO HARVEST at the operating point.** 400 quiet self-play FENs, 329 of
+them middlegame:
+
+| group | median \|gap\| | mean \|gap\| | mean signed gap | positions closer/further vs OFF |
+|---|---|---|---|---|
+| OFF | **8.0** | 14.7 | -3.3 | — |
+| ks | 12.0 | 19.6 | -1.1 | 96 / 203 |
+| pos | 12.0 | 18.0 | -2.4 | 105 / 195 |
+| both | 17.0 | 22.9 | -0.4 | 87 / 229 |
+
+At 143M cycles/move our shallow score already agrees with a 5x-deeper search
+to a MEDIAN OF 8cp on quiet middlegame positions, and only **1 of 329** has
+\|gap\| >= 200. The premise "a static term steers the shallow search away from
+what only the deep search sees" has almost no room to operate here: the
+positions with a large blindGap are not quiet positions, they are tactical
+ones. Every group makes the shallow score DISAGREE slightly more with the OFF
+oracle (which is expected — the terms shift the scale — but it is also the
+only thing this instrument can measure).
+
+**SCREEN B — the real gate: cycle-budget self-play** (`-cbudget 143000000`,
+asm-matched 0x1f both sides, shipped weights/QS, terms ON vs OFF, seed 6502
+unless noted). "Tax" is the per-gated-eval-call 6502 cost charged via
+`Costs.MidTerm`; the gate fires on **100% of eval calls** in a middlegame
+search (TestMidCosted), so a tax of 438 is 7.94% of ALL cycles, 657 is 11.5%
+and 876 is 14.7% (for scale, the REJECTED FT_ROOKX set cost 3.97%):
+
+| variant | tax (cyc/call) | games | W/D/L | Elo +/- err |
+|---|---|---|---|---|
+| **king safety (all KS terms)** | 657 | 2000 | 644/567/789 | **-25 +/- 13** |
+| **king safety, UNTAXED** | 0 | 2000 | 652/586/762 | **-19 +/- 13** |
+| KS shield/open/exposed only, UNTAXED | 0 | 2000 | 643/627/730 | **-15 +/- 13** |
+| KS attacker table + pawn storm only, UNTAXED | 0 | 2000 | 706/599/695 | +2 +/- 13 |
+| **positional (all POS terms)** | 438 | 2000 | 729/606/665 | **+11 +/- 13** |
+| **positional, seed 4711** | 438 | 4000 | 1423/1313/1264 | **+14 +/- 9** |
+| **positional, POOLED** | 438 | **6000** | 2152/1919/1929 | **+12.9 +/- 7.3** |
+| positional | 219 | 2000 | 694/636/670 | +4 +/- 13 |
+| positional, UNTAXED | 0 | 2000 | 733/628/639 | +16 +/- 13 |
+| pawn-only half (Backward+Phalanx), UNTAXED | 0 | 2000 | 666/639/695 | -5 +/- 13 |
+| pawn-only half, UNTAXED, seed 4711 | 0 | 4000 | 1377/1230/1393 | -1 +/- 9 |
+| pawn-only half, POOLED | 0 | 6000 | 2043/1869/2088 | **-2.6 +/- 7.3** |
+| piece-only half (Outpost+BadBishop+BlockedCtr) | 438 | 2000 | 680/632/688 | -1 +/- 13 |
+| piece-only half, seed 4711 | 438 | 4000 | 1407/1226/1367 | +3 +/- 9 |
+| piece-only half, POOLED | 438 | 6000 | 2087/1858/2055 | **+1.9 +/- 7.3** |
+| **both groups combined** | 876 | 2000 | 600/637/763 | **-28 +/- 13** |
+| both groups combined, UNTAXED | 0 | 2000 | 709/602/689 | +3 +/- 13 |
+
+**VERDICTS.**
+
+1. **King safety: DEAD, and not for cost reasons.** -19 +/- 13 with the cycle
+   tax set to ZERO. The harmful part is the shield/open-file/exposure
+   sub-group (-15 +/- 13 untaxed); the attacker-count table is a null
+   (+2 +/- 13). This is the first feature in this project to measure
+   NEGATIVE with its cost removed — i.e. the KNOWLEDGE is wrong, not the
+   price. Most likely mechanism: our king-shield/exposure penalties fight
+   the tapered EG king PSQT (which starts rewarding centralization from
+   phase ~8) and, in self-play, punish exactly the active-king play that the
+   endgame terms were shipped to encourage. No optimization pass can save a
+   term that loses for free, so the "optimize before rejecting" rule does
+   not apply.
+2. **Positional set: a real but unconfirmed +13 +/- 7.3 at its honest tax**
+   (6000 games, two seeds, both positive: +11 and +14). BUT its two halves,
+   measured to +/-7.3 each over 6000 games, are **-2.6** (pawn-only) and
+   **+1.9** (piece-only) — they do not reproduce the union, and 2.6 + 1.9
+   does not add up to 13. Either there is a real interaction, or the union
+   number is ~1.5 sigma high. Given the FT_ROOKX precedent (a mirror screen
+   of +26..+30 that became -19 in the asm SPRT), a union result its own
+   decomposition cannot explain is NOT sufficient evidence to spend image
+   bytes.
+3. **Combined: -28 +/- 13** at the honest tax — the king-safety group's loss
+   plus the cost of both.
+
+**PORT RECOMMENDATION, ranked by Elo per byte (the image has 278 B free):**
+
+| candidate | Elo (honest tax) | est. asm cost | est. bytes (code+tables+scratch) | Elo/byte |
+|---|---|---|---|---|
+| check extensions (already screened, docs above) | +12.6 +/- 9.0 | 0 (taxed via nodes) | ~50-80 | **~0.2** |
+| positional set (5 terms) | +12.9 +/- 7.3 | ~430 cyc/call = 7.9% of all cycles | ~300-400 code + 16 scratch | ~0.03 |
+| piece-only half | +1.9 +/- 7.3 | ~350 cyc/call | ~250 | ~0.008 |
+| pawn-only half (would be FREE — fits pawnterm's cached scan) | -2.6 +/- 7.3 | ~0 marginal | ~120 | negative |
+| king safety | -19 (untaxed) / -25 (taxed) | ~650 cyc/call | ~400-500 | negative |
+
+**DO NOT PORT anything from this batch.** Port the check extension first: it
+is ~7x better per byte and its Elo is confirmed over 4000 games. The
+positional set should be re-run on a third independent seed (and its
+decomposition re-examined) before it is allowed to compete for the 278 free
+bytes; if it is ever ported, the two pawn terms belong INSIDE pawnterm
+(cached, zero marginal cost) and only the three piece terms need a per-eval
+pass.
+
+**Asm cost model** (arithmetic Chebyshev, no new distance table; full sketch
+at the bottom of midgame.go): KS ~650 cyc/call (219 piece-list pass + ~230
+for 10 king distances + ~60 pawns + ~90 zone files + ~50 tables), POS ~430
+(219 pass + 120 per-file bit algebra + 60 outposts + 30 bad bishop), both
+~830 shared. Gate is 7 cycles (`LDA PHASE : CMP #7 : BCC done`) and is the
+only cost in an endgame leaf. Tables: KSAtk 16 B, per-file pawn rank masks
+16 B of scratch.
+
+**Gate/no-leak proofs.** TestMidNoEndgameLeak: 40,882 random-play positions,
+1,273 of them below the gate, **0 leaks** — no position with Phase <= 6 can
+have its eval changed, so the shipped endgame-technique terms and mop-up are
+provably untouched (positive controls included: silent in the two endgame
+FENs, active in two asymmetric middlegames; a SYMMETRIC opening cancels
+exactly, which is the antisymmetry property, not a gate). TestMidOffIdentical:
+OFF path byte-identical (same best move, score and node count) at masks
+0x00/0x07/0x1f with the mop-up and endgame set on. TestMidSanity pins every
+term's mechanics plus exact colour antisymmetry. TestMidCosted proves the tax
+is charged on exactly the gated calls and never in an endgame search.
+
+**What this says about the strategy.** Two independent attempts at
+middlegame eval knowledge have now failed here: FT_ROOKX (rook files /
+doubled rooks / blockade, -19 +/- 33 in the asm SPRT) and this batch. Add
+bishop pair (+3 +/- 9), the Texel retune (+7 +/- 9) and king-bucketed PSQT
+(rejected), and the pattern is consistent: **hand-added middlegame eval
+shape does not convert on this engine at this operating point.** The one new
+piece of evidence is WHY the king-safety branch of the diagnosis was
+mis-prioritized: at 143M cycles/move the shallow score already tracks a
+5x-deeper search to 8cp median on quiet positions, so there is no horizon
+gap for a static term to close — the diagnosis's blindGap >= 200 bucket
+lives in tactical positions, which is a SEARCH problem (check extensions,
+QS) and not an eval one.
+
 ## 2026-07-25 — CHECK EXTENSIONS (mirror): cap N=1, all checks = +12.6 ± 9.0 (4000g) — PORT
 
 Standard check extension in the MAIN search (never QS): when a move gives

@@ -494,11 +494,11 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		}
 		moves = append(moves, s)
 		gt.sargonMoves++
-		if res.ThinkCycles < budget/4 {
+		if sargonInstant(res.ThinkCycles, budget) {
 			gt.sargonBook++ // instant first move => straight out of Sargon's book
 		}
 		lg("MOVE g%d ply1 SARGON(open) move=%s think=%d sargon_instant=%v (no 8fish ponder: opening)",
-			gameNo, s, res.ThinkCycles, res.ThinkCycles < budget/4)
+			gameNo, s, res.ThinkCycles, sargonInstant(res.ThinkCycles, budget))
 		if term, r := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
 			return r
 		}
@@ -582,13 +582,9 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		moves = append(moves, s)
 		sargonPly := len(moves)
 
-		// Sargon's own opening book answers near-instantly (RequestMove returns as
-		// soon as its move-list column changes, long before the budget elapses and
-		// without any CTRL-T). An out-of-book Infinite-level reply always costs at
-		// least the full budget B, so a think far under B is a book/forced reply.
 		gt.sargonMoves++
-		sargonInstant := reply.ThinkCycles < budget/4
-		if sargonInstant {
+		instant := sargonInstant(reply.ThinkCycles, budget)
+		if instant {
 			gt.sargonBook++
 		}
 
@@ -596,7 +592,7 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		// and Sargon think ~= 8fish ponder (budget-matched).
 		lg("MOVE g%d ply%d 8fish move=%s think=%d | sargon_ponder_window=%d || ply%d SARGON move=%s think=%d | 8fish_ponder=%d pred=%s(%s) 8fish_book=%v sargon_instant=%v",
 			gameNo, usPly, sr.move, sr.cycles, sr.cycles,
-			sargonPly, s, reply.ThinkCycles, ponderCyc, sr.ponder, hit, sr.book, sargonInstant)
+			sargonPly, s, reply.ThinkCycles, ponderCyc, sr.ponder, hit, sr.book, instant)
 
 		if term, r := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
 			lg("MOVE g%d after sargon %s -> %s (msg=%q)", gameNo, s, r, reply.Message)
@@ -604,6 +600,15 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		}
 	}
 }
+
+// sargonInstant reports whether a Sargon reply came WITHOUT spending its budget:
+// its own opening book (or a single forced legal reply) commits the move as soon
+// as it appears in the move-list column, which sargon.RequestMove detects inside
+// the budget loop and returns immediately. An out-of-book Infinite-level reply
+// always runs the loop to exhaustion and then needs the forced-commit strobes, so
+// it costs budget + latency (~35.5M at B=30M). "think < budget" therefore
+// separates the two exactly, at any budget, with no magic fraction.
+func sargonInstant(think, budget uint64) bool { return think < budget }
 
 // runSargonCycles advances the Sargon emulator by exactly `cycles` 6502 cycles,
 // during which (Hard Mode) Sargon ponders the opponent's position. Small chunks

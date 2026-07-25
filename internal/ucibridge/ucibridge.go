@@ -18,10 +18,19 @@ import (
 	"math/rand/v2"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/zellyn/chess6502/internal/book"
 	"github.com/zellyn/chess6502/internal/chesstest"
+	"github.com/zellyn/chess6502/internal/entropy"
 	"github.com/zellyn/chess6502/internal/refchess"
+)
+
+// DitherSource values (see Bridge.DitherSource).
+const (
+	DitherEntropy = "entropy" // hardware-faithful: internal/entropy.Collector
+	DitherPRNG    = "prng"    // legacy host PCG stream
+	DitherOff     = "off"     // no dither at all
 )
 
 const (
@@ -39,10 +48,31 @@ type Bridge struct {
 	// ms, overriding anything in the go command.
 	FixedBudgetMs uint64
 
-	// Dither seeds the engine's eval-dither PRNG with a fresh random
-	// byte each move, breaking deterministic move repetition (the
-	// hardware build will seed this from input timing instead).
+	// Dither seeds the engine's eval-dither PRNG with a fresh SEED byte each
+	// move, breaking deterministic move repetition (without it the engine
+	// replays identical games from a repeated opening).
 	Dither bool
+
+	// DitherSource selects WHERE that per-move seed comes from:
+	//
+	//	"" / DitherEntropy: hardware-faithful (the default). The bridge runs
+	//	  internal/entropy's Collector — the byte-for-byte model of the
+	//	  on-device collector in asm/entropy.inc, proven identical to the real
+	//	  6502 code by entropy.TestASMParity — and feeds it the same kind of
+	//	  events the shipped driver will: the elapsed time until the
+	//	  opponent's move ARRIVES (on hardware, poll-loop iterations counted
+	//	  while waiting for the human's keystrokes) plus the emulated cycle
+	//	  count our own search spent (on hardware, the NODECNT/CLOCK fold at a
+	//	  ponder interruption). So the harness validates the shipping entropy
+	//	  plan instead of bypassing it.
+	//	"prng": the legacy host PCG stream. Reproducible when DitherSeed is
+	//	  nonzero — use it for tests that need a fixed seed sequence.
+	//	"off": same as Dither = false.
+	DitherSource string
+
+	// DitherSeed pins the "prng" source's stream (0 = nondeterministic).
+	// Ignored by the entropy source, whose whole point is real timing.
+	DitherSeed uint64
 
 	// Banked enables chess-clock banking: unused per-move cycles carry
 	// forward, and each move spends base + bank/8 (chesstest.BankedClock).
@@ -100,6 +130,11 @@ type Bridge struct {
 	rnd   func() byte
 	info  string // "info depth ... score cp ..." from the last think
 	clock *chesstest.BankedClock
+
+	// Entropy-source dither state: the modelled on-device collector plus the
+	// timestamp of the last event fed to it (see ditherArrival/ditherSeed).
+	ent     *entropy.Collector
+	entLast time.Time
 
 	// Ponder bookkeeping (all only touched when Ponder is true).
 	ponderArgs      []string // go-command args (minus "ponder") for the pending ponder / its ponderhit budget
@@ -216,6 +251,9 @@ func (b *Bridge) Run(r io.Reader, w io.Writer) error {
 				}
 			}
 		case "position":
+			// The opponent's move has just arrived: feed the entropy collector
+			// (no-op unless Dither is on with the entropy source).
+			b.ditherArrival()
 			if err := b.setPosition(fields[1:]); err != nil {
 				say("info string position error: %v", err)
 			}
@@ -542,6 +580,71 @@ func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64
 	}, nil
 }
 
+// ---- eval-dither seed: where the per-move SEED byte comes from ----
+
+// collector lazily creates the modelled on-device entropy collector, or
+// returns nil when the entropy source is not in use.
+func (b *Bridge) collector() *entropy.Collector {
+	if !b.Dither || b.DitherSource == DitherPRNG || b.DitherSource == DitherOff {
+		return nil
+	}
+	if b.ent == nil {
+		// Hardware starts with whatever RAM garbage ENTCNT/ENTROPY hold; the
+		// host stands in with the process clock. Everything that matters comes
+		// from the folds below.
+		b.ent = entropy.Boot()
+	}
+	return b.ent
+}
+
+// ditherArrival feeds the collector one "the opponent's move arrived" event:
+// the counter spun for however long we waited, and the arrival folds its low
+// byte in. On hardware this is literally the keyboard-wait loop finishing when
+// the human's keystroke lands; here the wait is the real elapsed time between
+// commands from the driving GUI (which includes the opponent's think), whose
+// jitter plays the human's part.
+func (b *Bridge) ditherArrival() {
+	col := b.collector()
+	if col == nil {
+		return
+	}
+	now := time.Now()
+	if !b.entLast.IsZero() {
+		col.WaitFor(now.Sub(b.entLast))
+	}
+	b.entLast = now
+	col.Key()
+}
+
+// ditherFold folds a non-keyboard entropy byte in (asm: entfold).
+func (b *Bridge) ditherFold(x byte) {
+	if col := b.collector(); col != nil {
+		col.Fold(x)
+	}
+}
+
+// ditherSeed returns the SEED byte to poke for this search, or -1 for "leave
+// SEED alone" (dither off). The entropy source hands over the collector's
+// accumulator exactly as the on-device entseed would; the prng source keeps
+// the legacy host PCG stream for tests that need a reproducible sequence.
+func (b *Bridge) ditherSeed() int {
+	if !b.Dither || b.DitherSource == DitherOff {
+		return -1
+	}
+	if b.DitherSource == DitherPRNG {
+		if b.rnd == nil {
+			hi, lo := rand.Uint64(), rand.Uint64()
+			if b.DitherSeed != 0 {
+				hi, lo = b.DitherSeed, b.DitherSeed^0x9E3779B97F4A7C15
+			}
+			r := rand.New(rand.NewPCG(hi, lo))
+			b.rnd = func() byte { return byte(r.IntN(255) + 1) }
+		}
+		return int(b.rnd())
+	}
+	return int(b.collector().Seed())
+}
+
 // think runs the engine over the current position and returns the move
 // in UCI form, also applying it to the bridge's game state.
 func (b *Bridge) think(args []string) (string, error) {
@@ -589,18 +692,16 @@ func (b *Bridge) think(args []string) (string, error) {
 			adapt = &adaptiveAlloc{maxCeiling: uint64(maxCeiling), unstTarget: uint64(unstTarget), minSpend: income / 4}
 		}
 	}
-	seed := -1
-	if b.Dither {
-		if b.rnd == nil {
-			r := rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64()))
-			b.rnd = func() byte { return byte(r.IntN(255) + 1) }
-		}
-		seed = int(b.rnd())
-	}
+	seed := b.ditherSeed()
 	res, err := b.runEngine(pos, byte(min(b.pos.HalfmoveClock(), 255)), budget, depth, seed, adapt)
 	if err != nil {
 		return "", err
 	}
+	// The on-device ponder analogue: fold how far this search got. On hardware
+	// the driver folds NODECNT (or CLOCK) when the human's first keystroke
+	// interrupts a ponder search — how many nodes it reached by then is as
+	// unpredictable as the keypress itself.
+	b.ditherFold(byte(res.nodes))
 	if b.clock != nil && budget != 0 {
 		b.clock.Settle(res.nodes)
 	}

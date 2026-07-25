@@ -61,6 +61,8 @@ func main() {
 		budget      = flag.Uint64("budget-cycles", 30_000_000, "symmetric per-move budget B in 6502 cycles (both sides)")
 		usebook     = flag.Bool("book", false, "8fish plays its resident opening book before searching")
 		bookSeed    = flag.Uint64("book-seed", 1, "8fish book weighted-pick seed")
+		dither      = flag.String("dither", ucibridge.DitherEntropy, "8fish eval-dither seed source: entropy (hardware-faithful keystroke-timing collector), prng (host PCG), off")
+		ditherSeed  = flag.Uint64("dither-seed", 0, "with -dither prng: pin the stream for a reproducible run (0 = random)")
 		openings    = flag.String("openings", "", "EPD file of opening positions (one per line); games cycle through it")
 		games       = flag.Int("games", 2, "number of games to play")
 		maxMoves    = flag.Int("max-moves", 160, "adjudicate a draw after this many full moves")
@@ -72,6 +74,13 @@ func main() {
 		diagMove    = flag.String("diag-move", "g1f3", "move (UCI) for -diag")
 	)
 	flag.Parse()
+
+	switch *dither {
+	case ucibridge.DitherEntropy, ucibridge.DitherPRNG, ucibridge.DitherOff:
+	default:
+		log.Fatalf("-dither: want %q, %q or %q, got %q",
+			ucibridge.DitherEntropy, ucibridge.DitherPRNG, ucibridge.DitherOff, *dither)
+	}
 
 	if *diag {
 		runDiag(func(f string, a ...any) { fmt.Printf(f+"\n", a...) }, *dsk, *confirmBud, *diagMove)
@@ -105,7 +114,7 @@ func main() {
 		log.Fatalf("openings: %v", err)
 	}
 
-	eng, err := newEightfish(*binfile, *defsfile, *lblfile, *usebook, *bookSeed, logw)
+	eng, err := newEightfish(*binfile, *defsfile, *lblfile, *usebook, *bookSeed, *dither, *ditherSeed, logw)
 	if err != nil {
 		log.Fatalf("8fish init: %v", err)
 	}
@@ -195,7 +204,7 @@ type eightfish struct {
 	cw  io.WriteCloser
 }
 
-func newEightfish(binfile, defsfile, lblfile string, usebook bool, bookSeed uint64, logw io.Writer) (*eightfish, error) {
+func newEightfish(binfile, defsfile, lblfile string, usebook bool, bookSeed uint64, dither string, ditherSeed uint64, logw io.Writer) (*eightfish, error) {
 	bin, err := os.ReadFile(binfile)
 	if err != nil {
 		return nil, err
@@ -215,7 +224,20 @@ func newEightfish(binfile, defsfile, lblfile string, usebook bool, bookSeed uint
 	// really ~40-80 distinct games replayed — a false-tight error bar). Dither
 	// makes each game an independent sample; symmetry is unaffected (Sargon
 	// still ponders 8fish's ACTUAL measured cycles, whatever dither makes them).
-	b := &ucibridge.Bridge{Bin: bin, Defs: defs, Ponder: true, Dither: true, Log: logw}
+	//
+	// The seed comes from the HARDWARE-FAITHFUL source by default (-dither
+	// entropy): internal/entropy's byte-for-byte model of the on-device
+	// keystroke-timing collector (asm/entropy.inc), fed by the real arrival
+	// timing of Sargon's moves and by our own searches' emulated cycle counts.
+	// The match therefore exercises the entropy plan that will ship instead of
+	// a host PRNG the IIe could never have. -dither prng -dither-seed N gets
+	// the old, reproducible stream back.
+	b := &ucibridge.Bridge{
+		Bin: bin, Defs: defs, Ponder: true, Log: logw,
+		Dither:       dither != ucibridge.DitherOff,
+		DitherSource: dither,
+		DitherSeed:   ditherSeed,
+	}
 	if usebook {
 		bk, err := book.Default()
 		if err != nil {

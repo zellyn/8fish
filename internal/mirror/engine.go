@@ -130,6 +130,12 @@ type Engine struct {
 	// byte-identical no-op versus the asm's current eval. See mopup.go.
 	Mopup MopupParams
 
+	// EG holds the phase-gated endgame-TECHNIQUE terms (king activity,
+	// passed-pawn technique, rule of the square, rook behind the passer).
+	// Zero value = OFF: a byte-identical no-op versus the asm's current
+	// eval. See endgame.go.
+	EG EndgameParams
+
 	Best      Move // root best move (BESTFROM/BESTTO/BESTFLAGS)
 	RootScore int
 

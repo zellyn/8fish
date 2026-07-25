@@ -52,6 +52,17 @@ type PlayerCfg struct {
 	// Mopup enables the phase-gated endgame mop-up term for this side.
 	// Zero value = OFF (byte-identical to the asm's current eval).
 	Mopup MopupParams
+
+	// EG enables the phase-gated endgame-TECHNIQUE terms for this side
+	// (endgame.go). Zero value = OFF (byte-identical to the asm's current
+	// eval). Pair it with EGCost so cycle-budgeted screens pay its real
+	// 6502 tax on the eval calls where the gate fires.
+	EG EndgameParams
+	// EGCost is the estimated per-gated-eval-call 6502 cost of the EG
+	// terms, charged only in CycleBudget mode (Costs.EGTerm). 0 leaves them
+	// untaxed (node-budget behavior).
+	EGCost float64
+
 	// EvalTermsCost is the estimated per-eval-call 6502 cost of the Extra
 	// terms, charged only in CycleBudget mode (Costs.EvalTerm). 0 leaves the
 	// terms untaxed (node-budget behavior). For the ported rook set use
@@ -98,6 +109,10 @@ func (c *PlayerCfg) engine() *Engine {
 	e.Ord = c.Ord
 	e.Extra = c.Extra
 	e.Mopup = c.Mopup
+	e.EG = c.EG
+	if c.EGCost != 0 {
+		e.Costs.EGTerm = c.EGCost
+	}
 	if c.EvalTermsCost != 0 {
 		e.Costs.EvalTerm = c.EvalTermsCost
 	}

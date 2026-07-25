@@ -90,7 +90,7 @@ grep -E "GAME [0-9]+ RESULT" "$OUT/symmatch.log" || true
 echo "--- opening-book usage (8fish book moves / Sargon instant replies) ---"
 grep -E "SYMMATCH-BOOK-SESSION-SUMMARY" "$OUT/symmatch.log" || true
 echo "--- distinct 8fish book openings played ---"
-grep -oE 'opening="[^"]+"' "$OUT/symmatch.log" | sort | uniq -c | sort -rn | head -20 || true
+grep -E '^BANK .*book=true' "$OUT/symmatch.log" | grep -oE 'opening="[^"]+"' | sort | uniq -c | sort -rn | head -20 || true
 echo "--- ponder-hit summary (predicted == actual Sargon reply) ---"
 awk '/^MOVE/ && /pred=/{n++; if (/\(HIT\)/) h++} END{if(n>0) printf "ponder hits: %d/%d = %.1f%%\n", h, n, 100.0*h/n}' "$OUT/symmatch.log" || true
 echo "SARGON-SYMMATCH-DONE"

@@ -20,7 +20,10 @@ problem. Now enabled in gameplay (the bridge sets 0x1F|FT_CKEXT); tests
 keep the plain 0x1F default so fingerprints stay exact. Cost: 6 cyc per
 child search; the extra nodes are taxed honestly by the budget.
 
-**ENDGAME TECHNIQUE: NEUTRAL (−1 ± 36) — stays gated OFF.** Its mirror
+**ENDGAME TECHNIQUE: NEUTRAL — stays gated OFF.** Two independent
+300-game SPRTs: +121 =57 −122 (−1 ± 36) and +98 =89 −113 (−17 ± 33) →
+**combined 219W-235L-146D = 48.67% = −9 ± 24**, consistent and not
+positive. Its mirror
 +10 ± 9 was flattered by a 3×-understated cost model: the real cost is
 **+1278 cyc/gated eval = +30.9% cycles/node in endgame searches**, vs the
 438 the screen charged (one optimization pass already cut it 45%). Same

@@ -3,7 +3,7 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
-## 2026-07-25 — TT MATE-ZONE BUG FIXED (asm/tt.s): unsigned `cmp #$74` corrupted every negative score
+## 2026-07-25 — TT MATE-ZONE BUG FIXED (asm/tt.s): unsigned `cmp #$74` corrupted every negative score; SPRT +8 ± 22 over 600 games
 
 The bug flagged at the bottom of the check-extension entry, confirmed,
 fixed, tested and SPRT'd.
@@ -116,11 +116,14 @@ cyc/move):
 
 | batch | result | Elo | LLR(0,10) |
 |---|---|---|---|
-| openseed default | +95 =116 -89, 51.0% | **+7 +/- 31** | +0.08 |
+| openseed default (300 games) | +95 =116 -89, 51.0% | +7 +/- 31 | +0.08 |
+| openseed 7 (300 games) | +100 =108 -92, 51.3% | +9 +/- 32 | +0.17 |
+| **combined (600 games)** | **+195 =224 -181, 51.17%** | **+8 +/- 22** | |
 
-Equal-spend check A/B = 0.9949 (-0.51%), so neither side bought compute.
+Equal-spend check A/B = 0.9949 (-0.51%) in BOTH batches, so neither side
+bought compute.
 
-**Verdict: no measurable Elo either way (+7 +/- 31), which is what a
+**Verdict: no measurable Elo either way (+8 +/- 22 over 600 games), which is what a
 correctness fix of this shape should look like** — the corruption is a
 few centipawns on scores read at a different ply than they were stored,
 so it perturbs cutoffs without systematically favouring either side in

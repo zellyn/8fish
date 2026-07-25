@@ -131,6 +131,15 @@ func main() {
 	// (real-opponent) corpus: self-play overvalued advanced passed pawns,
 	// corrected down ~20-25%. Asm rig confirms do-no-harm (+8.1 +/- 22.4
 	// over 600 games); see docs/results.md.
+	//
+	// The table looks non-monotone (index 6, a 7th-rank passer, scores 20
+	// while index 5 scores 52) and is NOT: it is a top-up on the PeSTO
+	// pawn PSQT, which alone pays +81.6 EG between the 6th and 7th ranks,
+	// so PSQT+bonus rises monotonically from the 4th rank up
+	// (mirror TestPassedEffectiveCurve). Investigated 2026-07-25: the
+	// corpus constrains every bucket (5-10% of 108,908 rows each), a free
+	// re-tune reproduces these exact values, and three monotone
+	// replacements screened +3/-3/-6 Elo. Don't "fix" it again.
 	passedBonus := []int{0, 15, 0, 21, 50, 52, 20, 0}
 	var rankBit [128]byte
 	for sq := range rankBit {

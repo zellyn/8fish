@@ -113,6 +113,19 @@ type Bridge struct {
 	CurOpening     byte
 	CurOpeningName string
 
+	// Per-move book-cost bookkeeping. A book move runs NO search, so the
+	// "info string in book: ..." line it produces carries no `nodes` field and
+	// a cycle-accounting driver would see the move as literally free. These
+	// record the turn's real emulated cost so emitMove can publish it as a
+	// proper `info nodes N` line: bookThisMove marks the last think() as a book
+	// hit, bookCyc is the on-device book probe's cycles (chesstest.AsmBookProbe),
+	// and predCyc is the shallow ponder-prediction probe's cycles (0 when the
+	// prediction came free out of the carried TT). All three are reset at the
+	// top of every think().
+	bookThisMove bool
+	bookCyc      uint64
+	predCyc      uint64
+
 	// PonderSelf enables gauntlet self-pondering: when the driving GUI does NOT
 	// speak the UCI go-ponder/ponderhit handshake (e.g. cutechess-cli), the
 	// bridge emulates a pondering interval internally. On each real "go" it
@@ -447,9 +460,11 @@ func (b *Bridge) probeBook() (move string, ok bool, err error) {
 	if err != nil {
 		return "", false, err
 	}
+	b.bookCyc = res.Cycles // real emulated cost of the probe (hit or miss)
 	if !res.Hit {
 		return "", false, nil
 	}
+	b.bookThisMove = true
 	move = res.Move
 	mv, err := refchess.ParseMove(move)
 	if err != nil {
@@ -545,6 +560,7 @@ func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64
 // think runs the engine over the current position and returns the move
 // in UCI form, also applying it to the bridge's game state.
 func (b *Bridge) think(args []string) (string, error) {
+	b.bookThisMove, b.bookCyc, b.predCyc = false, 0, 0
 	if move, ok, err := b.probeBook(); err != nil {
 		return "", err
 	} else if ok {
@@ -653,6 +669,7 @@ func (b *Bridge) emitMove(say func(string, ...any), args []string) {
 	if b.info != "" {
 		say("%s", b.info)
 	}
+	pond := ""
 	if b.Ponder {
 		if p, ok, perr := b.ponderPrediction(); perr == nil && ok {
 			b.ponderPredicted = p
@@ -661,10 +678,23 @@ func (b *Bridge) emitMove(say func(string, ...any), args []string) {
 				// under PonderSelf, where the bridge ponders internally instead
 				// (see selfPonder) and a plain bestmove keeps a non-pondering GUI
 				// from trying to drive the handshake.
-				say("bestmove %s ponder %s", move, p)
-				return
+				pond = p
 			}
 		}
+	}
+	// A book move runs no search, so its "info string in book: ..." line carries
+	// no `nodes` field — a cycle-accounting driver (cmd/sargon-symmatch) would
+	// otherwise see the move as exactly free. Publish the turn's ACTUAL emulated
+	// cost as a proper UCI info line: the on-device book probe plus any shallow
+	// ponder-prediction probe (0 when the prediction came free from the TT). The
+	// driver banks the unspent income and mirrors this true near-zero think to
+	// the opponent as its ponder window.
+	if b.bookThisMove {
+		say("info nodes %d", b.bookCyc+b.predCyc)
+	}
+	if pond != "" {
+		say("bestmove %s ponder %s", move, pond)
+		return
 	}
 	say("bestmove %s", move)
 }
@@ -836,6 +866,7 @@ func (b *Bridge) ponderPrediction() (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
+	b.predCyc = res.nodes // source (b) is a real search: record its cost
 	if res.code == 2 || res.to == 0xFF {
 		return "", false, nil // no legal move
 	}

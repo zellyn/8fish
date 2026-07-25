@@ -62,6 +62,7 @@ func main() {
 		usebook     = flag.Bool("book", false, "8fish plays its resident opening book before searching")
 		bookSeed    = flag.Uint64("book-seed", 1, "8fish book weighted-pick seed")
 		openings    = flag.String("openings", "", "EPD file of opening positions (one per line); games cycle through it")
+		stdStart    = flag.Bool("standard-start", false, "every game starts from the STANDARD chess start position with no setboard, so BOTH engines use their opening books (8fish's resident book, Sargon III's built-in book); overrides -openings")
 		games       = flag.Int("games", 2, "number of games to play")
 		maxMoves    = flag.Int("max-moves", 160, "adjudicate a draw after this many full moves")
 		sargonFirst = flag.Bool("sargon-white-first", false, "game 0: Sargon plays White (else 8fish White); colors alternate each game")
@@ -100,9 +101,21 @@ func main() {
 		return
 	}
 
+	// STANDARD-START mode: no opening pool, no setboard. Every game begins at the
+	// initial position, so 8fish plays its resident book (b.Book/BookEntry/BookSeed
+	// -> the asm book probe) and Sargon III plays its OWN built-in book. Sargon's
+	// book is left intact deliberately: nothing here sends CTRL-Y (which cancels
+	// it), and the boot sequence only sets Hard Mode + Infinite level. The pool
+	// mode (-openings) is untouched and remains the history-comparable measurement.
 	openingList, err := loadOpenings(*openings)
 	if err != nil {
 		log.Fatalf("openings: %v", err)
+	}
+	if *stdStart {
+		if len(openingList) > 0 {
+			lg("NOTE: -standard-start overrides -openings %q (%d positions ignored)", *openings, len(openingList))
+		}
+		openingList = nil
 	}
 
 	eng, err := newEightfish(*binfile, *defsfile, *lblfile, *usebook, *bookSeed, logw)
@@ -111,8 +124,12 @@ func main() {
 	}
 	defer eng.close()
 
-	lg("=== sargon-symmatch: %d game(s), budget B=%d cyc (%d ms), book=%v, symmetric ponder ===",
-		*games, *budget, *budget/cyclesPerMs, *usebook)
+	mode := "pool"
+	if len(openingList) == 0 {
+		mode = "standard-start"
+	}
+	lg("=== sargon-symmatch: %d game(s), budget B=%d cyc (%d ms), book=%v, mode=%s, symmetric ponder ===",
+		*games, *budget, *budget/cyclesPerMs, *usebook, mode)
 
 	var wins, losses, draws int
 	var sess timeAcct // whole-session 8fish own-move spend vs intended budget
@@ -141,6 +158,8 @@ func main() {
 	// lines, whose internal "income" is this harness's varying per-move alloc.
 	lg("SYMMATCH-TIME-SESSION-SUMMARY games=%d moves=%d own_total=%d own_intended=%d ratio=%.4f",
 		*games, sess.moves, sess.ownCyc, sess.intended, sess.ratio())
+	lg("SYMMATCH-BOOK-SESSION-SUMMARY games=%d 8fish_book_moves=%d/%d 8fish_book_cyc=%d sargon_instant_replies=%d/%d",
+		*games, sess.bookMoves, sess.moves, sess.bookCyc, sess.sargonBook, sess.sargonMoves)
 	lg("SYMMATCH-DONE games=%d 8fish_wins=%d 8fish_losses=%d draws=%d", *games, wins, losses, draws)
 }
 
@@ -148,9 +167,13 @@ func main() {
 // (income x moves). The debt-bank makes own_total telescope to own_intended, so
 // ratio() reports how close per-game/session compute conserved to 1.0x.
 type timeAcct struct {
-	moves    int
-	ownCyc   uint64 // actual emulated cycles spent on 8fish's own-move searches
-	intended uint64 // sum of per-move income (== budget B x moves)
+	moves       int
+	ownCyc      uint64 // actual emulated cycles spent on 8fish's own-move searches
+	intended    uint64 // sum of per-move income (== budget B x moves)
+	bookMoves   int    // 8fish own moves answered from its resident book (spend ~0)
+	bookCyc     uint64 // cycles those book moves actually cost (probe + pred probe)
+	sargonBook  int    // Sargon replies that came near-instantly (its own book)
+	sargonMoves int    // Sargon replies counted
 }
 
 func (t *timeAcct) add(spent, income uint64) {
@@ -163,6 +186,10 @@ func (t *timeAcct) fold(o timeAcct) {
 	t.moves += o.moves
 	t.ownCyc += o.ownCyc
 	t.intended += o.intended
+	t.bookMoves += o.bookMoves
+	t.bookCyc += o.bookCyc
+	t.sargonBook += o.sargonBook
+	t.sargonMoves += o.sargonMoves
 }
 
 func (t timeAcct) ratio() float64 {
@@ -267,21 +294,32 @@ func (e *eightfish) expect(prefix string) string {
 // newGame resets per-game state (clears TT) in the bridge.
 func (e *eightfish) newGame() { e.send("ucinewgame") }
 
+// bookInfoPrefix is the ucibridge's book-hit marker ("info string in book: <ECO Name>").
+const bookInfoPrefix = "in book: "
+
 // searchResult is one 8fish own-move outcome.
 type searchResult struct {
-	move   string // UCI best move ("0000" if none)
-	ponder string // predicted opponent reply, or "" if none advertised
-	cycles uint64 // T_us: emulated cycles the search actually spent (info nodes)
+	move    string // UCI best move ("0000" if none)
+	ponder  string // predicted opponent reply, or "" if none advertised
+	cycles  uint64 // T_us: emulated cycles the search actually spent (info nodes)
+	book    bool   // the move came from 8fish's resident opening book (no search)
+	opening string // "ECO Name" of the book line, when book
 }
 
 // search runs a flat budget-B search on the position given by (base, moves) and
 // returns the move, the predicted reply, and the cycles spent.
 func (e *eightfish) search(base string, moves []string, budgetCyc uint64) searchResult {
 	e.send("position %s", posSpec(base, moves))
-	e.send("go movetime %d", budgetCyc/cyclesPerMs)
+	e.send("go movetime %d", movetimeMs(budgetCyc))
 	var res searchResult
 	for e.out.Scan() {
 		line := e.out.Text()
+		// Book hit: the bridge emits "info string in book: <ECO Name>" and then a
+		// separate "info nodes N" carrying the turn's real (near-zero) cost.
+		if i := strings.Index(line, bookInfoPrefix); i >= 0 {
+			res.book = true
+			res.opening = strings.TrimSpace(line[i+len(bookInfoPrefix):])
+		}
 		if n, ok := parseNodes(line); ok {
 			res.cycles = n
 		}
@@ -304,7 +342,7 @@ func (e *eightfish) search(base string, moves []string, budgetCyc uint64) search
 // budget equal to Sargon's measured think. Returns the cycles it actually spent.
 func (e *eightfish) ponder(base string, moves []string, predicted string, budgetCyc uint64) uint64 {
 	e.send("position %s", posSpec(base, append(append([]string(nil), moves...), predicted)))
-	e.send("go ponder movetime %d", budgetCyc/cyclesPerMs)
+	e.send("go ponder movetime %d", movetimeMs(budgetCyc))
 	// The go-ponder path emits exactly one "info string pondering ..." line and
 	// then holds its bestmove (no further output) until the next command.
 	for e.out.Scan() {
@@ -318,6 +356,20 @@ func (e *eightfish) ponder(base string, moves []string, predicted string, budget
 		}
 	}
 	return 0
+}
+
+// movetimeMs converts a cycle budget to the UCI `movetime` (ms) the bridge
+// parses, FLOORED AT 1. A sub-millisecond window would round to `movetime 0`,
+// which the bridge reads as "no time budget" = fixed-DEPTH mode with a 300-
+// billion-cycle run cap — i.e. an apparent hang. That can happen legitimately
+// in standard-start mode, where an opening-book move costs only tens of
+// thousands of cycles and the opponent's mirrored window is correspondingly
+// tiny. 1 ms (1020 cycles) is the smallest honest non-degenerate budget.
+func movetimeMs(cyc uint64) uint64 {
+	if ms := cyc / cyclesPerMs; ms > 0 {
+		return ms
+	}
+	return 1
 }
 
 func posSpec(base string, moves []string) string {
@@ -356,6 +408,8 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 	defer func() {
 		lg("SYMMATCH-TIME-GAME-SUMMARY game=%d moves=%d own_total=%d own_intended=%d ratio=%.4f",
 			gameNo, gt.moves, gt.ownCyc, gt.intended, gt.ratio())
+		lg("SYMMATCH-BOOK-GAME-SUMMARY game=%d 8fish_book_moves=%d/%d 8fish_book_cyc=%d sargon_instant_replies=%d/%d",
+			gameNo, gt.bookMoves, gt.moves, gt.bookCyc, gt.sargonBook, gt.sargonMoves)
 		sess.fold(gt)
 	}()
 
@@ -417,7 +471,12 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 			return resDraw
 		}
 		moves = append(moves, s)
-		lg("MOVE g%d ply1 SARGON(open) move=%s think=%d (no 8fish ponder: opening)", gameNo, s, res.ThinkCycles)
+		gt.sargonMoves++
+		if res.ThinkCycles < budget/4 {
+			gt.sargonBook++ // instant first move => straight out of Sargon's book
+		}
+		lg("MOVE g%d ply1 SARGON(open) move=%s think=%d sargon_instant=%v (no 8fish ponder: opening)",
+			gameNo, s, res.ThinkCycles, res.ThinkCycles < budget/4)
 		if term, r := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
 			return r
 		}
@@ -436,6 +495,17 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		}
 		clock.Settle(sr.cycles)
 		gt.add(sr.cycles, budget)
+		if sr.book {
+			gt.bookMoves++
+			gt.bookCyc += sr.cycles
+		}
+		// Per-own-move time-bank audit. A book move spends ~0, so Settle credits
+		// almost the whole income to the bank and the NEXT alloc is visibly larger
+		// than the flat income B — the first real search out of book inherits the
+		// time the book moves did not use (capped at 8*B of bank => alloc <= 2*B).
+		lg("BANK g%d ply%d move=%s book=%v opening=%q income=%d alloc=%d spent=%d spent_over_income=%.4f bank_after=%d next_alloc=%d",
+			gameNo, len(moves)+1, sr.move, sr.book, sr.opening, budget, alloc, sr.cycles,
+			float64(sr.cycles)/float64(budget), clock.Bank(), clock.Alloc())
 		if !applyMove(ref, seen, sr.move) {
 			lg("MOVE g%d 8fish played illegal-to-referee move %q — aborting", gameNo, sr.move)
 			return resDraw
@@ -490,11 +560,21 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		moves = append(moves, s)
 		sargonPly := len(moves)
 
+		// Sargon's own opening book answers near-instantly (RequestMove returns as
+		// soon as its move-list column changes, long before the budget elapses and
+		// without any CTRL-T). An out-of-book Infinite-level reply always costs at
+		// least the full budget B, so a think far under B is a book/forced reply.
+		gt.sargonMoves++
+		sargonInstant := reply.ThinkCycles < budget/4
+		if sargonInstant {
+			gt.sargonBook++
+		}
+
 		// Auditable symmetry line: 8fish think == Sargon ponder-window (exact),
 		// and Sargon think ~= 8fish ponder (budget-matched).
-		lg("MOVE g%d ply%d 8fish move=%s think=%d | sargon_ponder_window=%d || ply%d SARGON move=%s think=%d | 8fish_ponder=%d pred=%s(%s)",
+		lg("MOVE g%d ply%d 8fish move=%s think=%d | sargon_ponder_window=%d || ply%d SARGON move=%s think=%d | 8fish_ponder=%d pred=%s(%s) 8fish_book=%v sargon_instant=%v",
 			gameNo, usPly, sr.move, sr.cycles, sr.cycles,
-			sargonPly, s, reply.ThinkCycles, ponderCyc, sr.ponder, hit)
+			sargonPly, s, reply.ThinkCycles, ponderCyc, sr.ponder, hit, sr.book, sargonInstant)
 
 		if term, r := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
 			lg("MOVE g%d after sargon %s -> %s (msg=%q)", gameNo, s, r, reply.Message)
@@ -512,8 +592,19 @@ func runSargonCycles(m *sargon.Machine, cycles uint64) {
 	}
 	const chunk = 200_000
 	start := m.Cycles()
-	for m.Cycles()-start < cycles {
-		if err := m.Run(chunk); err != nil {
+	for {
+		done := m.Cycles() - start
+		if done >= cycles {
+			return
+		}
+		// Trim the final chunk to what is left, so a SHORT window (8fish answered
+		// from its opening book: think ~ 40K cycles) does not hand Sargon a whole
+		// 200K-cycle chunk of unearned ponder time. Large windows are unchanged.
+		step := cycles - done
+		if step > chunk {
+			step = chunk
+		}
+		if err := m.Run(step); err != nil {
 			return
 		}
 	}

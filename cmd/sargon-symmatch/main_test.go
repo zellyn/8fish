@@ -91,3 +91,53 @@ func TestBankConserves(t *testing.T) {
 		t.Errorf("bank did not conserve: ratio=%.4f (want ~1.0, was %.3f unbanked)", r, overshoot)
 	}
 }
+
+// TestBookMovesBankTheirIncome is the standard-start invariant: an opening-book
+// move costs ~0 cycles, so Settle must credit (almost) its whole income to the
+// bank, and the FIRST real search out of book must then be allocated visibly
+// more than the flat income B. This is the harness-side loop that cmd/sargon-
+// symmatch runs per own move (Alloc -> search -> Settle) with the measured book
+// costs from a real standard-start game (game 0 of the validation run).
+func TestBookMovesBankTheirIncome(t *testing.T) {
+	const budget = uint64(30_000_000)
+	// Measured 8fish book-move costs (on-device book probe + any shallow
+	// ponder-prediction probe) from a real standard-start game.
+	bookSpends := []uint64{705_377, 136_416, 16_554, 153_163, 16_819}
+
+	clock := &chesstest.BankedClock{Base: budget}
+	var totalBook uint64
+	for i, spent := range bookSpends {
+		clock.Alloc() // a book move ignores its allocation (it runs no search)
+		clock.Settle(spent)
+		totalBook += spent
+		wantBank := int64((uint64(i+1))*budget - totalBook)
+		if got := clock.Bank(); got != wantBank {
+			t.Fatalf("book move %d: bank=%d, want %d (income banked minus spend)", i+1, got, wantBank)
+		}
+	}
+	// Five near-free moves must leave ~5B banked (well under the 8B cap).
+	if bank := clock.Bank(); bank < int64(4.9*float64(budget)) {
+		t.Errorf("bank after %d book moves = %d, want >= ~%d", len(bookSpends), bank, int64(4.9*float64(budget)))
+	}
+	// The first post-book search draws income + bank/8 — strictly more than B.
+	alloc := clock.Alloc()
+	if alloc <= budget {
+		t.Errorf("first post-book alloc = %d, want > income %d (book time must be spendable)", alloc, budget)
+	}
+	if ratio := float64(alloc) / float64(budget); ratio < 1.5 || ratio > 2.0 {
+		t.Errorf("first post-book alloc = %.3fx income, want ~1.6x (<= 2.0x by the 8B bank cap)", ratio)
+	}
+}
+
+// TestMovetimeMsFloor guards the ~0-cycle-window case that standard-start makes
+// reachable: a sub-millisecond budget must never round to "movetime 0", which
+// the bridge reads as fixed-DEPTH mode (a 300-billion-cycle run cap = a hang).
+func TestMovetimeMsFloor(t *testing.T) {
+	for _, tc := range []struct{ cyc, want uint64 }{
+		{0, 1}, {1, 1}, {1019, 1}, {1020, 1}, {2040, 2}, {30_000_000, 29411},
+	} {
+		if got := movetimeMs(tc.cyc); got != tc.want {
+			t.Errorf("movetimeMs(%d) = %d, want %d", tc.cyc, got, tc.want)
+		}
+	}
+}

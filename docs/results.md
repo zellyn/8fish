@@ -100,6 +100,52 @@ ceiling + a 24-bit zp bank (effort.go asm-port note; no floats, /k are
 shifts, signals are a 2-byte compare + a counter). NOT YET PORTED — a
 follow-on; the mirror screen is the go/no-go and it says GO.
 
+## 2026-07-25 — LOSS DIAGNOSIS: we lose to TECHNIQUE, not tactics; contempt is dead, endgame conversion is the lever
+
+Clustered all 103 losses (96 distinct games) from the clean 300-game
+symmetric match by walking each game with the mirror and locating the
+point of no return via a 5×-deeper (150M) oracle search.
+
+| theme | count | % |
+|---|---|---|
+| **Positional squeeze** | 40 | **42%** |
+| **Endgame conversion/defense** | 28 | **29%** |
+| King-safety / horizon-missed attack | 17 | 18% |
+| Opening disadvantage | 7 | 7% |
+| Tactical material blunder | 4 | **4%** |
+
+**71% of losses occur at roughly EVEN material; 79% of losing moves are
+8fish's OWN choice.** We don't hang pieces — we get ground down.
+
+THE KEY METRIC — `blindGap` (how far our shallow eval over-rates a
+position vs the deep oracle): positional med **59**, endgame med **57**
+(0/68 ≥200). Our eval AGREES with a 5×-deeper search all the way down,
+so **more depth would not have saved these games** — it's an EVALUATION
+(judgment) gap, not a search gap. By contrast king-safety losses have
+med blindGap **301** (15/17 ≥200) — those genuinely are horizon-blind,
+so a static king-safety penalty would steer the shallow search away
+from them without needing depth.
+
+**CONTEMPT IS DEAD — my hypothesis was wrong.** I assumed the 25% draws
+were 8fish settling for half-points in equal positions. Actually **42/51
+distinct draws (82%) are games where 8fish reached a clearly BETTER or
+WINNING position (peaks +300..+2000) and failed to convert**; only 5
+were quiet-equal. So contempt has ~5 games of upside, not 76 — and the
+draws share the SAME root cause as the losses: missing technique.
+
+PRIORITY (evidence-ordered, supersedes the earlier contempt-first plan):
+1. **Endgame technique** — 29% of losses AND 82% of draws: the same
+   weakness bleeding through both channels, so the highest total-points
+   lever. Our shipped mop-up (KRK/KQK shuffling) is the floor; what's
+   missing is real technique (K+P, rook endings, converting +1 pawn).
+2. **Positional eval terms** — biggest single bucket (42%), harder;
+   needs cheap incrementally-maintained terms (per the cost history).
+3. **King safety** — 18%, horizon-blind, so a static term is effective
+   and cheaper than feared.
+4. ~~Contempt~~ — dropped (~5 games of upside).
+5. Book — deprioritized for STRENGTH (7%, cancels on a symmetric pool);
+   standard-start work still matters for authenticity.
+
 ## 2026-07-24 — CLEAN symmetric rematch, 300 games: +21 ± 34 — 8fish AHEAD of Sargon III (winning record 121-103)
 
 The fully-honest number, all three flaws fixed: (1) Hard-Mode promotion

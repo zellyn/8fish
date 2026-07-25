@@ -3,6 +3,144 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-25 — TT MATE-ZONE BUG FIXED (asm/tt.s): unsigned `cmp #$74` corrupted every negative score
+
+The bug flagged at the bottom of the check-extension entry, confirmed,
+fixed, tested and SPRT'd.
+
+### The bug
+
+`ttstore`/`ttprobe` classified a score by its HIGH byte with an UNSIGNED
+compare:
+
+```
+        lda TTENTRY+6
+        cmp #$74                ; >= +29696: winning mate
+        bcc tspneg              ; ... else fall through and ply-shift
+```
+
+Winning mates live in `$74xx+`, losing mates in `$80xx-$8Bxx`. But every
+NEGATIVE score has a high byte of `$80-$FF`, which is `>= $74` UNSIGNED —
+so every negative score took the winning-mate arm and got `+Ply` on store
+/ `-Ply` on probe. Two consequences:
+
+1. **The losing-mate arm was unreachable dead code.** It was only entered
+   when `hi < $74`, and it then tested `hi >= $80` — impossible. So losing
+   mates were re-based in the WRONG DIRECTION (`+Ply` instead of `-Ply`).
+2. **Ordinary negative scores were ply-shifted.** A score stored at ply s
+   and read at ply p came back off by `s - p`. Worse, a small negative
+   stored at ply >= |score| WRAPS NON-NEGATIVE (`-1` at ply 4 is written as
+   `+3`), and then the probe's `hi >= $74` test fails on the *stored* value
+   so it is never un-shifted: **`-1` in, `+3` out.**
+
+The search uses that score for real: `ttexact` writes it straight to
+SCORE, and `ttlower`/`ttupper` compare it against beta/alpha for the
+cutoff. So this was wrong cutoffs, not just cosmetics.
+
+**How often it fired** (emulator census, mask 0x1f, 5 middlegame/endgame
+FENs at depth 6, 44,093 TT stores / 7,305 probe hits):
+
+| | count | share |
+|---|---|---|
+| stores carrying a negative score | 23,822 | 54.0% |
+| ...wrongly ply-shifted | 23,740 | 53.8% |
+| ...that wrapped to non-negative when shifted | 278 | |
+| losing-mate stores re-based the WRONG WAY | 82 | |
+| probe hits returning a wrongly-shifted score | 3,957 | 54.2% |
+
+A tighter store-side audit (`TestTTMateStoreAdjust`, 3 mating positions)
+found **2,128 of 2,762 ttstore ply adjustments wrong** — every one of the
+545 losing-mate stores plus 1,586 ordinary negatives.
+
+### The fix
+
+`asm/tt.s:44-69` (ttprobe) and `asm/tt.s:94-114` (ttstore): SIGNED zone
+test, the same shape search.s' RFP/null guards already use —
+
+```
+ttadj:  lda TTENTRY+6
+        bmi ttpneg
+        cmp #MATEZONEHI         ; hi >= 0 and >= $74: winning mate, -= PLY
+        bcc tthit               ; ordinary non-negative: UNCHANGED
+        ...
+ttpneg: cmp #NMATEZONEHI        ; hi $80-$8B: losing mate, += PLY
+        bcs tthit               ; ordinary negative: UNCHANGED
+```
+
+`bmi` splits the sign first, so each arm's `cmp` is only ever reached with
+a known sign; the named constants (`MATEZONEHI = $74`,
+`NMATEZONEHI = $8C`) replace the bare literals. It is also **4 bytes
+smaller and cheaper on the hot path**: the common ordinary-score case is
+now `lda/bmi/cmp/bcc` (10 cyc) instead of walking three compares (16 cyc).
+No new ZP, no new RAM, no illegal opcodes.
+
+### Effect on the tree
+
+MicroAB (18 rows, masks 0x1f/0x07/0x00): **all 18 scores and all 18 best
+moves identical**; node counts changed on 3 of 18 rows (all mask 0x1f: the
+two middlegames and the rook endgame), byte-identical on the other 15.
+Grand total cycles **3,815,285,469 → 3,814,106,998 (−0.031%)**. The fix is
+slightly *cheaper* per position too (mate-in-4 at d8: 683.7M → 637.0M cyc,
+−6.8%). These are the new fingerprint baselines.
+
+### Tests added
+
+- `TestTTScoreRoundTrip` (internal/chesstest/ttroundtrip_test.go): hooks
+  `tsadj` (ttstore's adjustment point) and `ttpdone` (the instruction after
+  `jsr ttprobe`) and shadows all 4096 indices, asserting that every
+  store→probe round trip returns the stored score unchanged for ordinary
+  scores and correctly re-based for mates. **45/2427 round trips corrupted
+  on the old binary; 0/2438 on the fixed one.**
+- `TestTTMateStoreAdjust`: audits ttstore's write directly (pre vs post
+  bytes) for all three score classes, which catches the losing-mate
+  direction error that a same-ply round trip hides. **2128/2762 wrong
+  before, 0/2762 after.**
+- `asm/search.s` gained one label (`ttpdone`) as the probe-exit test hook.
+  Byte-identical image.
+
+### Mirror
+
+`mirror.Engine.TTPlyQuirk` (which modelled the bug) is now OFF everywhere:
+the mirror's own signed-correct `ttstore`/`ttprobe` is the faithful model
+again. `ckext_parity_test.go` and `egterm_parity_test.go` had the quirk
+turned on for the port; both now pass with it off, exact. All four
+asm<->mirror tree gates green with the quirk off:
+TestSearchMirrorParity, TestSearchMirrorParityImproving,
+TestCheckExtMirrorParity, TestEGTermSearchParity.
+
+### The SPRT (fixed vs unfixed, two binaries)
+
+`cmd/sprt -bin <fixed> -binB <unfixed> -a 0x5f -b 0x5f -a2 0x02 -b2 0x02
+-budget 30000 -pairs 150` (the shipped gameplay configuration, 30M
+cyc/move):
+
+| batch | result | Elo | LLR(0,10) |
+|---|---|---|---|
+| openseed default | +95 =116 -89, 51.0% | **+7 +/- 31** | +0.08 |
+
+Equal-spend check A/B = 0.9949 (-0.51%), so neither side bought compute.
+
+**Verdict: no measurable Elo either way (+7 +/- 31), which is what a
+correctness fix of this shape should look like** — the corruption is a
+few centipawns on scores read at a different ply than they were stored,
+so it perturbs cutoffs without systematically favouring either side in
+self-play. It is adopted on correctness grounds (it is also 4 bytes
+smaller, 6 cycles cheaper per TT adjustment, and -0.03% cycles overall),
+not because self-play could price it. The classes it protects against —
+a losing mate re-based the WRONG WAY, and `-1` coming back as `+3` — are
+exactly the blunder-in-a-decided-position failures self-play at equal
+strength cancels out.
+
+### Position-level A/B (23 mate/tactical/endgame FENs, old vs new binary)
+
+Best move and score identical on 22 of 23, including every mate score
+(mate-in-3 f6a6/29995, back-rank a1a8/29999, smothered h6f7/29999,
+WAC.005 c6c4/29997, WAC.012 g4f3/29997, "mated" side -520/-1005/-204 all
+unchanged). The one divergence is KQK at d6 (d2e3/1012 -> d2c1/1010) — a
+tree change, 19% cheaper. So the fix does not move the engine's reported
+mate distances on these probes; what it removes is the silent few-cp
+corruption of ordinary negative scores that was steering cutoffs.
+
 ## 2026-07-25 — CHECK EXTENSIONS ADOPTED (+24 ± 23 over 600 SPRT games); ENDGAME TECHNIQUE neutral, stays off
 
 Both features ported behind bits (FT_CKEXT=$40 reusing the freed FT_ASP
@@ -32,7 +170,7 @@ self-play cannot price it. If it is ever revisited, the test that could
 show its value is an asymmetric one (vs Sargon), not self-play — but the
 +30.9% endgame-node cost would have to be paid there too.
 
-**BUG FOUND (pre-existing, unfixed, needs its own SPRT):** asm/tt.s
+**BUG FOUND (pre-existing; FIXED same day — see the entry above):** asm/tt.s
 classifies mate scores with an UNSIGNED `cmp #$74`, so every NEGATIVE TT
 score is ply-shifted (+Ply on store / −Ply on probe) and the losing-mate
 branch is dead code. Modelled exactly (13k-node traces match byte-for-byte)

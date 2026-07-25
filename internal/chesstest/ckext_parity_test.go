@@ -79,15 +79,11 @@ func mirrorCkExtRun(t *testing.T, fen string, depth int, on bool) (string, int, 
 	if on {
 		me.CheckExt = mirror.CheckExtParams{MaxExt: 1}
 	}
-	// Model the asm's TT ply-adjustment defect (see Engine.TTPlyQuirk): the
-	// asm classifies mate scores with an UNSIGNED hi >= $74 compare, so every
-	// NEGATIVE stored score is ply-shifted. Without this the two engines'
-	// trees diverge here — not because of check extensions, but because the
-	// deeper extended tree finally makes that pre-existing shift flip a TT
-	// cutoff. With it, the asm and mirror trees are node-for-node and
-	// store-for-store identical both with and without extensions (verified by
-	// full node/TT-store traces during the port).
-	me.TTPlyQuirk = true
+	// TTPlyQuirk stays OFF: asm/tt.s' unsigned hi >= $74 mate classification
+	// (which ply-shifted every NEGATIVE stored score) was fixed to a signed
+	// zone test, so the mirror's own signed-correct ttstore/ttprobe is now
+	// the byte-faithful model. Both engines are node-for-node and
+	// store-for-store identical again, with and without extensions.
 	me.CycleTrack = true
 	me.SetPosition(mp)
 	mb, ms := me.SearchFixed(depth)

@@ -282,9 +282,9 @@ var egSearchFENs = []string{
 // leaf and borrows a dozen eval scratch bytes, so a clobbered byte would show
 // up here as a diverging tree, not as a wrong eval.
 //
-// The mirror models the asm's TT ply-adjustment defect (Engine.TTPlyQuirk, see
-// the comment in ckext_parity_test.go); without it the trees diverge for
-// reasons that have nothing to do with this feature.
+// (Until asm/tt.s' unsigned mate-zone compare was fixed, this gate needed
+// Engine.TTPlyQuirk to reproduce the asm's ply-shifted negative scores; with
+// the asm signed-correct the mirror's stock path matches.)
 func TestEGTermSearchParity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow: asm emulator searches")
@@ -328,7 +328,6 @@ func TestEGTermSearchParity(t *testing.T) {
 		}
 		me := mirror.NewEngine()
 		me.Features = 0x1f
-		me.TTPlyQuirk = true
 		if eg {
 			me.EG = mirror.DefaultEndgame
 		}

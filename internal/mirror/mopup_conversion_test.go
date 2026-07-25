@@ -34,6 +34,13 @@ var convSuite = []convPos{
 	{"KBBK-b", "7k/8/8/8/8/8/8/2B1KB2 w - - 0 1", "win"},
 	// KPK — a clearly winning one (king in front of pawn) and a drawn
 	// rook-pawn one (defender traps the king in the corner).
+	// WARNING (2026-07-25): this label is WRONG. With WHITE to move this is
+	// the textbook MUTUAL ZUGZWANG DRAW (1.Kc3 Kc5) — Stockfish 18 says cp 0
+	// at depth 67. It is "won" only with BLACK to move. Left as-is so the
+	// shipped mop-up's historical numbers stay comparable, but the mop-up
+	// entry's "partially recovers KPK (0->2/4)" therefore describes turning a
+	// DRAW into a win against a handicapped twin, not a recovered win. See
+	// convEndgame's kpk-front in endgame_conversion_test.go.
 	{"KPK-win", "8/8/8/3k4/8/3K4/3P4/8 w - - 0 1", "win"},
 	{"KPK-draw", "8/8/8/8/8/k7/P7/K7 w - - 0 1", "draw"},
 	// KBNK — bishop + knight (the hard one; must reach the bishop-color

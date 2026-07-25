@@ -45,101 +45,260 @@ only; asm untouched. OFF path byte-identical (TestCheckExtOffIsNoop, both
 move loops, both budget kinds). Final gate remains the asm SPRT.
 
 ## 2026-07-24 — FIXED the Sargon Hard-Mode promotion "no reply" quirk (root cause: forced-reply detection, not promotion entry)
+## 2026-07-25 — ENDGAME TECHNIQUE (mirror): +2.08 ± 0.71 match pts/position on the conversion suite (CI excludes 0); self-play +10 ± 9
 
-Resolved the bug that drew ~10% of the 300-game symmetric run (g10 f7f8r,
-g30 f7f8q, …). ROOT CAUSE was NOT the promotion entry (the "ENTER PROMOTED
-PIECE" prompt was always answered; the /Q,/R token always registered).
-It was REPLY DETECTION: when our move — here a stalemate-avoiding
-under-promotion f7-f8=R — leaves Sargon a SINGLE legal reply, Sargon plays
-it INSTANTLY the moment the move registers, on the Infinite level, WITHOUT
-waiting for CTRL-T. RequestMove captured its commit baseline AFTER
-enterMove, by which point the reply (e.g. H7-H6) was already on the list, so
-forceCommitHard waited forever → "no reply after CTRL-T" → adjudicated draw.
+The top lever from the same-day loss diagnosis, built and screened.
+`internal/mirror/endgame.go`, phase-gated, mirror-only (asm port is a
+follow-on). Commits 56da578 (feature) + bfef001/e9a3b0e (review fixes).
 
-FIX (internal/sargon/driver.go): RequestMove now snapshots Sargon's
-newest-move token BEFORE entering our move (the token is scroll-immune and
-our move lands in the opposite color's column, so it only changes on a
-Sargon commit) and returns immediately if a reply appears during entry.
-Also hardened completePromotion for Hard mode: longer prompt-wait +
-re-strobe the confirming keystroke until the prompt clears (mirrors
-forceCommitHard's repeated CTRL-T), so a confirm keystroke missed by the
-rarely-polled keyboard latch can't park Sargon at the prompt.
+**THIS ENTRY WAS REWRITTEN AFTER AN ADVERSARIAL REVIEW.** The first version
+claimed "+52 pts, +78 correct results, 47.6% → 63.2% conversion". The review
+verified every corpus FEN with Stockfish 18 and found **8 of 25 labels
+wrong**, and pointed out that the error bar had been computed over 500 GAMES
+when the independent unit is the 25 POSITIONS. Both are fixed below. The
+feature still passes — but the headline is ~half what was first claimed, and
+the framing "conversion rate" was not supportable. Corrections listed at the
+end; the original numbers should not be quoted.
 
-VALIDATION. Exact g10 position (8/5P1k/5K2/8/8/8/8/8 w): RequestMove F7-F8R
-BEFORE → "no reply after CTRL-T"; AFTER → Sargon replies H7-H6 (regression
-test TestHardPromotionForcedReply). Deterministic 11-game rerun (book-seed
-1, pool, B=30M): BEFORE 3W-2L-6D (g10 = draw); AFTER **4W-2L-5D, g10 =
-8fish-wins** — the masked position IS a win (KR-vs-K mate). Games g0-g9
-byte-identical, so no perturbation of non-promotion play. Symmetry exact
-(459/459 moves 8fish_think == sargon_ponder_window), adherence 0.9836,
-ponder hits 47.9%. All Easy- + Hard-mode promotion tests pass (Q, under-
-promotion N/R, checking promotion, Sargon's own promotion decode).
+**Why this and not more search.** The diagnosis measured `blindGap`
+(shallow eval minus a 5x-deeper oracle) at a median of **57cp** on the 28
+thrown-away endgames — our eval AGREES with a much deeper search all the
+way down, so depth cannot fix them. The gap is KNOWLEDGE. mopup.go
+(shipped, FT2_MOPUP) only knows "drive a lone king to a corner"; nothing
+in the eval knew anything about endgames that still have pawns.
 
-Implication for the 300-game number: the ~30 masked draws are promotion
-endgames the promoter wins, so the fixed score should rise above +8 — a
-full rerun (coordinator) is needed to quantify. Ready command:
-runs/sargon-symmatch.sh 300 30000000 <outdir> 1.
+**The terms** (white POV, added in eval() like PStruct/mopup, ALL gated on
+`Pos.Phase <= 6` — the mop-up's endgame definition, N=1/B=1/R=2/Q=4 per
+side, so 6 = R+B vs R+B or less):
 
-## 2026-07-23 — adaptive time/effort management (mirror screen): banking + aggressive targeting = +54 over the flat mirror
+| term | formula | weight |
+|---|---|---|
+| KingCent | `CMD[theirK] - CMD[ourK]` (the mop-up's 64-byte centre-manhattan table, 0 centre .. 6 corner) | 8 |
+| KingPawn | `chebDistToNearestPawn(theirK) - (ourK)`, pawns of EITHER color | 6 |
+| Pass | endgame-only top-up by advancement, same index as pawnterm's PASSEDBONUS | `{0,0,10,20,40,60,100,0}` |
+| PassKingOur | per own passer: `4 - cheb(ourK, frontSq)` | 6 |
+| PassKingThem | per own passer: `cheb(theirK, frontSq) - 4` | 4 |
+| KingAhead | per own passer: +flat if our king is strictly ahead of it within 1 file; -flat if it sits directly behind on the same file | 15 |
 
-Mirror-side measurement of ADAPTIVE effort allocation (internal/mirror/
-effort.go: a per-GAME cycle bank + an ID-loop-signal allocation policy;
-`mirror atime`). The engine has no clock, so "time" is EFFORT (est. 6502
-cycles/move). Both arms earn `Base` cycles/move of income into a shared
-per-game bank (EffortBank, the mirror twin of chesstest.BankedClock); the
-only difference is HOW the bank is spent. asm-matched config (mask 0x1f,
-recap2, shipped weights, corrected-guard RFP 120/500), self-play, dither
-on, `Base = 40 M` cycles/move (≈ depth 4.5; spot-checked at 80 M ≈ depth
-5.1). The OFF path (TimeParams.On=false, no smoothing) is byte-identical
-to a flat `SearchCycleBudget(Base)` — TestEffortOffIdentical.
+The **Pass** table exists because pawnterm's Texel-tuned PASSEDBONUS is
+`{0,15,0,21,50,52,20,0}` — NOT monotone, and it rates a pawn on the 7th
+(20) BELOW one on the 5th (50). That is a self-play tuning artifact (both
+sides push symmetrically) and it is precisely the shape that fails to
+convert.
 
-Signals (all cheap, read from the ID loop, 6502-portable — see the
-asm-port note in effort.go): best-move **instability** (best changed →
-extend), **score drop / panic** (this iteration worse than the last →
-extend), **easy move** (best stable N iters → stop early, bank it).
+**SCREEN A — CONVERSION SUITE.** 25 endgames: the 3 diagnosis FENs + 11
+positions mined from the 300-game match log (`TestHarvestEndgames` replays
+each non-win game and takes the 8fish-to-move, phase-gated position where
+its own depth-6 score peaked) + 11 textbook. **Every FEN's ground truth is
+an external Stockfish 18 verdict**, recorded in the corpus's `sf` field —
+not our own eval, and not intuition. 20 dither seeds each, **30M cyc/move**
+(the Sargon-match operating point), hero's terms ON vs OFF against a FIXED
+reference defender that always has them OFF (a both-sides screen cancels
+symmetric knowledge).
 
-Results (A vs B, A POV, 2000 games/row @40M unless noted, ±~13 Elo):
+**Headline, paired over the 25 positions:**
 
-| A (policy)        | B (baseline) | Elo ± err | A Mcyc/mv | B Mcyc/mv | ext%  | short% |
-|-------------------|--------------|-----------|-----------|-----------|-------|--------|
-| flatbank (bank+/8)| flat (nobank)| **+23**   | 38.3      | 33.2      | 0     | 0      |
-| adaptive (moder.) | flatbank     | −0        | 39.3      | 38.3      | 50.5  | 36.3   |
-| easy-stop only    | flatbank     | −0        | 37.6      | 38.3      | 0     | 37.7   |
-| instability only  | flatbank     | −2        | 39.6      | 38.3      | 43.5  | 0      |
-| panic (drop) only | flatbank     | +8        | 39.2      | 38.3      | 15.1  | 0      |
-| adaptive-smooth   | flatbank     | +9        | 39.4      | 38.3      | 50.1  | 37.2   |
-| **adaptive-aggr** | flatbank     | **+21 ± 9** (4000g) | 36.1 | 38.3 | 60  | 71 |
-| **adaptive-aggr** | flat (nobank)| **+54**   | 35.9      | 33.2      | 60    | 71     |
-| adaptive-aggr @80M| flatbank     | +30 ± 20 (800g) | 68.2 | 76.5    | 70    | 83     |
+| metric | OFF | ON |
+|---|---|---|
+| match points (win 1, draw 0.5) | 301.0 | **353.0** (+52.0) |
+| **per-position delta** | — | **+2.08 ± 0.71, CI [+0.69,+3.47] — excludes 0** |
+| positions better / worse / same | — | **12 / 1 / 12** |
+| correct result vs Stockfish (excl. 4 objectively-lost positions) | 324/420 (77.1%) | **371/420 (88.3%)** (+47) |
+| W / D / L | 158 / 286 / 56 | 247 / 212 / 41 |
 
-Findings:
-- **Banking recovers wasted slack.** The flat per-move budget (current
-  mirror) underspends by ~15% — the ~50% soft-start gate leaves the top
-  of the budget unused whenever the next iteration would overshoot.
-  Recycling it into a bank (BankedClock `Base + bank/8`) spends that slack
-  on later moves: **+23 Elo** at +15% compute. (Matches the 2026-07-19
-  banked-time TSCP result; here quantified at 2000 self-play games.)
-- **Even targeting is near-neutral; AGGRESSIVE targeting wins at LESS
-  compute.** On top of even smoothing, the moderate policy and each single
-  signal are within noise. But an aggressive policy — commit early on
-  stable moves (StableIters 2, MinDepth 2, stop after Base/4) and dump up
-  to 4× Base on panic/instability — is **+21 ± 9** over even banking while
-  spending 6% FEWER cycles at shallower average depth (a strict Pareto
-  win: stronger AND cheaper). Robust at 80 M (deeper): +30 ± 20 at −11%
-  compute. Total over the flat mirror: **+54**.
-- **Where the gain lives.** Panic (score-drop) is the only single signal
-  that leans positive (+8); the win emerges from the *combination* of
-  hard-move extension and aggressive easy-move banking, not any one
-  signal. Instability alone is non-selective at this depth (best flips
-  between iterations constantly → extends 43% wastefully, neutral).
+**The decomposition that matters, by the position's OBJECTIVE class:**
 
-Winning params (adaptive-aggr): EasyStop StableIters=2 ScoreFlat=30
-MinDepth=2 MinSpend=Base/4; Panic drop≥25cp → ceil 4×Base; Unstable →
-ceil 3×Base; MaxEighths=32 (4×Base per-move cap, also clamped to
-Base+bank). asm port = the existing soft-start gate with a MOVABLE
-ceiling + a 24-bit zp bank (effort.go asm-port note; no floats, /k are
-shifts, signals are a 2-byte compare + a counter). NOT YET PORTED — a
-follow-on; the mirror screen is the go/no-go and it says GO.
+| class | n | pts delta |
+|---|---|---|
+| objectively WON (real conversion) | 11 | **+24.5** |
+| objectively DRAWN (overshoot: beat the weaker twin) | 10 | +11.5 |
+| objectively LOST (ditto) | 4 | +16.0 |
+
+So **only +24.5 of the +52.0 is conversion of winning endings**; the other
++27.5 is the ON engine out-playing a knowledge-removed twin in positions
+that are objectively drawn or lost. "Better-than-objective results" rise
+38 → 80. That is still a genuine A/B strength gain (and it is what the
+self-play screen independently confirms), but it is NOT a conversion rate,
+and the earlier framing overstated the feature by ~2x.
+
+Per-position (OFF → ON, W/D/L; `sf` = Stockfish, hero POV):
+
+| position | sf verdict | want | OFF | ON | moves-to-win |
+|---|---|---|---|---|---|
+| kpk-file-e | decisive | win | 4/16/0 | **19/1/0** | 16 → 15 |
+| two-connected | decisive | win | 4/16/0 | **20/0/0** | 21 → 18 |
+| k2p-vs-kp | decisive | win | 0/20/0 | **6/14/0** | – → 19 |
+| peak-g229 | decisive | win | 0/20/0 | **5/15/0** | – → 17 |
+| peak-g194 | decisive | win | 16/4/0 | **20/0/0** | **18 → 8** |
+| square-win | decisive | win | 18/2/0 | 20/0/0 | 12 → 13 |
+| lucena | decisive | win | 5/15/0 | 6/14/0 | 26 → 26 |
+| peak-g163 / g34 / g196 / g132 | decisive | win | 20/0/0 | 20/0/0 | 1/12/14/22 → 1/13/16/18 |
+| kpk-front | **cp 0 — DRAWN** | draw | 0/20/0 | 12/8/0 | overshoot, not conversion |
+| peak-g91 | **cp 0 — DRAWN** | draw | 0/20/0 | 9/11/0 | overshoot |
+| rook-behind | cp 0 | draw | 3/17/0 | 11/9/0 | overshoot |
+| peak-g48 | cp −25 | draw | 5/12/3 | **1/14/5** | **REGRESSION** (−3.0 pts) |
+| peak-g234, peak-g2, outside-passer | cp 0 | draw | 0/20/0 | 0/20/0 | correctly held |
+| kpk-rookdraw, kpk-blocked, square-draw | cp 0 | draw | 0/20/0 | 0/20/0 | correctly held |
+| diag-g137 | cp −444 | lost | 0/1/19 | 0/6/14 | still lost |
+| diag-g246 | cp −501 | lost | 0/6/14 | 15/3/2 | overshoot (+13.5) |
+| diag-g61 | cp −362 | lost | 0/0/20 | 0/0/20 | still lost |
+| peak-g8 | cp −349 | lost | 20/0/0 | 20/0/0 | – |
+
+Honest negatives: **peak-g48 regresses** (−3.0 pts, 3 losses → 5), and
+`diag-g61` / `diag-g137` are unchanged-or-still-lost. Nine positions are
+completely untouched.
+
+**Ablation** (each arm's hero vs the OFF defender, paired vs the OFF arm;
+per-position delta ± SE):
+
+| arm | pts | per-position | sig |
+|---|---|---|---|
+| **shipped set** | 353.0 (+52.0) | **+2.08 ± 0.71** | SIG+ |
+| all 8 designed | 333.5 (+32.5) | +1.30 ± 0.70 | ns |
+| shipped − kcent | 335.0 (+34.0) | +1.36 ± 0.71 | ns |
+| shipped − kpawn | 336.5 (+35.5) | +1.42 ± 0.70 | SIG+ |
+| shipped − BOTH king terms | 316.5 (+15.5) | +0.62 ± 0.49 | ns |
+| shipped − pass | 317.0 (+16.0) | +0.64 ± 0.41 | ns |
+| shipped − pking | 335.5 (+34.5) | +1.38 ± 0.44 | SIG+ |
+| shipped − kahead | 312.5 (+11.5) | +0.46 ± 0.42 | ns |
+| pass doubled | 309.5 (+8.5) | +0.34 ± 0.84 | ns |
+| pking doubled | 317.0 (+16.0) | +0.64 ± 0.50 | ns |
+| gate phase 8 | 332.5 (+31.5) | +1.26 ± 0.70 | ns |
+
+Read with the CIs: the SET is significantly better than OFF, but the
+individual leave-one-out gaps are mostly INSIDE the noise of a 25-position
+screen. What the data does support: removing the king-activity pair, `pass`,
+or `kahead` roughly halves the gain (each drop lands back in "ns"), so those
+four terms carry it; and doubling either `pass` or `pking` is worse, so the
+weights are not obviously under-set. What it does NOT support is a precise
+per-term ranking.
+
+**The two ship/kill decisions, paired against the shipped set directly**
+(`TestEndgameConversionDecide` — the decision-relevant comparison, which the
+per-arm table above cannot give):
+
+| adding to the shipped set | per-position delta | sig |
+|---|---|---|
+| Unstoppable @250 (rule of the square) | **−0.66 ± 0.34, CI [−1.32,−0.00]** | **SIG−** |
+| Unstoppable @80 | −0.46 ± 0.31 | ns, same sign |
+| RookBehind @20 (Tarrasch) | **−0.10 ± 0.15, CI [−0.40,+0.20]** | ns — a true null |
+| both (= the full designed set) | **−0.78 ± 0.36, CI [−1.48,−0.08]** | **SIG−** |
+
+- **Unstoppable is DROPPED as harmful.** Mechanism: the bonus flips with the
+  side to move (the defender's free tempo), so it makes the leaf eval
+  tempo-dependent beyond Tempo — poison for alpha-beta — and the search
+  already sees a 4-move pawn race directly.
+- **RookBehind is DROPPED for COST, not strength** — it is a measured null,
+  and it is the only term needing a board walk (a per-passer file scan in
+  the asm). Rook-endgame technique therefore stays unported; "cut off the
+  enemy king" was never attempted (it needs an attack scan, which the cost
+  history says dies).
+
+**Both-sides control** (the mop-up precedent): both arms ON vs both OFF is
+**+0.80 ± 0.45 per position, CI [−0.08,+1.68] — ns**, versus +2.08 ± 0.71
+isolated. Less than half the effect and no longer significant, because the
+knowledge is symmetric. This is the measured mechanism (not an assertion)
+behind self-play under-reporting this feature class.
+
+**SCREEN B — SELF-PLAY CYCLE BUDGET.** asm-matched config on BOTH sides
+(mask 0x1f, recap2 QS, Default weights, corrected-guard RFP 120/500,
+**mop-up ON** — the real shipped engine), A = terms ON taxed at 438
+cyc/gated eval, B = terms OFF, `-cbudget 143000000`, 4 seed batches
+(`runs/mirror-endgame.sh 500 <out> default 3 143000000`):
+
+| seed | +W =D -L | Elo ± err |
+|---|---|---|
+| 6502 | +377 =288 -335 | +15 ± 18 |
+| 1337 | +368 =302 -330 | +13 ± 18 |
+| 4242 | +345 =315 -340 | +2 ± 18 |
+| 9001 | +383 =266 -351 | +11 ± 18 |
+| **pooled 4000** | **+1473 =1171 -1356 (51.46%)** | **+10 ± 9, CI [+1,+19]** |
+
+**+10 ± 9 is weakly positive, not decisive** — the lower bound only just
+clears zero. Combined with the isolated conversion result (SIG+) and the
+both-sides control (ns), the picture is consistent: a real but modest gain,
+concentrated in endgames, largely symmetric in self-play. Better than the
+mop-up's flat −7 ± 32, and it is not negative anywhere.
+
+**MIDDLEGAME UNTOUCHED (proof).** `TestEndgameNoMiddlegameLeak`: over
+**35,567 positions** from 300 random-play games, EG-ON eval == EG-OFF eval
+at every position with phase > 6 — **0 leaks**; 278 positions differ, all
+inside the gate (plus positive controls: g137/g61 must differ, the opening
+and a 4-knights middlegame must not). `TestEndgameOffIdentical`: with
+`EndgameParams{}` the depth-5 tree (best move, score, node count) is
+IDENTICAL to an engine with no EG config, at masks 0x00/0x07/0x1f with the
+mop-up both on and off. Every asm gate green unchanged: TestMicroAB,
+TestMicroABAdopted(+Probes), TestMicroABImproving, TestSearchMirrorParity
+(+Improving), TestMopupEvalParity, TestPStructParity/MirrorParity,
+TestAspirationMirrorParity, TestAdaptiveParity, TestBookProbeParity. An
+independent exhaustive color-flip check (`egEval(p) == -egEval(flip(p))`
+with the gate wide open) found **0 asymmetries over ~55k positions**, and
+the `pass`-only term reproduced `extractPawnFeatures`'s passer counts
+exactly on all of them — the black mirror and the passer definition are
+verified, not assumed.
+
+**Cost.** Charged honestly at `EvalTermsCost(2) = 438 cyc` per gated eval
+call in every screen above; measured share of a real endgame search:
+**3.9-5.1%** of estimated cycles (0% in the middlegame — the gate is one
+compare). The asm design is ~120 cyc + ~65/passer, so the screened numbers
+are a PESSIMISTIC bound on the ported feature.
+
+**PORT RECOMMENDATION: PORT IT** (FT2_EGTECH), with the mop-up's rationale:
+a significant isolated endgame gain (CI excludes 0) plus a positive-leaning
+self-play number, in the bucket the diagnosis says costs the most points.
+But port it with the corrected expectation — the honest conversion component
+is +24.5 match points over 11 won endings, not +52, and the self-play gain
+is ~+10 Elo, not the +50 class of the adaptive-time win. Design sketch is in
+the asm-port comment at the bottom of endgame.go. The one decision that
+makes it cheap: have pawnterm stash its per-file most-advanced ranks
+(PWMAX/PBMIN, 16 B) in the loop it ALREADY runs, so the endgame term needs
+no piece-list pass of its own. ~250-350 B of code + 16 B of tables; the
+image had 278 B headroom at the last audit, so it needs a feature-audit
+slot.
+
+**CORRECTIONS FORCED BY THE REVIEW** (recorded so the same errors are not
+repeated):
+1. **8 of 25 corpus labels were wrong**, all in the optimistic direction.
+   Worst: `kpk-front` (`8/8/8/3k4/8/3K4/3P4/8 w`) was labelled "king in
+   front of the pawn: won" — with WHITE to move it is the textbook MUTUAL
+   ZUGZWANG DRAW (1.Kc3 Kc5); the note described the position with BLACK to
+   move. Also mislabelled: `outside-passer`, `peak-g234`, `peak-g91`,
+   `peak-g2`, `peak-g48` (all cp 0 or worse, labelled "win"), and `peak-g8`
+   (cp −349) / `diag-g137` (cp −444) / `diag-g246` (cp −501) / `diag-g61`
+   (cp −362), which are objectively LOST. **The three diagnosis FENs being
+   lost matters beyond this screen: the loss diagnosis' "reached an
+   even-or-better endgame and lost it" describes the MATERIAL COUNT, not the
+   position — at those plies the game was already gone, so the point of no
+   return was earlier than the diagnosis located it.** Ground truth now
+   comes from Stockfish 18 and is stored in the corpus.
+   **`mopup_conversion_test.go` carries the same wrong label**: its
+   `KPK-win` is this exact drawn FEN, so the mop-up entry's "partially
+   recovers KPK (0→2/4)" was recovering a DRAW into a win against a
+   handicapped twin. Not fixed here (it would change a shipped test), but
+   flagged in both files.
+2. **The error bar was computed over games, not positions.** 20 runs of one
+   position share everything but the dither seed, so the independent unit is
+   the position (n=25). All numbers above are paired per-position; the
+   original "+52 pts / +78 correct" carried no uncertainty at all, and the
+   drop-one verdicts quoted from it ("Unstoppable −17.5", "RookBehind +2.5 =
+   neutral", "phase 8 identical") were point estimates inside the noise.
+   They are re-derived above as direct paired comparisons.
+3. **Selection bias acknowledged**: 14 of 25 FENs are conditioned on the OFF
+   engine failing, and 11 were mined by taking the ply where its own eval
+   PEAKED — which is exactly where that eval is most over-optimistic. That
+   is why 6 of the 11 "unconverted wins" turned out not to be wins. The
+   paired A/B is still valid, but the OFF baseline is biased low on those
+   positions, so the corpus-wide delta is an upper bound on the transfer to
+   real games.
+4. `TestEndgameSanity`'s RookBehind case did not isolate RookBehind (it
+   passed on Unstoppable's +250 and would have passed with RookBehind's sign
+   inverted); it now screens both terms alone, including the enemy-rook sign.
+5. Harness fixes: `egPlayOut` no longer calls `t.Fatalf` from worker
+   goroutines; the ablations nil-check missing corpus entries;
+   `TestEndgameHarnessPOV` pins the hero-POV mapping on forced mates for
+   both colors (11 of 25 positions are black-to-move, so a sign error there
+   would have inverted everything); `egScan` no longer allocates per gated
+   eval.
 
 ## 2026-07-25 — check extensions: +12.6 ± 9.0 (mirror, cycle-budgeted) — PORT-worthy, batched with endgame work
 

@@ -284,6 +284,12 @@ func match(args []string) {
 	bExtra := fs.String("bextra", "", "B experimental eval terms")
 	aExtraCost := fs.Float64("aextracost", 0, "A per-eval-call cycle cost of the extra terms (cycle mode only)")
 	bExtraCost := fs.Float64("bextracost", 0, "B per-eval-call cycle cost of the extra terms (cycle mode only)")
+	aMop := fs.String("amop", "", "A endgame mop-up: \"default\"|\"off\"|edge,close,matthresh,phasemax")
+	bMop := fs.String("bmop", "", "B endgame mop-up: \"default\"|\"off\"|edge,close,matthresh,phasemax")
+	aEG := fs.String("aeg", "", "A endgame-technique terms: \"default\" or key:val,... keys phase,kcent,kpawn,pass,pking,pkingt,kahead,unstop,rbehind (empty = off)")
+	bEG := fs.String("beg", "", "B endgame-technique terms")
+	aEGCost := fs.Float64("aegcost", 0, "A per-gated-eval-call cycle cost of the endgame terms (cycle mode only)")
+	bEGCost := fs.Float64("begcost", 0, "B per-gated-eval-call cycle cost of the endgame terms (cycle mode only)")
 	cbudget := fs.Uint64("cbudget", 0, "per-move CYCLE budget (>0 selects cycle-budgeted mode, both sides; overrides -budget)")
 	aCMCost := fs.Float64("acmcost", 0, "A per-node countermove cycle cost (cycle mode only)")
 	bCMCost := fs.Float64("bcmcost", 0, "B per-node countermove cycle cost (cycle mode only)")
@@ -305,6 +311,7 @@ func match(args []string) {
 		SEE: parseSEE(*aSEE), SEECosts: parseSEECost(*aSEECost),
 		CheckExt: parseCheckExt(*aCkExt),
 		Extra:    parseExtra(*aExtra), EvalTermsCost: *aExtraCost,
+		Mopup: parseMopup(*aMop), EG: parseEG(*aEG), EGCost: *aEGCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	b := mirror.PlayerCfg{Features: byte(*bMask), Weights: parseWeights(*bw), Depth: *depth,
 		FixFutility: *bFix, LMR: parseLMR(*bLMR), QS: parseQS(*bQS), KB: loadKB(*bKB), Fut: parseFut(*bFut), Ord: parseOrd(*bOrd),
@@ -312,6 +319,7 @@ func match(args []string) {
 		SEE: parseSEE(*bSEE), SEECosts: parseSEECost(*bSEECost),
 		CheckExt: parseCheckExt(*bCkExt),
 		Extra:    parseExtra(*bExtra), EvalTermsCost: *bExtraCost,
+		Mopup: parseMopup(*bMop), EG: parseEG(*bEG), EGCost: *bEGCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
 	start := time.Now()
 	res, err := mirror.Match(a, b, lines, *pairs, *workers, *seed)
@@ -323,8 +331,9 @@ func match(args []string) {
 	if *cbudget > 0 {
 		mode = fmt.Sprintf("budget %d cycles/move (maxiters %d)", *cbudget, *maxiters)
 	}
-	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q) %s: %s (%v)\n",
-		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aImp, *aSEE, *aCkExt, *aExtra, byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bImp, *bSEE, *bCkExt, *bExtra,
+	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q mop=%q eg=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q mop=%q eg=%q) %s: %s (%v)\n",
+		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aImp, *aSEE, *aCkExt, *aExtra, *aMop, *aEG,
+		byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bImp, *bSEE, *bCkExt, *bExtra, *bMop, *bEG,
 		mode, res, time.Since(start).Round(time.Second))
 }
 
@@ -639,6 +648,78 @@ func parseExtra(s string) mirror.EvalTerms {
 			t.Tropism = val
 		default:
 			fmt.Fprintf(os.Stderr, "unknown extra term key %q (want ropen,rsemi,bishop,rook7,drook,block,tropism)\n", k)
+			os.Exit(2)
+		}
+	}
+	return t
+}
+
+// parseMopup parses the endgame mop-up config: "" or "off" = OFF (the
+// zero value), "default" = DefaultMopup (the SHIPPED asm term — use it on
+// BOTH sides of any endgame screen so the baseline is the real engine),
+// or an explicit "edge,close,matthresh,phasemax".
+func parseMopup(s string) mirror.MopupParams {
+	switch s {
+	case "", "off":
+		return mirror.MopupParams{}
+	case "default", "on":
+		return mirror.DefaultMopup
+	}
+	m := mirror.MopupParams{Enable: true}
+	n, err := fmt.Sscanf(s, "%d,%d,%d,%d", &m.Edge, &m.Close, &m.MatThreshold, &m.PhaseMax)
+	if err != nil || n != 4 {
+		fmt.Fprintf(os.Stderr, "bad mopup params %q (want off|default|edge,close,matthresh,phasemax)\n", s)
+		os.Exit(2)
+	}
+	return m
+}
+
+// parseEG parses the endgame-technique terms: "" = off, "default" =
+// DefaultEndgame, else a comma-separated key:val list starting from the
+// default gate (phase 6) with every WEIGHT zero, so a single term can be
+// screened in isolation (e.g. "kcent:8" or "unstop:250,pass:1").
+// "pass:N" scales the built-in monotone advancement table by N/1 (N=1 is
+// the default table; N=0 disables it).
+func parseEG(s string) mirror.EndgameParams {
+	switch s {
+	case "", "off":
+		return mirror.EndgameParams{}
+	case "default", "on", "all":
+		return mirror.DefaultEndgame
+	case "designed":
+		return mirror.EndgameDesigned
+	}
+	t := mirror.EndgameParams{Enable: true, PhaseMax: mirror.DefaultEndgame.PhaseMax}
+	for _, kv := range strings.Split(s, ",") {
+		k, v, ok := strings.Cut(kv, ":")
+		var val int
+		if !ok || func() bool { _, e := fmt.Sscanf(v, "%d", &val); return e != nil }() {
+			fmt.Fprintf(os.Stderr, "bad endgame term %q (want key:val)\n", kv)
+			os.Exit(2)
+		}
+		switch k {
+		case "phase":
+			t.PhaseMax = val
+		case "kcent":
+			t.KingCent = val
+		case "kpawn":
+			t.KingPawn = val
+		case "pass":
+			for i, p := range mirror.EndgameDesigned.Pass {
+				t.Pass[i] = p * val
+			}
+		case "pking":
+			t.PassKingOur = val
+		case "pkingt":
+			t.PassKingThem = val
+		case "kahead":
+			t.KingAhead = val
+		case "unstop":
+			t.Unstoppable = val
+		case "rbehind":
+			t.RookBehind = val
+		default:
+			fmt.Fprintf(os.Stderr, "unknown endgame term key %q (want phase,kcent,kpawn,pass,pking,pkingt,kahead,unstop,rbehind)\n", k)
 			os.Exit(2)
 		}
 	}

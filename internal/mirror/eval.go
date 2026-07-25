@@ -293,6 +293,9 @@ func (e *Engine) eval() int {
 	if e.Mopup.on() {
 		score += e.mopupEval()
 	}
+	if e.EG.on() {
+		score += e.egEval()
+	}
 	if p.Side != 0 {
 		score = -score
 	}

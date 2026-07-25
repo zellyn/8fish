@@ -95,6 +95,14 @@ type CycleCosts struct {
 	// (defaults to 0, an untaxed node-budget run); a cycle screen sets it
 	// via PlayerCfg.CMCost to a pessimistic per-node surcharge (~20-40).
 	Countermove float64
+	// EGTerm is the per-eval-call cost of the endgame-TECHNIQUE terms
+	// (endgame.go), charged ONLY on the calls where the phase gate actually
+	// fires (in the asm the gate is a 3-cycle compare-and-return, so a
+	// middlegame eval pays nothing). Like EvalTerm it is not part of the
+	// calibration fit; a screen sets it via PlayerCfg.EGCost. The term does
+	// one piece-list pass plus per-file/per-passer work, so the honest
+	// pessimistic value is EvalTermsCost(2) = 438.
+	EGTerm float64
 }
 
 // DefaultCycleCosts is the ridge-regularized fit against TestMicroAB's 18
@@ -156,6 +164,7 @@ type CycleAccount struct {
 
 	Evals      uint64 // eval() calls (== the asm "eval" probe)
 	EvalsExtra uint64 // ... of which computed an EvalTerms (extra) sum
+	EGEvals    uint64 // ... of which computed an endgame-technique sum (gate fired)
 
 	Attacked    uint64 // attacked() scans charged at Costs.Attacked
 	AttackedAll uint64 // ALL attacked() scans incl. in-make gives-check

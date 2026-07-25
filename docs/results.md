@@ -3,6 +3,44 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-25 — CHECK EXTENSIONS ADOPTED (+24 ± 23 over 600 SPRT games); ENDGAME TECHNIQUE neutral, stays off
+
+Both features ported behind bits (FT_CKEXT=$40 reusing the freed FT_ASP
+bit; FT2_EGTECH=$08), then SPRT'd separately so a loser could be dropped
+independently. Off-path tree-identical (30/30 fingerprints byte-identical;
++0.11% cycles = the ckext gate test). Image 32,113 B, top $BD71, 639 B
+headroom — both fit thanks to SPACE round 1.
+
+**CHECK EXTENSIONS: ADOPTED.** Two independent 300-game SPRTs at 30M/move:
++107 =96 −97 (+12 ± 33) and +113 =106 −81 (+37 ± 32) → **combined
+220W-178L-202D = 53.50% = +24.4 Elo, CI [+2,+47]**. NO mirror→asm
+compression (screen said +12.6 ± 9.0) — unusual, and consistent with the
+middlegame-eval finding that the horizon-blind losses are a SEARCH
+problem. Now enabled in gameplay (the bridge sets 0x1F|FT_CKEXT); tests
+keep the plain 0x1F default so fingerprints stay exact. Cost: 6 cyc per
+child search; the extra nodes are taxed honestly by the budget.
+
+**ENDGAME TECHNIQUE: NEUTRAL (−1 ± 36) — stays gated OFF.** Its mirror
++10 ± 9 was flattered by a 3×-understated cost model: the real cost is
+**+1278 cyc/gated eval = +30.9% cycles/node in endgame searches**, vs the
+438 the screen charged (one optimization pass already cut it 45%). Same
+pattern that sank FT_ROOKX. Middlegame cost is zero (it shares the
+mop-up's gate). NOTABLE SIDE EFFECT worth remembering: same openings,
+draws fell **96 → 57 (−40%)** — the endgame knowledge really does break
+the shuffling draws, it just converts them SYMMETRICALLY in self-play, so
+self-play cannot price it. If it is ever revisited, the test that could
+show its value is an asymmetric one (vs Sargon), not self-play — but the
++30.9% endgame-node cost would have to be paid there too.
+
+**BUG FOUND (pre-existing, unfixed, needs its own SPRT):** asm/tt.s
+classifies mate scores with an UNSIGNED `cmp #$74`, so every NEGATIVE TT
+score is ply-shifted (+Ply on store / −Ply on probe) and the losing-mate
+branch is dead code. Modelled exactly (13k-node traces match byte-for-byte)
+as mirror.Engine.TTPlyQuirk (default OFF) so the new parity gates could be
+written. Fixing it CHANGES THE SHIPPED TREE, so it is a real search-side
+candidate with its own SPRT — and per the eval-ceiling finding, search is
+where the remaining Elo is.
+
 ## 2026-07-25 — PORTED to asm: check extensions (FT_CKEXT) + endgame technique (FT2_EGTECH); SPRTs +12 +/- 33 (ckext, no compression) and -1 +/- 36 (endgame, neutral)
 
 Both mirror-validated features from the same day's screens are now in the

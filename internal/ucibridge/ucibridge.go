@@ -545,17 +545,24 @@ type adaptiveAlloc struct {
 }
 
 func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64, depth byte, seed int, adapt *adaptiveAlloc) (engineResult, error) {
-	// Gameplay config: FEATURES stays the NewMachine 0x1F default.
-	// FT2_IMPROV (improving-LMR) was adopted 2026-07-21 on a +13 ± 9 cycle
-	// screen, then RETRACTED 2026-07-22: a 4200-game confirmation SPRT
-	// landed at −1.8 ± 8.6 (no demonstrable benefit; screen's +13 outside
-	// the CI). FEATURES2 now stays 0 in gameplay. The asm implementation
-	// remains gated behind FT2_IMPROV for re-test; excising it (to reclaim
-	// its ~0.19% feature-off gate-check tax) is a deferred search.s cleanup.
+	// Gameplay config: FEATURES = the NewMachine 0x1F default + FT_CKEXT.
+	//
+	// FT_CKEXT (check extensions) ADOPTED 2026-07-25: two independent asm
+	// SPRTs (+12 ± 33 and +37 ± 32) combine to +24 ± 23 over 600 games, CI
+	// excludes zero, with no mirror→asm compression (screen said +12.6 ± 9).
+	// It is the feature the loss diagnosis pointed at once the middlegame-eval
+	// work showed the horizon-blind losses are a SEARCH problem, not an eval
+	// one. Tests keep the plain 0x1F default so stored fingerprints stay exact.
+	//
+	// NOT enabled: FT2_EGTECH (endgame technique) measured −1 ± 36 — neutral,
+	// stays gated off (its mirror +10 was flattered by a 3×-understated cost
+	// model: 1278 cyc/gated eval vs the 438 charged). FT2_IMPROV was adopted
+	// 2026-07-21 then RETRACTED 2026-07-22 at −1.8 ± 8.6 over 4200 games.
 	m, err := chesstest.NewMachine(b.Bin, b.Defs, pos, 0, io.Discard)
 	if err != nil {
 		return engineResult{}, err
 	}
+	chesstest.SetFeatures(m, b.Defs, byte(b.Defs["FT_CKEXT"])|0x1F)
 	chesstest.SetBudget(m, b.Defs, budget, depth)
 	if adapt != nil {
 		chesstest.SetAdaptive(m, b.Defs, adapt.maxCeiling, adapt.unstTarget, adapt.minSpend)

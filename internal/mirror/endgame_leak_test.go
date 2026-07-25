@@ -72,9 +72,9 @@ func TestEndgameNoMiddlegameLeak(t *testing.T) {
 			t.Errorf("gate control fen=%q: got differ=%v want %v (phase=%d)", fen, d, wantDiff, on.Pos.Phase)
 		}
 	}
-	assertDiff("8/2p2p2/3P4/1Pp2kp1/6p1/3K4/6PP/8 b - - 0 1", true)                  // g137 pawn ending
-	assertDiff("8/5p2/pk1P4/8/P5p1/3Pp1P1/2r1b1BP/4R1K1 b - - 0 1", true)            // g61 R+B ending (phase 6)
-	assertDiff("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", false)     // opening: silent
+	assertDiff("8/2p2p2/3P4/1Pp2kp1/6p1/3K4/6PP/8 b - - 0 1", true)               // g137 pawn ending
+	assertDiff("8/5p2/pk1P4/8/P5p1/3Pp1P1/2r1b1BP/4R1K1 b - - 0 1", true)         // g61 R+B ending (phase 6)
+	assertDiff("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", false) // opening: silent
 	assertDiff("r1bqkb1r/pppp1ppp/2n2n2/4p3/4P3/2N2N2/PPPP1PPP/R1BQKB1R w KQkq - 0 1", false)
 }
 

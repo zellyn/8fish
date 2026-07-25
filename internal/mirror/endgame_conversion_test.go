@@ -511,3 +511,37 @@ func TestEndgameSmoke(t *testing.T) {
 		}
 	}
 }
+
+// TestEndgameHarnessPOV is the harness self-check: the conversion suite's
+// hero-POV mapping, on positions with a FORCED known outcome, for both hero
+// colors. A sign error here would invert the entire measurement.
+func TestEndgameHarnessPOV(t *testing.T) {
+	cfg := egCfg(EndgameParams{}, 2_000_000)
+	cases := []struct {
+		name, fen string
+		wantRes   float64
+	}{
+		// Hero = white (to move), mates in 1: hero must score 1.
+		{"white-mates", "7k/5Q2/6K1/8/8/8/8/8 w - - 0 1", 1},
+		// Hero = black (to move), gets mated: hero must score 0.
+		{"black-mated", "5k2/5Q2/5K2/8/8/8/8/8 b - - 0 1", 0},
+		// Hero = black (to move), mates in 1: hero must score 1.
+		{"black-mates", "8/8/8/8/8/1k6/5q2/K7 b - - 0 1", 1},
+	}
+	for _, c := range cases {
+		p, err := ParseFEN(c.fen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reason, resW, moves := egPlayOut(t, c.fen, cfg, cfg, 20, 1)
+		res := resW
+		if p.Side != 0 {
+			res = 1 - resW
+		}
+		if res != c.wantRes {
+			t.Errorf("%s: hero scored %.1f want %.1f (reason %s, %d moves)", c.name, res, c.wantRes, reason, moves)
+		} else {
+			t.Logf("%-12s hero=%.1f reason=%s moves=%d", c.name, res, reason, moves)
+		}
+	}
+}

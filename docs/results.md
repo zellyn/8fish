@@ -3,6 +3,123 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-25 — SPACE optimization round 1: 1344 B freed (278 → 1622 B headroom), tree-identical
+
+The first space-only pass over the image (all four prior deep-optimization
+rounds traded space FOR cycles). Motivation: 278 B of headroom below the
+$BFF0 harness-trap ceiling and two validated ports (check extensions +
+endgame technique) needing ~400-450 B.
+
+| source | bytes freed |
+|--------|-------------|
+| **FT_ASP removed** (rejected feature, still in the binary) | **322** (CODE content) |
+| **FT_CKVERIFY made assembly-time** (`.ifdef CKVERIFY`) | **24** (CODE content) |
+| mopfin/mopcd relocated CODE tail → RATTACK's alignment hole | 48 (CODE content, into pre-existing TABLES fill) |
+| → CODE address space realized (2 page boundaries crossed) | **512** |
+| **TABLES repack** (969 B of alignment fill measured, 880 reclaimed) | **832** (net, after absorbing mopfin/mopcd's 48 B) |
+| **TOTAL** | **1344** |
+
+- **Image: 32,474 → 31,130 B. Top $BEDA → $B99A. Headroom 278 → 1622 B.**
+  Segments: CODE $4000-$78F7 (14,584 B, was 14,978), TABLES $7900-$B958
+  (16,473 B, was 17,305), LCCODE 65 B. engine.bin md5 `8231f781`.
+  Plus 89 B of leftover RATTACK-region slack and 8 B of CODE fill = 1719 B
+  usable in total.
+- **Tree-identical**: all 30 MicroAB / MicroABImproving / MicroABAdopted
+  fingerprints (score, move, and every profile counter: search/make/eval/
+  attacked/ttprobe/generate) byte-identical to the baseline across
+  0x1f/0x07/0x00 + improving + adopted.
+- **Cycles: −0.178% total** (7,149,463,403 → 7,136,729,488 over the 30
+  fingerprints), i.e. a small WIN, not a regression. Nearly all of it is
+  FT_CKVERIFY: its `lda FEATURES / and / beq` probe ran at every
+  full-width node (6 cycles/node ≈ 0.19%); the TABLES repack itself moves
+  the totals by −64 cycles per position (one cold-path page crossing in
+  the relocated LC-install/driver code), i.e. 1e-5%. Every table's
+  page-crossing behaviour is preserved by construction (below).
+
+**1. FT_ASP (bit $40) removed.** Aspiration windows lost their own asm SPRT
+(−21 ± 32, 2026-07-21) and had been sitting in the image gated off ever
+since, on the FT_ROOKX precedent. Removed `aspiterate`/`aspbump`/`aspfull`/
+`itsearch` (engine.s), the FT_ASP bit, ASPDELTA, and the ASPAL/AH/BL/BH/
+ASPFAIL state at $0233-$0237 (now free driver scratch again). The
+budget-mode ID driver's `jsr aspiterate` goes back to `jsr iterate` — the
+plain path, which performed the identical PREV* snapshot plus the identical
+per-iteration root setup, so this restores the exact FT_ASP-off iteration
+path (proved by the fingerprints). FT2_ADAPT's hooks (`adaptmaybe`,
+`adaptaborthi`) are untouched and still fire from the same points in
+`idloop`. internal/chesstest/aspiration_parity_test.go deleted (vacuous
+once the bit is inert); mirror.aspIterate is untouched, so a re-port is
+still a mirror-verified exercise if the verdict ever flips.
+
+**2. FT_CKVERIFY (bit $80) is now assembly-time optional.** The
+gives-check cross-check is a pure debug assertion; it was shipping in the
+image and costing 6 cycles at every full-width node. Now behind
+`.ifdef CKVERIFY`, built only by `ca65 -D CKVERIFY`
+(asmbuild.BuildVariant, the PTNOCACHE/RKNOCACHE pattern);
+TestGiveCheckVerify builds that variant and is unchanged otherwise. The
+FEATURES bit stays reserved so the variant's encoding is unchanged.
+
+**3. TABLES repack — the unexplored seam.** TABLES (17,305 B) was LARGER
+than all the engine's code and had never been audited. Findings:
+
+- **No dead tables.** All 42 tables have live readers (checked symbol by
+  symbol); VV16L/VV16H were the only orphans and were already gone in r4.
+- **Alignment fill was the win: 969 B of pure `.align` padding** inside
+  TABLES, never before measured — 240 B after TYPEATK2, 232 after
+  PHASEVAL, 137 after RATTACK, 128 each after WBLOCKM and FILEBIT, 104
+  after ORTHOOFF — plus 126 B of CODE-side fill between CODE's end and the
+  page-aligned TABLES base.
+  cmd/gentables now emits the tables in groups whose sizes are each an
+  exact multiple of 256, with every unaligned small table packed into one
+  gap-free run at the tail:
+  `A` 12×256 B page-aligned tables · `B` the four 512 B quarter-square
+  tables · `C` RANKBIT(128)+WBLOCKM(256)+FILEBIT(128) · `D` PSQT 12 pages
+  · `E` ZKEYS 24 pages · `F` CASTLEMASK(128) + all 19 unaligned small
+  tables + hashstm (413 B). Fill in the whole segment is now **zero** except the
+  RATTACK region, where `mopfin`/`mopcd` moved in from CODE's tail (48 of
+  its 137 B).
+- **Cycle-identity rule** (the reason this is free): an `abs,x`/`abs,y`
+  read costs +1 cycle when base+index crosses a page, so every table keeps
+  its exact crossing behaviour. Verified table by table: all 35
+  index-addressed tables have an unchanged crossing count, WBLOCKM keeps
+  its offset $80 (indexed 0..255, so it always crossed — deliberately NOT
+  "fixed", which would have made pawnterm cheaper than every measurement
+  on record), and the pointer/SMC-addressed tables (PSQTBASE, ZKEYS,
+  SQRLO/HI, ISQLO/HI, RATTACK, TIERTAB) stay page-aligned. Every table's
+  bytes are byte-for-byte unchanged except the five that HOLD page numbers
+  (ZKHI0/TYPEPAGE0/1/TYPEPG0X/1X), which correctly track the new
+  addresses. New TestTablePacking pins all of it, plus the $BFF0 ceiling.
+- The Zobrist PRNG draw order is deliberately preserved (keys are drawn in
+  the original order and emitted in the new one), so no hash value moved.
+
+**Deliberately NOT done** (measured, quantified, declined — the ledger for
+the next time space runs out):
+
+- **Merging SQR/ISQ into one 320-entry table pair: 1408 B.** ISQ[i] =
+  f(i−32) and SQR[i] = f(i) are the same function shifted, so one table
+  can serve both if `evmul` indexes ISQ with X = −w instead of 32−w (bases
+  then differ by exactly one page, both still page-aligned). Costs ~+2 to
+  +4 cycles per eval in added page crossings — a real hot-path regression
+  (~0.1%), so declined while 1622 B of headroom exists. Note the four
+  tables are also only 288/512 entries used (max index 287 = Dlo 255 +
+  PHASEWX's capped w 32); truncating alone buys nothing, because the
+  freed 224 B per table just becomes alignment fill with no partner left
+  to fill it.
+- **ZKEYS' 3072 structural zero bytes** (half of every 128-byte 0x88
+  plane is off-board files). Removing them needs a compressed square
+  index in make/unmake's hash update = hot path. Declined.
+- **Deriving the PSQT EG plane from MG+D, or black planes by flip**: both
+  add work to the hottest eval loop for 1.5 KB. Declined.
+- **Generating derivable tables at init into free RAM** (RATTACK is
+  literally ATTACKTAB reversed; SQR/ISQ are closed-form): there is no free
+  MAIN RAM. $2000-$3FFF is D7-reserved for hires page 1 and already holds
+  the resident opening book, $0400-$07FF is the text screen, and the rest
+  of $0200-$0DFF is dense engine state. Init-generating a table into its
+  own space saves FILE bytes but not the RAM footprint, which is the
+  binding constraint ($BFF0 ceiling). Dead end — recorded so nobody
+  re-derives it.
+
+Full internal/chesstest battery green. `make engine` + `make perft` clean.
+
 ## 2026-07-25 — CHECK EXTENSIONS (mirror): cap N=1, all checks = +12.6 ± 9.0 (4000g) — PORT
 
 Standard check extension in the MAIN search (never QS): when a move gives

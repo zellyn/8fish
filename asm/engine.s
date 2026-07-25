@@ -85,7 +85,7 @@ idloop: lda CLOCK_TRAP          ; iteration start time (latched 24-bit)
         sta ITSTART1
         lda CLOCK_TRAP+2
         sta ITSTART2
-        jsr aspiterate          ; iterate CURDEPTH, aspiration window (FT_ASP)
+        jsr iterate             ; run iteration CURDEPTH
         lda ABORT
         beq idok
         ; aborted mid-iteration: a partial iteration's "best" is just the
@@ -172,9 +172,11 @@ idloopj:
         jmp idloop
 
 ; iterate: run one full-window search at CURDEPTH, saving the previous
-; iteration's best move first. Fixed-depth mode uses this directly; the
-; budget-mode ID driver goes through aspiterate (below), which reuses the
-; same per-iteration setup via itsearch.
+; iteration's best move first (BEST* -> PREV*, SCORE -> PREVSC: the
+; abort-recovery snapshot). Both the fixed-depth and the budget-mode ID
+; drivers call this directly. (The FT_ASP aspiration wrapper that used to
+; sit between idloop and this path was removed 2026-07-25 with the
+; feature; see docs/results.md.)
 iterate:
         lda BESTFROM
         sta PREVFROM
@@ -271,263 +273,14 @@ nonetxt:
         .include "movegen.s"
         .include "tables.s"
 
-        ; Aspiration code lives in CODE (not the TABLES segment tables.s
-        ; leaves active): appended at CODE's end it shifts the page-aligned
-        ; TABLES/LCCODE only by whole pages, so no hot-path instruction's
-        ; low byte — and no page-crossing cycle count — changes. Placing it
-        ; in TABLES instead grows that segment by a non-page amount and
-        ; perturbs the LC-install loop's cost (FT_ASP-off cycles must be
-        ; bit-identical to the pre-aspiration engine).
-        .segment "CODE"
-
-; aspiterate: budget-mode ID wrapper that applies aspiration windows
-; (FT_ASP) around iteration CURDEPTH. It first saves the previous
-; completed iteration's result (BEST* -> PREV*, SCORE -> PREVSC) — the
-; abort-recovery snapshot AND the aspiration seed — then runs the
-; iteration. With FT_ASP off, CURDEPTH == 1, or the seed in a mate zone
-; it is a plain full-window iteration (identical tree to iterate).
-; Otherwise it opens (prev-ASPDELTA, prev+ASPDELTA) and re-searches on a
-; fail-low/high, opening ONLY the failing bound (asymmetric) until the
-; score lands inside the window, a mate appears, or the third fail forces
-; the full window. On a budget abort mid-(re)search ABORT stays set and
-; control returns to idloop, which discards the whole iteration (restores
-; PREV*), exactly as for iterate. Mirrors mirror.aspIterate with
-; AspirationParams{Delta:25, Policy:AspAsym}, including its fail-low/high
-; definitions (s <= alpha with alpha > -INF, s >= beta with beta < INF)
-; and widening order.
-aspiterate:
-        lda BESTFROM            ; save previous completed iteration (once)
-        sta PREVFROM
-        lda BESTTO
-        sta PREVTO
-        lda BESTFLAGS
-        sta PREVFLAGS
-        lda SCORE               ; PREVSC = seed for the aspiration window
-        sta PREVSC0
-        lda SCORE+1
-        sta PREVSC1
-        lda FEATURES            ; aspiration disabled? -> full window
-        and #FT_ASP
-        beq aspfull
-        lda CURDEPTH            ; iteration 1 -> full window
-        cmp #2
-        bcc aspfull
-        lda PREVSC1             ; seed in a mate zone? -> full window
-        bpl aspspos             ; hi $00-$7F: test winning-mate zone
-        cmp #NMATEZONEHI        ; hi $80-$8B (< $8C): losing mate
-        bcc aspfull
-        bcs aspnarrow           ; hi $8C-$FF: negative, not a mate
-aspspos:
-        cmp #MATEZONEHI         ; hi $74-$7F: winning mate
-        bcs aspfull
-        bcc aspnarrow           ; not a mate seed: use a narrow window
-aspfull:
-        lda #<(-INF)            ; full-window single iteration
-        sta ASPAL
-        lda #>(-INF)
-        sta ASPAH
-        lda #<INF
-        sta ASPBL
-        lda #>INF
-        sta ASPBH
-        jmp itsearch            ; tail: search's rts returns to idloop
-aspnarrow:
-        ; window = (prev - ASPDELTA, prev + ASPDELTA). A non-mate seed is
-        ; well inside +/-INF, so prev+/-ASPDELTA never needs clamping.
-        sec
-        lda PREVSC0
-        sbc #ASPDELTA
-        sta ASPAL
-        lda PREVSC1
-        sbc #0
-        sta ASPAH
-        clc
-        lda PREVSC0
-        adc #ASPDELTA
-        sta ASPBL
-        lda PREVSC1
-        adc #0
-        sta ASPBH
-        lda #0
-        sta ASPFAIL
-asploop:
-        jsr itsearch            ; run CURDEPTH with the [ASPA,ASPB] window
-        lda ABORT
-        beq :+
-        rts                     ; budget hit mid-(re)search: discard iteration
-:       ; fail-low? SCORE <= ASPA and ASPA > -INF.
-        lda ASPAH               ; ASPA == -INF ($8300)? then no fail-low
-        cmp #>(-INF)
-        bne aspchklo
-        lda ASPAL
-        cmp #<(-INF)
-        beq aspchkhi            ; ASPA == -INF: skip the fail-low test
-aspchklo:
-        sec                     ; ASPA - SCORE; result >= 0 => SCORE <= ASPA
-        lda ASPAL
-        sbc SCORE
-        lda ASPAH
-        sbc SCORE+1
-        bvc :+
-        eor #$80
-:       bmi aspchkhi            ; ASPA < SCORE: not a fail-low
-        jsr aspbump             ; fail-low; C=1 if mate/3rd fail forces full
-        bcs aspwidefull
-        lda #<(-INF)            ; asymmetric: open only alpha
-        sta ASPAL
-        lda #>(-INF)
-        sta ASPAH
-        jmp asploop
-aspchkhi:
-        ; fail-high? SCORE >= ASPB and ASPB < INF.
-        lda ASPBH               ; ASPB == INF ($7D00)? then no fail-high
-        cmp #>INF
-        bne aspchkhi2
-        lda ASPBL
-        cmp #<INF
-        beq aspacc              ; ASPB == INF: score inside window -> accept
-aspchkhi2:
-        sec                     ; SCORE - ASPB; result >= 0 => SCORE >= ASPB
-        lda SCORE
-        sbc ASPBL
-        lda SCORE+1
-        sbc ASPBH
-        bvc :+
-        eor #$80
-:       bpl aspfh               ; SCORE >= ASPB: fail-high
-aspacc:
-        rts                     ; score inside window: accept the iteration
-aspfh:
-        jsr aspbump             ; fail-high
-        bcs aspwidefull
-        lda #<INF               ; asymmetric: open only beta
-        sta ASPBL
-        lda #>INF
-        sta ASPBH
-        jmp asploop
-aspwidefull:
-        lda #<(-INF)            ; mate/3rd fail: full window, guaranteed
-        sta ASPAL               ;  terminal (no clip, no further fail)
-        lda #>(-INF)
-        sta ASPAH
-        lda #<INF
-        sta ASPBL
-        lda #>INF
-        sta ASPBH
-        jmp asploop
-
-; aspbump: register a fail. Increments ASPFAIL and returns C=1 when the
-; full window must be forced now — the failing score (in SCORE) is itself
-; in a mate zone (a narrow window must never clip a mate) or this is the
-; third fail — else C=0 (open only the failing bound).
-aspbump:
-        inc ASPFAIL
-        lda SCORE+1             ; inMateZone(SCORE)?
-        bpl aspbpos
-        cmp #NMATEZONEHI
-        bcc aspbforce           ; losing-mate score
-        bcs aspbcnt             ; negative, not a mate
-aspbpos:
-        cmp #MATEZONEHI
-        bcs aspbforce           ; winning-mate score
-aspbcnt:
-        lda ASPFAIL
-        cmp #3                  ; the third fail forces the full window
-        bcs aspbforce
-        clc                     ; widen the failing bound only
-        rts
-aspbforce:
-        sec
-        rts
-
-; itsearch: run one search at CURDEPTH with the root window held in
-; ASPAL/H (alpha) and ASPBL/H (beta). Resets the per-iteration root state
-; exactly like iterate (best move, ply, hash watermark, in-check flag,
-; move-stack pointer), then enters search (whose rts returns to
-; itsearch's caller). aspiterate re-runs this per aspiration re-search.
-itsearch:
-        lda #NOSQ
-        sta BESTFROM
-        lda CURDEPTH
-        sta MAXDEPTH
-        lda #0
-        sta PLY
-        sta HVALID
-        jsr curincheck
-        lda #0
-        rol
-        sta INCHK
-        lda #<MOVESTACK
-        sta MSP
-        lda #>MOVESTACK
-        sta MSP+1
-        lda ASPAL
-        sta ALPHALO
-        lda ASPAH
-        sta ALPHAHI
-        lda ASPBL
-        sta BETALO
-        lda ASPBH
-        sta BETAHI
-        jmp search              ; rts returns to itsearch's caller
-
         ; Resident opening-book probe (bookentry/bookprobe). Appended at the
-        ; very end of CODE — after the aspiration block — so it moves nothing
-        ; before it and shifts the page-aligned TABLES/LCCODE only by whole
-        ; pages: the bookless search path stays byte-identical (see book.s).
+        ; very end of CODE — so it moves nothing before it and shifts the
+        ; page-aligned TABLES/LCCODE only by whole pages: the bookless search
+        ; path stays byte-identical (see book.s).
         ; Reached only via bookentry, which the harness/bridge invokes when a
         ; book is loaded; the normal $4000 entry never touches it.
         .segment "CODE"
         .include "book.s"
-
-        ; ---------------------------------------------------------------
-        ; mopfin / mopcd: the mop-up term's tail (close term + signed apply)
-        ; and its corner-distance helper. Deliberately placed HERE, at the
-        ; end of the CODE segment, to fill the page-alignment padding between
-        ; CODE's end and the page-aligned TABLES base (~48 bytes that would
-        ; otherwise be wasted fill). The image is nearly full, so relocating
-        ; this ~48-byte tail out of TABLES (mopupterm's home) into that free
-        ; CODE slack is what lets the feature fit MAIN at all. mopupterm
-        ; reaches mopfin by `jmp mopfin` with A = manhattan(kings); mopcd is
-        ; reached by `jsr mopcd` (absolute, cross-segment — fine). Neither
-        ; grows CODE past the page boundary, so the hot code and the
-        ; page-aligned TABLES base do not move (FT2_MOPUP-off byte-identical).
-        ; ---------------------------------------------------------------
-        .segment "CODE"
-mopfin: ; A = manhattan(losing,winning king); T2 = Edge*CMD (running B);
-        ; MULCNT = winner (0 white / 1 black). Add Close*(14-md), then apply.
-        sta T0                  ; md
-        lda #14
-        sec
-        sbc T0                  ; 14 - md (>= 0, md <= 14)
-        asl
-        asl                     ; *4 = Close*(14-md); C=0 (value <= 52)
-        adc T2                  ; B = Edge*CMD + Close term (<= 116, positive)
-        sta T2
-        ; apply B to SCORE, sign-extended, negated for a black winner
-        ; (B > 0, so -B is a negative byte -> hi = $FF). One 16-bit add.
-        ldy #0
-        lda T2
-        ldx MULCNT
-        beq :+
-        eor #$FF                ; -B (two's complement)
-        clc
-        adc #1
-        ldy #$FF                ; sign extension
-:       clc
-        adc SCORE
-        sta SCORE
-        tya
-        adc SCORE+1
-        sta SCORE+1
-        rts
-; mopcd: A = coordinate 0..7 -> centre corner distance (~c)&3 for c<4 else
-; c&3, i.e. {3,2,1,0,0,1,2,3}. Shared by the two CMD terms.
-mopcd:  cmp #4
-        bcs :+
-        eor #$FF
-:       and #$03
-        rts
 
         ; ---------------------------------------------------------------
         ; mopupterm (FT2_MOPUP): phase-gated endgame mop-up eval term.
@@ -697,7 +450,8 @@ mopw:   stx MULCNT              ; 0 = white winner (add), 1 = black (subtract)
 :       clc
         adc T1                  ; manhattan (in A)
         ; close term + apply live in the CODE segment's page-tail slack
-        ; (mopfin, engine.s) so the whole feature fits the near-full image.
+        ; (mopfin, board.s: it fills RATTACK's alignment hole) so the whole
+        ; feature fits the near-full image.
         jmp mopfin
 
 
@@ -740,7 +494,7 @@ adaptaborthi:
 ; maintains STABLE and raises the ceiling (BUDGET) on the panic/instability
 ; signals, mirroring mirror.SearchTimed's per-iteration block (adaptive-aggr).
 ; BEST*/SCORE = this iteration, PREV*/PREVSC = previous completed iteration
-; (aspiterate snapshots them at each iteration start).
+; (iterate snapshots them at each iteration start).
 adaptmaybe:
         lda FEATURES2
         and #FT2_ADAPT

@@ -3,6 +3,202 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-25 — PORTED to asm: check extensions (FT_CKEXT) + endgame technique (FT2_EGTECH); SPRTs +12 +/- 33 (ckext, no compression) and -1 +/- 36 (endgame, neutral)
+
+Both mirror-validated features from the same day's screens are now in the
+6502 image, each behind its own bit, each mirror-asm parity-exact, and each
+SPRT'd separately at the 30M-cyc/move operating point.
+
+**Bits and state claimed** (asm/defs.inc):
+
+| feature | bit | RAM claimed |
+|---|---|---|
+| check extensions | `FT_CKEXT = $40` (FEATURES; the freed FT_ASP bit) | `NUMEXT = $0233` (1 B, ex-FT_ASP scratch) |
+| endgame technique | `FT2_EGTECH = $08` (FEATURES2) | `$0213-$0218` (6 B, ex-FT_ROOKX scratch): per-king nearest-pawn state |
+
+Tables added (TABLES tail, engine.s, ahead of the code so none of them
+crosses a page): `EGPASS` 8 B (the advancement top-up), `EGCD8` 8 B
+(per-coordinate centre distance), `RWIN` 64 B (rank-window masks for the
+nearest-pawn scan). ZP: both features reuse only eval-tail-dead bytes
+(T0-T3, EVTMP, MULCNT, MUL0-MUL2, PSQSQ, PSQPIECE, PSP0+1/PSP1+1 — the PSQT
+pointer HIGH bytes, whose lo bytes stay 0); no new ZP.
+
+**Image: 31,130 → 32,113 B. Top $B99A → $BD71. Headroom 1622 → 639 B.**
+Check extensions cost 46 B of code but +256 B of image (CODE crossed a page
+boundary, shoving page-aligned TABLES up); the endgame term is 727 B
+(code + 80 B of tables). engine.bin md5 `9cb22bb1`.
+
+### 1. Check extensions (FT_CKEXT)
+
+Mirror design ported verbatim (`internal/mirror/search.go` `checkExt`,
+`CheckExtParams{MaxExt: 1}`): when the move just made gives check, the child
+subtree is searched one ply DEEPER (`inc MAXDEPTH`, balanced restore),
+capped at ONE extension per root-to-leaf path (`NUMEXT`, incremented and
+decremented in lockstep so a scout re-search re-derives the same decision).
+The hook is `asm/search.s:snored` — one `lda INCHK,y / bne` on the child-
+search path, so the whole cost when the bit is clear is 6 cycles per child
+search. Never in quiescence: the gate is `QSKIND[parent]`, so a qs capture
+node's children never extend while an in-check EVASION node past the horizon
+does — exactly `checkExt`'s `qsKind[ply]` test. Extension and LMR reduction
+are mutually exclusive by construction (the reduction gate already requires
+`!INCHK[child]`), and the block is only reachable from the mode 0/1 path,
+so it cannot even be expressed.
+
+### 2. Endgame technique (FT2_EGTECH)
+
+All six screened terms, gate `PHASE <= 6`, hooked into eval beside the
+mop-up (`asm/eval.s:evrookx`); the two engines' gates are FUSED into one
+compare (`endterms`), so a middlegame eval pays the same 7 cycles it already
+paid for the mop-up alone and nothing more.
+
+The design sketch's PWMAX/PBMIN stash in pawnterm was NOT needed and is not
+used: `PWBITS/PBBITS` are maintained by `pbtoggle` on every pawn placement
+change independently of FT_PSTRUCT and of pawnterm's lazy PDIRTY deferral,
+so they are always current at eval time, and the per-file most-advanced rank
+is the index of the highest (white) / lowest (black) set bit of one byte — a
+5-byte shift loop, run only for an actual passer. That also keeps the
+nearest-pawn distance EXACT on doubled files, which the sketch's
+most-advanced-only shortcut would not have been (mirror `egScan` minimizes
+over ALL pawns).
+
+One loop over the 8 files does everything: both kings' nearest-pawn
+distances and both colors' passer terms. The nearest-pawn scan is a
+per-file rank-window walk (`RWIN[kingrank*8 + d]`) with two prunes — a file
+whose |file-kingfile| already reaches the best-so-far cannot improve it, and
+the window only grows while d < best — so it is O(pawn files), never the
+O(d²) box expansion the first cut used.
+
+### Verification
+
+- **BOTH FEATURES OFF = tree-identical.** All 30 MicroAB / MicroABImproving /
+  MicroABAdopted fingerprints (score, move, and every profile counter —
+  search/make/eval/attacked/ttprobe/generate) byte-identical to the
+  pre-port baseline across 0x1f/0x07/0x00 + improving + adopted. Cycles
+  +0.109% (7,136,729,488 → 7,144,523,847): the check-extension gate's
+  `lda INCHK,y / bne` at every child search. The endgame term adds ZERO to
+  the off path (its gate compare replaced the mop-up's, one for one).
+- **Check-extension mirror parity, feature ON** (`TestCheckExtMirrorParity`,
+  14 FENs, mask 0x1f|0x40, depth 5): same best move, same score, same make
+  count as `mirror` with `CheckExt{MaxExt:1}` on every FEN; active (tree
+  changed) on 13/14; total makes +10.5%, matching the mirror's screened
+  +11.5…+26.7% blow-up. `TestCheckExtPathBudget` pins NUMEXT <= 1 throughout
+  the search and 0 on exit (the asm analogue of
+  `TestCheckExtNumExtBalanced`).
+- **Endgame-term eval parity** (`TestEGTermEvalParity`): asm static eval with
+  FT2_EGTECH ON == `mirror.Eval()` with `EG = DefaultEndgame`, exact to the
+  centipawn, over 30 curated positions (24 of which fire: KPK both ways,
+  doubled/tripled files, 2nd- and 7th-rank pawns, mutual blockades, both
+  colors' passers, rook/bishop endgames, pawnless KQK/KRK/KBNK, edge files)
+  + 3022 random-play positions + 2789 positions from random play out of the
+  curated endgames. Also exact with the mop-up on at the same time (the
+  fused-gate path).
+- **No middlegame leak, asm side:** every one of the 3022 above-gate
+  positions has ON eval == OFF eval — 0 leaks (the mirror proved the same
+  over 35,567).
+- **Endgame-term tree parity** (`TestEGTermSearchParity`, 8 endgames, depth
+  5): move + score + make count identical to the mirror with
+  `EG = DefaultEndgame`, and the term changed the search on 8/8 — so the
+  dozen borrowed eval scratch bytes provably clobber nothing.
+
+### A real asm bug found on the way (pre-existing, NOT fixed here)
+
+The check-extension tree parity failed at first — not because of the
+extension, but because the deeper tree finally exposed a defect in the TT's
+node-relative mate bookkeeping. `asm/tt.s` classifies scores with
+`lda scoreHi : cmp #$74 : bcc ...`, an UNSIGNED compare, so **every NEGATIVE
+score takes the winning-mate path** (+Ply on store, -Ply on probe) and the
+losing-mate branch is dead code. The round trip is self-consistent at a
+fixed ply, so nothing is corrupt at the storing node — but an entry stored at
+ply s and read at ply p is off by s-p centipawns whenever it is negative,
+which flips the occasional cutoff.
+
+Node-and-TT-store traces of both engines (13k nodes) matched byte for byte
+once the mirror was taught the same quirk, with and without extensions. It
+is therefore modelled behind `mirror.Engine.TTPlyQuirk` (default OFF, used by
+the two new parity gates) rather than fixed: fixing the asm changes the
+shipped tree and so needs its own SPRT. **Follow-up task: fix the signed
+compare in tt.s ttstore/ttprobe, then SPRT it** (and flip TTPlyQuirk's
+default, or delete it, depending on the verdict).
+
+### Cost
+
+| measurement | value |
+|---|---|
+| check extensions, bit CLEAR | 6 cyc per child search (+0.109% over the 30 fingerprints) |
+| check extensions, bit SET | no per-node cost knob: it is paid in nodes (+10.5% makes at d5) |
+| endgame terms, gate SHUT (middlegame) | ZERO on top of the mop-up: the two bits share one gate compare (+19 cyc/eval vs FEATURES2 = 0, which is what the mop-up alone already cost) |
+| endgame terms, gate OPEN | **+1278 cyc/eval** (24-FEN mean; +400 pawnless, +1250 typical K+P, +4200 in a 6-passer position) |
+| endgame terms, whole search | **+30.9% cycles/node** (8 endgames, depth 5, ON vs OFF) |
+
+The eval itself is only ~137 cycles in an endgame (the accumulators are
+incremental), so this term is the dominant eval cost when it fires. One
+optimization pass already cut it 45% (a first cut measured +1980 cyc/eval and
++2100 of that was an O(d²) box-expansion nearest-pawn scan; the shipped
+version is the O(pawn files) rank-window walk, plus a table-driven CMD and a
+fused single file pass). It is still ~3x the 438 cyc/gated-eval the mirror
+screen CHARGED for these terms, so the screened +10 ± 9 is an OPTIMISTIC
+bound for the ported version, not the pessimistic one the sketch predicted.
+### The SPRTs (the real gate)
+
+Same binary both sides, `cmd/sprt`, 30M cyc/move (`-budget 30000`), 150
+opening pairs = 300 games, mop-up ON on both sides (the shipped engine, and
+the configuration the endgame mirror screen used):
+
+| feature | A vs B | result | Elo | LLR(0,10) |
+|---|---|---|---|---|
+| **check extensions** | `-a 0x5f -b 0x1f -a2 0x02 -b2 0x02` | +107 =96 -97, 51.7% | **+12 +/- 33** | +0.24 |
+| **endgame technique** | `-a 0x1f -b 0x1f -a2 0x0a -b2 0x02` | +121 =57 -122, 49.8% | **-1 +/- 36** | -0.19 |
+
+Equal-spend check: A/B total cycles 1.0072 and 1.0062 - both sides really did
+get the same compute, so neither number is a compute artifact.
+
+**Check extensions: PASS as a no-regression with the screen's sign and
+magnitude intact.** +12 +/- 33 over 300 games is not significant on its own,
+but the point estimate lands on top of the mirror's +12.6 +/- 9.0 (4000
+cycle-budgeted games) - i.e. NO mirror-to-asm compression, which is the
+failure mode that killed aspiration (cycle -2 -> SPRT -21) and improving-LMR
+(screen +13 -> SPRT -1.8 over 4200 games). Combined with the cost profile
+(6 cycles/node when clear, zero per-node cost when set - the extension is
+paid purely in nodes, which the time budget already taxes honestly) this is
+the cheapest positive-EV feature the project has landed since futility. A
+rolling confirmation series is the way to make it significant; the mirror's
+4000-game screen already carries most of the evidence.
+
+**Endgame technique: NEUTRAL - stays gated OFF.** -1 +/- 36 is
+indistinguishable from zero, and the mirror's +10 +/- 9 does not survive the
+port. The mechanism is measured, not guessed: the mirror screen charged 438
+cyc per gated eval, the port really costs ~1278 (+30.9% cycles/node in
+endgames), so the feature buys its knowledge at ~3x the screened price. Two
+independent reasons the self-play number under-reports it remain on the
+record (the mirror's both-sides control fell from +2.08 to +0.80 ns, and the
+conversion component is asymmetric by construction) - but this SPRT is the
+gate, and the gate says no. It ships in the image behind FT2_EGTECH, OFF.
+
+**One measured side effect worth keeping.** The two SPRTs share their
+openings and their B side, so their draw counts are comparable: 96 draws with
+check extensions on one side, **57** with the endgame terms on one side (-40%).
+The endgame knowledge is demonstrably breaking the shuffling draws it was
+designed to break - it just converts them into wins and losses in equal
+measure against a twin that plays the same endgames. That is exactly the
+signature the mirror's conversion suite (SIG+, vs a knowledge-removed
+defender) versus its both-sides control (ns) predicted.
+
+### Next steps (recorded, not done here)
+
+1. **Fix tt.s' unsigned mate classification** (above) and SPRT it: it is a
+   real cross-ply TT score corruption, cheap to fix, and it currently forces
+   `mirror.TTPlyQuirk` on every asm-vs-mirror tree gate.
+2. **Cheapen the endgame terms and re-SPRT.** The remaining hot spots are
+   measured: ~310 cyc per passer (two Chebyshev distances + four sign-extended
+   adds - the front-square distances could reuse the |file-kingfile| the
+   nearest-pawn scan already computes, and the four adds collapse to two
+   byte-sized ones) and ~50 cyc + 17/step per pawn-file per king in the
+   nearest-pawn scan. A 2x cut would put the port at the screened price.
+3. **Or gate the terms harder** (e.g. only when a passer exists, or only at
+   PHASE <= 4) and re-screen: the mirror can answer that in minutes.
+4. A rolling confirmation series on FT_CKEXT, batched with fresh open-seeds,
+   is what turns +12 +/- 33 into a decision.
+
 ## 2026-07-25 — SPACE optimization round 1: 1344 B freed (278 → 1622 B headroom), tree-identical
 
 The first space-only pass over the image (all four prior deep-optimization

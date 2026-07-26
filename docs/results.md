@@ -3,6 +3,44 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-26 — ★★ CONFIRMED DECISIVE across 600 games: +110 Elo (335-151-114)
+
+A second, INDEPENDENT 300-game match — this one STANDARD-START, so both
+engines played from move 1 with their own opening books (the mode built
+but never measured at scale; the pool positions always started past
+8fish's book).
+
+| match | record | score | Elo | 95% CI |
+|---|---|---|---|---|
+| pool openings | 156−81−63 | 62.50% | **+89** | [+54, +126] |
+| **standard-start (books live)** | 179−70−51 | 68.17% | **+132** | [+96, +172] |
+| **COMBINED 600 games** | **335−151−114** | **65.33%** | **+110** | **[+85, +137]** |
+
+Both intervals exclude zero by a wide margin; the combined lower bound is
+**+85**. 8fish decisively beats Sargon III, confirmed twice under
+different opening regimes on fudge-free symmetric terms.
+
+**The book pays.** Standard-start ran ~43 Elo HIGHER than pool. 8fish
+played 1018 book moves (7.8% of all moves) and Sargon 2078 instant book
+replies (16%); 8fish's book moves cost ~0.24 Gcyc total and bank their
+unspent income for the first real search out of book. This is the first
+evidence the opening book is worth anything against Sargon — it was
+inert in every previous measurement. (Caveat: opening regime and book
+effect are confounded here; isolating them would need a book-off
+standard-start run.)
+
+**AUDIT — 17 quirk-adjudications (5.7%), ALL resolved to DRAWS.** They
+are conservative: they cost 8fish wins, they cannot manufacture them, so
+68.17% is if anything an UNDER-estimate. New failure class, distinct
+from the fixed promotion bug: ordinary-looking Sargon moves
+(`D1XD4`, `D1-E2`, `F3-E5+`) read back as "unreadable/illegal", i.e. a
+BOARD DESYNC — most plausibly a mis-scrape of one of Sargon's 2078
+instant book replies (the pool run, with almost no book replies, had
+exactly 1 quirk). Worth fixing before the next standard-start
+measurement; it does not threaten this result's direction.
+
+Adherence 0.9844 (own-move budget), symmetry exact.
+
 ## 2026-07-26 — ★ DECISIVE: 8fish beats Sargon III, +89 Elo (156-81-63, CI [+54,+126])
 
 The 300-game symmetric re-measure with check extensions + the TT

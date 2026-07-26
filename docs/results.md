@@ -3,6 +3,34 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-26 — ★ DECISIVE: 8fish beats Sargon III, +89 Elo (156-81-63, CI [+54,+126])
+
+The 300-game symmetric re-measure with check extensions + the TT
+mate-zone fix live. Same fudge-free conditions as the +21 baseline (pool
+openings, Hard Mode, both engines pondering exactly the other's measured
+cycles, no multiplier), so it is a clean before/after.
+
+**156W −81L =63D = 62.50% → +88.7 Elo, 95% CI [+54, +126].** Nearly a
+2:1 winning record. Draw rate 21.0% (was 25.3%). Budget adherence
+0.9923; symmetry exact; **1 adjudication quirk in 300 games** (game 279,
+resolved to a DRAW, so it cannot have inflated the score) — down from 30
+in the first run, thanks to the promotion fix.
+
+**The lower bound is +54, so this is statistically decisive** — the
+project's original goal (out-play the program that defined 1980s
+computer chess, on a 1 MHz 6502) is met and measured without asterisks.
+
+Trajectory, all audited: −117 (fair conditions, dawn 07-20) → −26 →
++17 → +21 ± 34 (clean symmetric) → **+89 [+54,+126]**.
+
+HONEST NOTE ON ATTRIBUTION: the two shipped features measured +24 ± 23
+(check extensions) and +8 ± 22 (TT fix) in self-play SPRTs ≈ +32
+combined, while the observed match delta is +9.50pp ± 6.86pp. Those are
+CONSISTENT (the delta's interval comfortably contains +32) — so this is
+the features' measured value plus favorable variance, NOT evidence of a
+2× amplification effect. Do not claim self-play systematically
+understates until it is measured directly.
+
 ## 2026-07-25 — PASSED-PAWN TABLE: THE "NON-MONOTONE BUG" IS NOT A BUG — NO CHANGE (3 monotone candidates all neutral-to-negative)
 
 Investigation of the suspected weight bug in the Texel-tuned passed-pawn

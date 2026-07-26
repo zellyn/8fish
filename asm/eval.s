@@ -1290,19 +1290,17 @@ evnosgn:
         lda SCORE+1
         adc PSTRUCT+1
         sta SCORE+1
-evrookx: ; FT2_MOPUP / FT2_EGTECH endgame eval terms (white POV): the mop-up
-        ; (drive the losing king to a corner + pull the winning king in, gated
-        ; on low phase and a >= rook material edge) and the endgame-technique
-        ; set (king activity + passed-pawn technique, same phase gate). Added
-        ; here — after pstruct, before the side-to-move negation — so their
-        ; white-POV signs match the other terms. endterms (TABLES tail) tests
-        ; the shared PHASE gate ONCE and adds straight into SCORE; when both
-        ; bits are clear it never runs and the eval instruction stream below
-        ; is unchanged.
+evrookx: ; FT2_MOPUP endgame mop-up term (white POV): drive the losing king
+        ; to a corner + pull the winning king in, gated on low phase and a
+        ; >= rook material edge. Added here — after pstruct, before
+        ; the side-to-move negation — so its white-POV sign matches the other
+        ; terms. mopupterm (TABLES tail) tests the PHASE gate itself and adds
+        ; straight into SCORE; when the bit is clear it never runs and the
+        ; eval instruction stream below is unchanged.
         lda FEATURES2
-        and #FT2_MOPUP|FT2_EGTECH
+        and #FT2_MOPUP
         beq :+
-        jsr endterms
+        jsr mopupterm
 :       ; side-to-move POV + tempo. Black fuses the negate with the
         ; tempo add: TEMPO - SCORE == (0 - SCORE) + TEMPO exactly in
         ; 16-bit two's complement (deep opt r4).
@@ -1340,6 +1338,3 @@ evseed: ; dither: 0-3cp of seeded noise breaks deterministic move
         bcc evdone
         inc SCORE+1
 evdone: rts
-
-; (everec was removed in deep opt r4: search.s inlined the eval-record at
-; its three call sites, and EVALVALID became a single ZP byte.)

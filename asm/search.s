@@ -236,12 +236,6 @@ ckvdone:
         sta RAISED,y
         sta FUTILE,y
         sta THRT,y              ; tier threshold 0: no delta pruning
-        ; improving heuristic (FT2_IMPROV): mark this ply's eval unrecorded
-        ; for this visit (improving.go resets evalValid[ply] at node entry).
-        ; A natural eval (null/RFP) or the full-signal force re-sets it.
-        ; Unconditional: nothing reads EVALVALID when the feature is off, so
-        ; the blind ZP write is cheaper than gating on FEATURES2.
-        sta EVALVALID
         lda #NOSQ
         sta TTFROMA,y
         sta TTBF,y
@@ -467,21 +461,6 @@ sprep:  ldy PLY
 :       ; only worth trying when the static eval already meets beta:
         ; failed nulls are pure cost
         jsr eval
-        ; improving (FT2_IMPROV): capture the null-gate static eval as this
-        ; ply's recorded eval (full-signal reuses natural evals; improving.go
-        ; records it via eval()). Kept out of eval() to leave the qs path
-        ; free; inlined here (deep opt r4) instead of a jsr everec.
-        lda FEATURES2
-        and #FT2_IMPROV
-        beq nonrec1
-        ldy PLY
-        lda SCORE
-        sta EVALSTKL,y
-        lda SCORE+1
-        sta EVALSTKH,y
-        lda #1
-        sta EVALVALID
-nonrec1:
         ldy PLY
         sec
         lda SCORE
@@ -555,9 +534,8 @@ nullcut:
         rts
 snullf: jmp snode               ; failed null: remaining >= 4, so RFP and
                                 ;  futility can never fire (their gate walk
-                                ;  is a pure no-op at that depth) and the
-                                ;  null-gate eval is already recorded for
-                                ;  improving — straight to the move loop.
+                                ;  is a pure no-op at that depth) — straight
+                                ;  to the move loop.
 snonull:
         ; ---- RFP + futility: FT_FUTIL, remaining <= 2, and the window
         ; not inside a mate zone (static eval can't speak to mates)
@@ -595,19 +573,6 @@ rfpbok:
         cmp #3
         bcs gskip
         jsr eval
-        ; improving (FT2_IMPROV): capture the RFP static eval as this ply's
-        ; recorded eval (same reuse as the null gate; inlined).
-        lda FEATURES2
-        and #FT2_IMPROV
-        beq nonrec2
-        ldy PLY
-        lda SCORE
-        sta EVALSTKL,y
-        lda SCORE+1
-        sta EVALSTKH,y
-        lda #1
-        sta EVALVALID
-nonrec2:
         ldy PLY
         ; margin: 120 @ rem1, 500 @ rem2 (16-bit; 500 = $01F4). rem2 at
         ; the tight 250 over-pruned negative windows (mirror task #34).
@@ -666,29 +631,10 @@ srfpno: ; futility (depth 1): eval + margin <= alpha -> quiets can't help
 :       bmi sprepj              ; alpha < eval+margin: quiets may matter
         lda #1
         sta FUTILE,y
-sprepj: ; full-signal improving (FT2_IMPROV): guarantee a static eval at this
-        ; full-width node so the ply-2 comparison is available for this node's
-        ; LMR and for descendants (improving.go forces one when no natural
-        ; eval ran). Reached by every full-width node headed for the move loop
-        ; except failed nulls (snullf: their eval is always recorded) — the
-        ; not-in-check paths fall through here, the in-check path jumps here
-        ; (it skips null/RFP). Skip when a natural eval already recorded
-        ; (EVALVALID set) so that eval is never charged twice. No recursion
-        ; can run between the EVALVALID write and this read, so the ZP flag
-        ; is safe. (EVALVALID is not re-set on the forced path: nothing reads
-        ; it again before the next node's init resets it.)
-        lda FEATURES2
-        and #FT2_IMPROV
-        beq snodeg
-        lda EVALVALID
-        bne snodeg
-        jsr eval                ; forced full-signal eval (no natural one ran)
-        ldy PLY                 ; record it as this ply's static eval
-        lda SCORE
-        sta EVALSTKL,y
-        lda SCORE+1
-        sta EVALSTKH,y
-snodeg: jmp snode
+sprepj: ; branch trampoline: the in-check entry (jmp sprepj), the guard-skip
+        ; trampoline (gskip) and the RFP/futility exits all land here, out of
+        ; branch range of snode.
+        jmp snode
 
 ; makenull / unmakenull: pass the move. Only ep, the hash, the halfmove
 ; clock, and the side flip change; accumulators are untouched.
@@ -1198,34 +1144,11 @@ slegal: ldy PLY                 ; PLY = child here
         bcc smset               ; remaining < 3: too shallow to reduce
         ldx #2                  ; reduce by 1
         cmp #4
-        bcc smimp
+        bcc smset
         lda LEGALCNT,y
         cmp #7
-        bcc smimp               ; very late (>= 6 searched) and deep:
+        bcc smset               ; very late (>= 6 searched) and deep:
         ldx #3                  ;  reduce by 2
-smimp:  ; improving heuristic (FT2_IMPROV): a late quiet at a NOT-improving
-        ; node reduces one extra ply (improving.go: mode += lmrExtra). Reached
-        ; only on the reduced path, so X = 2 or 3 here; the full/scout moves
-        ; (X < 2) branch straight to smset and execute nothing new. Y = this
-        ; node's ply (>= 1; the root already branched to smset above).
-        ; "improving" = EVALSTK[ply] > EVALSTK[ply-2] (full-signal guarantees
-        ; both are recorded at full-width nodes). The ply-2 entry is read
-        ; through the assembled base address (EVALSTK*-2,y), so X keeps the
-        ; reduction mode and no scratch save/restore is needed (deep opt r4).
-        lda FEATURES2
-        and #FT2_IMPROV
-        beq smset
-        cpy #2
-        bcc smset               ; ply < 2: permissive default (assume improving)
-        sec                     ; signed compare EVALSTK[ply-2] - EVALSTK[ply]
-        lda EVALSTKL-2,y
-        sbc EVALSTKL,y
-        lda EVALSTKH-2,y
-        sbc EVALSTKH,y
-        bvc :+
-        eor #$80
-:       bmi smset               ; < 0: EVALSTK[ply-2] < EVALSTK[ply] => improving
-        inx                     ; NOT improving: add one reduction ply (X = 3/4)
 smset:  txa
         sta SMODE,y
 sqgo:   iny

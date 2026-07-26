@@ -439,8 +439,17 @@ func egMin3(a *[8]int, x int) int {
 // parity harness (the analogue of ExtraEval/mopupEval's exposure).
 func (e *Engine) EGEval() int { return e.egEval() }
 
-// ASM PORT SKETCH (FT2_EGTECH, not yet ported — the mirror screen is the
-// go/no-go). The shipped set is KingCent 8, KingPawn 6, Pass{0,0,10,20,40,
+// ASM PORT SKETCH (FT2_EGTECH). HISTORY: ported 2026-07-25 (727 B: EGPASS/
+// EGCD8/RWIN + egterm/egpass/egcheb/egadd at the TABLES tail, reading
+// PWBITS/PBBITS directly instead of the PWMAX/PBMIN stash sketched below);
+// its own asm SPRT measured −9 ± 24 over 600 games, i.e. NEUTRAL, so it
+// shipped gated off, and the 2026-07-26 feature audit removed the asm side
+// entirely to recover the bytes. This mirror implementation and its tests
+// STAY: the conversion finding they document (draws 96 → 57 in mirror
+// self-play) is real and asm self-play cannot price it. A re-port is a
+// mirror-verified exercise; the sketch below is kept for that.
+//
+// The shipped set is KingCent 8, KingPawn 6, Pass{0,0,10,20,40,
 // 60,100,0}, PassKingOur 6 / PassKingThem 4, KingAhead 15, gate phase <= 6.
 //
 // Entry: extend the existing FT2_MOPUP hook in eval. Both terms share the

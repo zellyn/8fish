@@ -7,11 +7,10 @@ import (
 )
 
 // TestEvalClusterProfile (deep optimization review round 4): measures the
-// eval.s cluster's share of total cycles on the ADOPTED gameplay config
-// (FEATURES 0x1f + FEATURES2 FT2_IMPROV) and on the baseline test config
-// (FEATURES2 0), with a per-label breakdown inside the cluster. Also prints
-// the exact-tree fingerprint (search/make/eval counts + score + move) per
-// FEN so the same run doubles as the adopted-config identity gate.
+// eval.s cluster's share of total cycles on the gameplay config
+// (FEATURES 0x1f, FEATURES2 0), with a per-label breakdown inside the
+// cluster. Also prints the exact-tree fingerprint (search/make/eval counts
+// + score + move) per FEN so the same run doubles as an identity gate.
 //
 // Diagnostic (skipped in -short): run explicitly and diff the log.
 func TestEvalClusterProfile(t *testing.T) {
@@ -37,7 +36,7 @@ func TestEvalClusterProfile(t *testing.T) {
 	}
 	searchAddr, makeAddr, evalAddr := labels["search"], labels["make"], labels["eval"]
 
-	for _, ft2 := range []byte{0x01, 0x00} {
+	for _, ft2 := range []byte{0x00} {
 		var grandTot, grandClu uint64
 		agg := map[string]uint64{}
 		for _, fen := range fens {

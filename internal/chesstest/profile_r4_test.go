@@ -4,8 +4,8 @@ import (
 	"testing"
 )
 
-// TestProfileR4 (diagnostic): per-routine cycle shares on the ADOPTED
-// gameplay config (FEATURES 0x1F + FT2_IMPROV), budget mode, for the
+// TestProfileR4 (diagnostic): per-routine cycle shares on the gameplay
+// config (FEATURES 0x1F, FEATURES2 0), budget mode, for the
 // round-4 deep optimization review. Run explicitly and read the log.
 func TestProfileR4(t *testing.T) {
 	if testing.Short() {
@@ -30,7 +30,6 @@ func TestProfileR4(t *testing.T) {
 			t.Fatal(err)
 		}
 		SetFeatures(m, defs, 0x1F)
-		SetFeatures2(m, defs, 0x01)
 		SetBudget(m, defs, 30_000_000, 24)
 		m.Mem.Main[defs["HALFMOVE"]] = pos.Halfmove
 		exited, code, p, err := RunProfiled(m, defs, 400_000_000_000)

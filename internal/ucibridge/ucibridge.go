@@ -554,10 +554,11 @@ func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64
 	// work showed the horizon-blind losses are a SEARCH problem, not an eval
 	// one. Tests keep the plain 0x1F default so stored fingerprints stay exact.
 	//
-	// NOT enabled: FT2_EGTECH (endgame technique) measured −1 ± 36 — neutral,
-	// stays gated off (its mirror +10 was flattered by a 3×-understated cost
-	// model: 1278 cyc/gated eval vs the 438 charged). FT2_IMPROV was adopted
-	// 2026-07-21 then RETRACTED 2026-07-22 at −1.8 ± 8.6 over 4200 games.
+	// FEATURES2 is 0: the only implemented bits are FT2_MOPUP (gated off) and
+	// FT2_ADAPT (budget-mode policy, poked separately by the match harness).
+	// FT2_EGTECH (endgame technique, −9 ± 24) and FT2_IMPROV (improving,
+	// adopted 2026-07-21 then RETRACTED 2026-07-22 at −1.8 ± 8.6 over 4200
+	// games) were both REMOVED from the image in the 2026-07-26 feature audit.
 	m, err := chesstest.NewMachine(b.Bin, b.Defs, pos, 0, io.Discard)
 	if err != nil {
 		return engineResult{}, err

@@ -197,7 +197,7 @@ func SetFeatures(m *harness.Machine, defs Defs, bits byte) {
 }
 
 // SetFeatures2 overrides the engine's second feature byte (FT2_* in
-// defs.inc, e.g. FT2_IMPROV) — the A/B lever for features that outgrew
+// defs.inc, e.g. FT2_MOPUP) — the A/B lever for features that outgrew
 // the original 8-bit FEATURES byte.
 func SetFeatures2(m *harness.Machine, defs Defs, bits byte) {
 	m.Mem.Main[defs["FEATURES2"]] = bits

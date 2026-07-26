@@ -3,6 +3,104 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-26 — FEATURE AUDIT: FT2_IMPROV + FT2_EGTECH removed, 983 B freed (639 → 1622 B headroom), tree-identical
+
+Both features had been MEASURED and REJECTED but were still shipping in the
+image, gated off, costing bytes and a runtime gate walk. The queued on-device
+UI milestone (board display + human move input) needs image space, so this is
+the FT_ASP/FT_CKVERIFY removal (space round 1) applied to the next two
+candidates, with the same verification: byte-identical fingerprints for the
+shipped config.
+
+| target | content removed | verdict it was carrying |
+|--------|-----------------|-------------------------|
+| **FT2_IMPROV ($01)** — improving heuristic | **101 B** (search.s, CODE) | adopted 2026-07-21, RETRACTED 2026-07-22 at −1.8 ± 8.6 / 4200 games |
+| **FT2_EGTECH ($08)** — endgame technique | **727 B** (engine.s, TABLES) | −9 ± 24 over 600 SPRT games (neutral), never enabled |
+| **TOTAL content** | **828 B** | |
+| → CODE address space realized (1 page boundary un-crossed) | **256 B** | |
+| **TOTAL image** | **983 B** | |
+
+- **Image: 32,113 → 31,130 B. Top $BD71 → $B99A. Headroom 639 → 1622 B**
+  (plus 67 B of CODE fill = 1689 B usable). Segments: CODE $4000-$78BC
+  (14,525 B, was 14,626), TABLES $7900-$B958 (16,473 B, was 17,200),
+  LCCODE 65 B at $B959. engine.bin md5 `3902502c`.
+- **Tree-identical for the shipped config.** All 18 TestMicroAB fingerprints
+  (0x1f/d6, 0x07/d5, 0x00/d4 × 6 FENs) — score, best move, and every profile
+  counter (search/make/eval/attacked/ttprobe/generate) — byte-identical to the
+  pre-removal baseline. FT_CKEXT (TestCheckExtMirrorParity) and FT2_MOPUP
+  (TestMopupEvalParity, TestMopupConversion) untouched and green.
+- **Cycles: +0.120%** (3,814,106,998 → 3,818,665,555 over the 18 MicroAB
+  fingerprints). This is a small LOSS, not the expected win, and the cause is
+  not the removed code — the executed instruction stream is strictly smaller
+  and the tree is identical, so the only mechanism left is **code-address
+  realignment**: search.s is the FIRST include in CODE, so shrinking it by
+  101 B slides tt.s / eval.s / board.s / movegen.s / book.s down 101 B and
+  reshuffles which TAKEN BRANCHES cross a page (+1 cycle each). The per-node
+  gate savings that were recovered are 3 cyc at every full-width node init
+  (the blind `sta EVALVALID`), 9 cyc at every full-width node reaching the
+  move loop (the `sprepj` full-signal gate), 9 cyc at each null-move-gate and
+  RFP eval, and 9 cyc at each reduced late quiet; the realignment costs more
+  than that, uniformly (+0.09% to +0.15% per position, largest at mask 0x00
+  where the fewest gates ran). Space round 1 crossed the same seam and got
+  lucky in the other direction (its TABLES repack moved totals by −64 cyc per
+  position). At 0.12% on a node-budgeted engine this is noise; the 983 B is
+  the deliverable.
+  - **The clawback exists if a future round wants it**: making the CODE
+    shrink a multiple of 256 B *before* tt.s (e.g. by relocating ~155 B of
+    cold search.s tail into TABLES, the mopfin/mopcd move) would preserve
+    every downstream page-crossing exactly. It costs 155 B of image to buy
+    back ~0.25%, which is the wrong trade for the UI milestone.
+
+**1. FT2_IMPROV (bit $01) removed.** Five sites in search.s, all in the hot
+path, all now gone: the unconditional `sta EVALVALID` at full-width node init
+(2 B); the two inlined eval-record blocks after the null-move gate's and the
+RFP's natural `jsr eval` (`nonrec1`/`nonrec2`, 22 B each); the `sprepj`
+full-signal forced eval + record and its `snodeg` trampoline (25 B — `sprepj`
+is now the bare `jmp snode` trampoline the branch ranges need); and `smimp`,
+the improving-LMR compare that added +1 reduction ply at a not-improving node
+(30 B). Also removed: the EVALVALID ZP byte ($32 is free ZP again) and the
+EVALSTKL/EVALSTKH per-ply eval stack ($0238-$0277, 64 B of free RAM again),
+plus the stale everec comment in eval.s. The FEATURES2 bit is left RESERVED
+and documented in defs.inc. **mirror.ImprovingParams is untouched**, so a
+re-port stays a mirror-verified exercise if the verdict ever flips.
+
+Test churn (the aspiration-parity precedent — vacuous tests are deleted, not
+skipped): microab_improving_test.go (TestMicroABImproving), improving_effect_
+test.go (TestImprovingEffect), search_parity_test.go's TestSearchMirrorParity-
+Improving (its own "the feature must change the tree, else this is vacuous"
+assertion would now fire), and the two duplicate adopted-config fingerprints
+(movegencluster's TestMicroABAdopted, board4's TestMicroABAdoptedProbes — both
+ran the MicroAB FEN set at 0x1F+0x01, which is now literally TestMicroAB's
+0x1F tier). The surviving diagnostics (TestProfileR4, TestBoardClusterShare/
+Fine, TestMovegenClusterProfile, TestEmitSites, TestEvalClusterProfile) just
+dropped their `SetFeatures2(m, defs, 0x01)` line.
+
+**2. FT2_EGTECH (bit $08) removed.** The whole TABLES-tail block: `egterm`
+(the KingCent term + the single 8-file pass, with EGKPDF expanded twice),
+`egpass`/`egadds`/`egadd`/`egcheb`, and the EGPASS (8 B) / EGCD8 (8 B) /
+RWIN (64 B) tables. `endterms` — the 25-byte shared PHASE gate that fanned
+out to the mop-up and the endgame terms — goes too: with only FT2_MOPUP left,
+eval.s calls `jsr mopupterm` directly, which is EXACTLY the pre-port form
+(mopupterm re-checks the PHASE gate itself), so the mop-up's own gate walk is
+restored bit-for-bit rather than re-derived. eval's feature test drops from
+`and #FT2_MOPUP|FT2_EGTECH` to `and #FT2_MOPUP` — same 2 bytes, same cycles,
+so the FEATURES2=0 eval path is unchanged. The 6 bytes of per-king
+nearest-pawn state at $0213-$0218 fall back into the free driver-scratch
+range defs.inc already documents. PWMAX/PBMIN never existed in the asm (the
+port read PWBITS/PBBITS directly and the sketch's pawnterm stash was never
+built), so pawnterm needed no change at all — verified by the pstruct parity
+tests.
+
+TestTablePacking lost its EGPASS/EGCD8/RWIN no-crossing entries; the rest of
+the segment is unchanged (TABLES moved down exactly one page, so every
+table's page-crossing behaviour is preserved by construction). egterm_parity_
+test.go deleted (TestEGTermEvalParity / TestEGTermSearchParity / TestEGTerm-
+CycleCost — all vacuous with the bit inert). **internal/mirror/endgame.go and
+its mirror-side tests STAY**: they document a real conversion finding the asm
+cannot price (draws 96 → 57 in mirror self-play), and endgame.go's ASM PORT
+SKETCH now carries the port's own history and measurement so a re-port starts
+from the record, not from scratch.
+
 ## 2026-07-26 — ★ DECISIVE: 8fish beats Sargon III, +89 Elo (156-81-63, CI [+54,+126])
 
 The 300-game symmetric re-measure with check extensions + the TT

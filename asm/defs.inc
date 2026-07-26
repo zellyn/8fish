@@ -163,17 +163,8 @@ CUROPENING = $3D        ; "which opening am I in": the NAMEID (name-table
 RUNPTR     = $3E         ; 16-bit ($3E-$3F): the probe's equal-key-run /
                         ;  weighted-pick pointer (ZP for (RUNPTR),y reads).
 
-EVALVALID = $32         ; improving (FT2_IMPROV): nonzero = a static eval was
-                        ;  recorded for the CURRENT node's visit (deep opt r4:
-                        ;  was a 32-byte per-ply array at $0278; single ZP byte
-                        ;  suffices because it is only written at node entry /
-                        ;  eval-record and read at sprepj, all strictly before
-                        ;  any recursion from that node — the one write-...-
-                        ;  recurse-...-read path, the failed null move, now
-                        ;  jumps straight to the move loop and never reads it).
-                        ;  Reset unconditionally at full-width node init (the
-                        ;  write is feature-blind; nothing reads it when
-                        ;  FT2_IMPROV is clear, so the tree is unchanged).
+; $32 is free ZP again (was EVALVALID, the FT2_IMPROV "a static eval was
+; recorded for this node visit" flag; removed with the feature 2026-07-26).
 
 BOARD     = $40         ; 128-byte 0x88 board, $40..$BF. The 64 off-board
                         ;  bytes (files 8-F of each rank: $48-4F,58-5F,68-6F,
@@ -339,17 +330,14 @@ FT2_ADAPT  = $04        ; adaptive time/effort management (mirror.SearchTimed
                         ;  +54 vs flat / +21 vs banking). Zero tree effect when
                         ;  clear: BUDGET stays the poked constant, ABORTL =
                         ;  2*BUDGET, no policy runs -> byte-identical search.
-FT2_IMPROV = $01        ; improving heuristic, full-signal LMR application
-                        ;  (mirror ImprovingParams{Mode:full, LMR:true,
-                        ;  LMRExtra:1}). "improving" = the side to move's
-                        ;  static eval at this ply exceeds its static eval
-                        ;  two plies ago. When NOT improving, late-quiet LMR
-                        ;  reductions get +1 extra ply. Full-signal: a static
-                        ;  eval is guaranteed at every full-width node (forced
-                        ;  only where null/RFP computed none) so the ply-2
-                        ;  comparison is always available. RFP application NOT
-                        ;  ported (measured neutral). Zero tree effect when
-                        ;  clear; only the LMR reduction depth changes when set.
+; $01 is RESERVED, not implemented: it was FT2_IMPROV, the improving
+; heuristic (full-signal LMR application, mirror ImprovingParams{Mode:full,
+; LMR:true, LMRExtra:1}). Adopted 2026-07-21, RETRACTED 2026-07-22 at
+; -1.8 +/- 8.6 over 4200 games, then removed from the image entirely
+; (feature audit, 2026-07-26): the asm cost 101 B plus a per-full-width-node
+; gate walk even when clear. mirror.ImprovingParams and mirror's own tests
+; are untouched, so a re-port stays a mirror-verified exercise.
+
 FT2_MOPUP = $02         ; phase-gated endgame mop-up eval term (mirror
                         ;  DefaultMopup{Edge:10, Close:4, MatThreshold:450,
                         ;  PhaseMax:6}). White-POV bonus added to SCORE beside
@@ -371,31 +359,17 @@ FT2_MOPUP = $02         ; phase-gated endgame mop-up eval term (mirror
                         ;  clear (mopupterm never runs). Computed live in eval
                         ;  by mopupterm (CODE tail). A/B via FEATURES2 0x02.
 
-FT2_EGTECH = $08        ; endgame TECHNIQUE eval terms (mirror endgame.go
-                        ;  DefaultEndgame: KingCent 8, KingPawn 6, Pass
-                        ;  {0,0,10,20,40,60,100,0}, PassKingOur 6,
-                        ;  PassKingThem 4, KingAhead 15; PHASE <= 6). Six
-                        ;  white-POV terms added to SCORE beside the mop-up,
-                        ;  before the side-to-move negation: extra king
-                        ;  centralization (8*(CMD[theirK]-CMD[ourK]), CMD =
-                        ;  the mop-up's centre-manhattan distance via mopcd),
-                        ;  king proximity to the nearest pawn of either color
-                        ;  (6*(theirDist-ourDist), Chebyshev), an endgame-only
-                        ;  monotone passed-pawn top-up by advancement, our
-                        ;  king escorting each own passer (6*(4-cheb(ourK,
-                        ;  frontSq))), their king failing to reach it
-                        ;  (4*(cheb(theirK,frontSq)-4)), and KingAhead
-                        ;  (+/-15 for our king ahead of / directly behind our
-                        ;  own passer). Reads only maintained state - the
-                        ;  PWBITS/PBBITS per-file pawn bitmaps, WBLOCKM/
-                        ;  BBLOCKM, PIECESQ, PHASE - so there is NO piece-list
-                        ;  pass; the passer test is pawnterm's own. The two
-                        ;  designed terms the mirror screen REJECTED
-                        ;  (Unstoppable = harmful, RookBehind = null) are not
-                        ;  ported. Zero cost / byte-identical eval when clear
-                        ;  (the gate is shared with FT2_MOPUP: one compare).
-                        ;  Code + EGPASS table live at the TABLES tail
-                        ;  (engine.s), like mopupterm. A/B via FEATURES2 0x08.
+; $08 is RESERVED, not implemented: it was FT2_EGTECH, the endgame TECHNIQUE
+; eval terms (mirror endgame.go DefaultEndgame: KingCent 8, KingPawn 6,
+; Pass{0,0,10,20,40,60,100,0}, PassKingOur 6, PassKingThem 4, KingAhead 15,
+; PHASE <= 6). Ported 2026-07-25; its own asm SPRT measured -9 +/- 24 over
+; 600 games (neutral) so it shipped gated OFF, and it was removed from the
+; image in the feature audit (2026-07-26): 727 B of TABLES for a term that
+; never ran. internal/mirror/endgame.go and its mirror-side tests are
+; untouched (they document the real conversion finding: draws 96 -> 57 in
+; mirror self-play, which asm self-play cannot price), so a re-port stays a
+; mirror-verified exercise. Removed symbols: endterms/egterm/egpass/egadd/
+; egadds/egcheb/EGKPDF + EGPASS/EGCD8/RWIN tables + $0213-$0218 state.
 
 ; TT bound codes (in entry byte 7, low 2 bits; 0 = empty entry)
 TT_UPPER = 1
@@ -520,14 +494,9 @@ NUMEXT     = $0233      ; FT_CKEXT: check extensions applied along the CURRENT
 ; $0234-$0237 is free driver-scratch RAM (was FT_ASP's ASPAL/AH/BL/BH +
 ; ASPFAIL aspiration-window state, removed 2026-07-25 with the feature).
 
-; FT2_IMPROV improving-heuristic per-ply eval stack (improving.go's
-; evalStack/evalValid). 16-bit static eval per ply, plus a per-ply
-; "recorded this visit" flag. Extends the driver-scratch block above
-; ($0238-$0297, 96 bytes, MAIN RAM below PIECESQ at $0800 — free, and
-; contiguous with ITSTART/ASP). Written only when FT2_IMPROV is set; the
-; OFF path never touches these, so the search tree is unchanged.
-EVALSTKL   = $0238      ; 32 bytes: static eval low byte, indexed by ply
-EVALSTKH   = $0258      ; 32 bytes: static eval high byte, indexed by ply
+; $0238-$0277 is free RAM again (was FT2_IMPROV's EVALSTKL/EVALSTKH, the
+; 2x32-byte per-ply static-eval stack; removed with the feature 2026-07-26).
+
 UNDOPD     = $0298      ; 32 bytes ($0298-$02B7, page-2 tail — free RAM
                         ;  like the rest of the repurposed input-buffer
                         ;  page): per-ply PDIRTY restore value for the

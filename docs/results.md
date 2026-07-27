@@ -3,6 +3,63 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — Deep optimization round 5, target selection: the profile is FLAT (four near-equal quarters)
+
+Re-profiled the whole search at the **shipped** gameplay config (FEATURES
+0x5F = 0x1F | FT_CKEXT, FEATURES2 0), budget mode, aggregated over six
+phase-diverse positions (2 midgame, 1 opening, 1 tactical, 2 endgame;
+156M cycles total). Instrument: `TestProfileR5`
+(internal/chesstest/profile_r5_test.go).
+
+Round 4 profiled only two midgame FENs at FEATURES 0x1F — a config that
+predates check extensions — so its target list was both midgame-shaped
+and stale. This re-profile replaces it.
+
+**Per-file rollup** (per-PC attribution by nearest preceding label whose
+defining source file is known; attributing by label NAME alone leaves
+~25% unattributed, because macros like ATSLOT/MVPBODY emit ca65 `.local`
+labels that exist in the link map but in no source file):
+
+| file | share | what |
+|---|---|---|
+| board.s | 26.8% | attacked / make / unmake |
+| movegenbody.inc | 26.0% | move generation (inlined macro) |
+| search.s | 22.7% | search control |
+| eval.s | 21.3% | evaluation |
+| movegen.s | 1.6% | generator entry/dispatch |
+| tt.s | 1.5% | transposition table |
+
+**The headline is the flatness, not the ranking.** Concentration by
+label: top-1 = **4.16%**, top-3 = 11.2%, top-5 = 15.4%, top-10 = 22.3%,
+top-20 = 34.0%, top-40 = 48.6%, across 687 labels. There is no hot spot
+left to attack — the engine's time is four near-equal quarters, which is
+the expected signature after rounds 2-4 (−40%, then −12.6%).
+
+**What that implies for round 5.** A 10% win inside any single quarter
+buys only ~2.5% overall, so per-routine micro-optimization now has a low
+ceiling — this is why round 4's follow-up items all came back null
+(MG/(MG-D) accumulator NEGATIVE, king-shield cache negative). The
+remaining leverage is in **doing less work**, not in doing the same work
+faster.
+
+The largest such lever identified: **generation is EAGER**. In
+asm/search.s the full-width node entry is `snode: jsr gennodef`, which
+builds the ENTIRE move list, and only then does pass 0 hunt the TT move
+inside it. The move-ordering PASSES are staged (0 TT move, 1 heavy
+captures/promos, 2 light captures, 3 killer quiets, 4 remaining quiets)
+but the LIST is not. Every node whose TT move alone fails high paid for a
+full generation it never used, and generation is the biggest quarter.
+Deferring it is measurement-gated, not obvious: the saving is real only
+if a standalone `ttmovevalid` (needed because TT collisions can return a
+move illegal in the current position, and making it unchecked would
+corrupt the board) costs materially less than generation, and non-cutoff
+nodes pay that validation with no saving at all. Being priced now.
+
+Per-phase shares are logged by the instrument; the notable movers are
+`mvpbody` (0.6-0.9% midgame/opening/tactical but **2.9%** endgame) and
+`generateq` (5.7% opening vs 2.9% endgame) — consistent with task #32's
+finding that the cost model over-prices endgame nodes ~30%.
+
 ## 2026-07-27 — RE-SCREEN of the rejected depth-class features: NOTHING recovered; and a CORRECTION to the compression claim
 
 Hypothesis under test: the budgeted-ID fix revealed the cycle screen was

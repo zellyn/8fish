@@ -3,6 +3,82 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — Deferred move generation at `snode`: measured GO (net ≈ +2.0% cycles, +3.6..+5.5 Elo) — and today's eager generation is silently doing safety work
+
+Round 5's structural lever, priced before building. Instruments:
+`TestGenDeferAsmCost` (internal/chesstest) and `TestGenDeferOpportunity` /
+`TestGenDeferSelfPlay` (internal/mirror), all diagnostic; mirror counters
+sit behind `GenDeferCount`, default false, and `TestGenDeferCountersAreNoOp`
+pins that. No asm was modified.
+
+**The opportunity**, measured twice — in the mirror and, as a cross-check,
+directly in the asm (counting `stop0` = no TT move, and `scut` with
+`PASSNO[PLY]==0` = cut on the TT move). The two agree exactly on midgame,
+opening and tactical; they differ only on the endgames, where the mirror's
+cycle model stopped one ID iteration earlier.
+
+| | 6 FENs (asm direct) | 432 self-play moves (mirror) |
+|---|---|---|
+| full-width nodes | 7,357 | 359,567 |
+| TT move available | 22.3% | 18.2% |
+| → cut on the TT move alone | 86.3% | 83.5% |
+| **⇒ generation entirely avoidable** | **19.3%** of FW nodes | **15.2%** |
+| TT move *missing* from the list | — | **0 of 65,368** |
+
+Both at the shipped config and the shipped ~30M-cycle control. At a
+10×-smaller budget the opportunity roughly halves (8.0%) — the effect is
+TT-warmth-driven, so the 30M numbers are the ones that count. **QS is
+N/A**: QS capture nodes never probe the TT in either engine (`squiesce`
+sets `TTFROMA = NOSQ`), so there is no short-circuit to defer against.
+
+**The price of full-width generation** (exact per-PC attribution over
+disjoint link-map ranges; the shared emitter region is the only estimated
+split and moves the headline by ≤0.6pp): `gennodef` is **14.68%** of all
+cycles, **3,114 cyc/call**. Both generators together are 28.83%, which
+cross-checks the r5 rollup's 26.0% + 1.6% (the 0.39% wrapper lands in
+search.s there). Crucially, cost/call is strongly phase-dependent —
+endgame 1,957 vs tactical 4,885 — and **the phases with the most avoidable
+nodes have the cheapest generation**, so the naive `14.68% × 19.3%` is
+wrong and was not used.
+
+**★ The cost side contains the real finding: validation is mandatory, and
+today the eager generation IS the validator.** `asm/tt.s` indexes on 12
+bits and `ttfetch` verifies 24 more — the union is the full 32-bit Zobrist,
+so a hit against a *different* position survives with p = 2⁻²⁰. At ~800-1,200
+probes/move that is **≈ one wrong-position TT move per 25 games**.
+Measured: 0 of 65,368 hits, exactly as 2⁻²⁰ predicts. That is the shape of
+a defect that passes every unit test and every short parity run and then
+corrupts the board in a gauntlet days later. Right now pass 0 simply fails
+to find such a move; delete the generation and that protection goes with
+it.
+
+`ttmovevalid` priced at instruction level against the existing
+`ATTACKTAB`/`DELTATAB` tables and `atgeo` ray walk: knight 144 cyc, slider
+~199, pawn ~100, king ~84, weighted by the measured mover mix to **≈133
+cyc**, budget 150-250 with move-record staging. Cost is paid at *all*
+TT-available nodes but saves only at the 86.3% that cut — accounted.
+
+**Net: +2.43..+2.54%** on the profile workload, **+1.91..+1.99%**
+re-weighted to self-play. Per phase: endgame +3.8..+4.1%, opening
++3.5..+3.6%, tactical +1.55%, midgame +1.35%. At the project's measured
+130-150 Elo/doubling that is **+3.6 to +5.5 Elo**. For scale, the
+emit-fusion this project merged was −1.92% cycles.
+
+**Condition making it tree-identical (and so MicroAB-gated, not
+SPRT-gated): reject promotions and castling**, falling through to normal
+generation. The TT stores from/to only, and pass 0 today searches all four
+promo variants in list order N,B,R,Q — so the "promotion" the TT cutter
+searches today is the **knight** promo, and replaying a queen promo would
+change the tree. Castling needs two `attacked()` scans to validate.
+Rejecting both costs 0.07pp of the saving and buys a bit-identical tree.
+En passant and double pushes reconstruct exactly and are safe.
+
+**Adopted gates before any merge:** an exhaustive equivalence test over all
+128×128 (from,to) pairs per corpus position asserting `ttmovevalid` agrees
+with membership in `generate()`'s output, plus a CKVERIFY-style debug
+variant that generates anyway and traps on disagreement. A 2⁻²⁰ failure
+mode cannot be gated by sampling.
+
 ## 2026-07-27 — UI design + PoC: the Language Card was never used (8,176 B free), and a REAL hardware blocker found
 
 Design doc: `docs/ui-design.md`. PoC: `asm/ui.s` + `asm/uitest.s` +

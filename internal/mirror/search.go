@@ -19,30 +19,44 @@ func (e *Engine) SearchFixed(depth int) (Move, int) {
 // root best move (NoMove only if the position has no legal moves) and
 // score.
 //
-// Policy (mirrors docs/plan.md D9, single-cap variant): begin a new
-// iteration only while under ~50% of the budget (a deeper iteration
-// roughly multiplies node count, so past the halfway mark the next one
-// would blow the budget); a hard cap at `budget` aborts an in-progress
-// iteration, whose partial result is DISCARDED in favor of the last
-// completed iteration. Depth 1 always runs to completion (uncapped) so a
-// move is always produced. Deterministic given (position, budget,
-// features, dither seed): the budget is denominated in nodes, never wall
-// time, so an A/B replay is bit-identical.
+// Policy: this is a NODE-denominated transcription of the asm driver's
+// budget-mode ID loop (asm/engine.s `idloop`/`idok`), with the node count
+// standing in for the asm's CLOCK:
 //
-// KNOWN DIVERGENCES FROM THE ASM DRIVER (budget mode only; every asm<->mirror
-// parity gate is fixed-depth and exact). Recorded by the 2026-07-26 quirk
-// audit so nobody has to re-derive them:
-//  1. asm/engine.s `idok` STOPS iterative deepening the moment a completed
-//     iteration returns a WINNING mate ("deepening can't improve it"); the
-//     mirror keeps deepening and spends the rest of the budget.
-//  2. The asm's hard abort is 2x BUDGET (ABORTL) and its soft gate is
-//     PREDICTIVE (start the next iteration only if now + 2*last-iteration
-//     cost fits the budget); the mirror hard-aborts at 1x budget with a
-//     cumulative halfway gate, so for the same nominal budget it runs a
-//     slightly SHALLOWER ID than the asm would.
+//   - START a new iteration only when the PREDICTIVE gate says it fits:
+//     the next iteration is estimated at 2x the cost of the one just
+//     finished, and it is begun only if now + 2*lastCost is strictly under
+//     the budget (idPredict, the asm's own heuristic — see its comment).
+//   - HARD-ABORT at 2x budget (the asm's ABORTL = BUDGET*2), which
+//     backstops an underestimate by the predictive gate. The aborted
+//     iteration's partial result is DISCARDED in favor of the last
+//     COMPLETED iteration (a partial iteration's "best" is just the first
+//     root move it happened to search).
+//   - Depth 1 always runs to completion (uncapped) so a move is always
+//     produced (the asm's `CURDEPTH < 2` skip in checkclock).
+//   - STOP on a winning mate: a completed iteration whose root score is in
+//     the winning-mate zone is exact and final, so deepening cannot
+//     improve it (the asm's MATEZONEHI test at `idok`).
 //
-// Neither changes any fixed-depth tree, but both shift the depth a budgeted
-// mirror screen buys relative to the shipped engine.
+// Deterministic given (position, budget, features, dither seed): the budget
+// is denominated in nodes, never wall time, so an A/B replay is
+// bit-identical.
+//
+// Remaining (deliberate, documented) differences from the asm driver:
+//   - the asm polls its clock every 128 nodes, so its hard abort can
+//     overshoot by up to one poll interval; the mirror aborts exactly at
+//     the cap;
+//   - the asm's clock starts at machine reset, so its "now" includes the
+//     ~fixed engine entry cost, while the mirror's counter starts at the
+//     search.
+//
+// (A moveless root — mate/stalemate — used to break the mirror's loop early;
+// it does not any more, because the asm keeps iterating there. Each such
+// iteration costs one move generation, and the position ends the game either
+// way, so this is fidelity at no measurable price.)
+//
+// See TestBudgetModeParity (internal/chesstest) for the asm<->mirror
+// budget-mode gate.
 func (e *Engine) SearchBudget(budget uint64, maxDepth int) (Move, int) {
 	e.Nodes = 0 // per-move node accounting for the budget
 	e.resetCycles()
@@ -51,34 +65,68 @@ func (e *Engine) SearchBudget(budget uint64, maxDepth int) (Move, int) {
 	e.CompletedDepth = 0
 	for d := 1; d <= maxDepth; d++ {
 		if d > 1 {
-			// Soft start gate: skip a new iteration past the halfway mark.
-			if e.Nodes*2 >= budget {
-				break
-			}
-			e.NodeBudget = budget // hard cap for this (and later) iterations
+			// Hard abort at 2x budget (asm ABORTL), cumulative over the move.
+			e.NodeBudget = budget * 2
 		} else {
 			e.NodeBudget = 0 // depth 1 always completes
 		}
+		iterStart := e.Nodes
 		e.aspIterate(d, bestScore) // window seeded by the last completed score
 		if e.aborted {
 			break // incomplete iteration: keep the last completed result
 		}
 		best, bestScore = e.Best, e.RootScore
 		e.CompletedDepth = d
-		if best.From == NoSq {
-			break // no legal moves (mate/stalemate): deeper won't help
+		if bestScore >= mateZoneLo {
+			break // winning mate: exact and final, deepening can't improve it
+		}
+		if !idPredict(e.Nodes, iterStart, budget) {
+			break // predicted to overshoot: stop with the completed move
 		}
 	}
 	e.NodeBudget = 0
 	return best, bestScore
 }
 
+// idPredict is the asm driver's PREDICTIVE soft-start gate (asm/engine.s,
+// the block after `idok`), transcribed exactly — including its saturating
+// arithmetic and its strict comparison. now is the clock (nodes or estimated
+// cycles) at the end of the iteration that just completed, iterStart the
+// clock when that iteration began, budget the soft budget.
+//
+// The estimate "next iteration costs 2x the last one" is the ASM's
+// heuristic, not a better one: QS-dominated growth ratios actually run 2-6,
+// and the 2x-budget hard abort backstops the underestimate. Fidelity to the
+// shipped driver is the point.
+func idPredict(now, iterStart, budget uint64) bool {
+	cost := now - iterStart
+	est := cost * 2
+	if est/2 != cost {
+		return false // asm: `asl` overflowed -> "nowhere near fitting"
+	}
+	proj := now + est
+	if proj < now {
+		return false // asm: carry out of the 24-bit add -> can't fit
+	}
+	return proj < budget // asm: `bcs report` on proj >= BUDGET
+}
+
+// HardAborted reports whether the most recent budgeted search ended by HARD
+// ABORT (the 2x-budget cap fired mid-iteration and that iteration was
+// discarded), as opposed to stopping cleanly at the predictive gate, the mate
+// stop or the depth cap. It is the mirror's analogue of the asm's ABORT byte
+// being nonzero at `report`. Only meaningful right after
+// SearchBudget/SearchCycleBudget/SearchTimed.
+func (e *Engine) HardAborted() bool { return e.aborted }
+
 // SearchCycleBudget is the CYCLE-denominated analogue of SearchBudget: it
 // runs iterative deepening under a per-move budget of ESTIMATED 6502
 // cycles (Cyc.Est, see cycles.go) instead of raw nodes, with identical
-// soft-stop semantics — begin a new iteration only while under ~50% of the
-// budget, hard-cap aborts an in-progress iteration and DISCARDS its
-// partial result, depth 1 always completes. Deterministic given
+// stop semantics — the asm's predictive soft-start gate (idPredict), its
+// 2x-budget hard abort (which DISCARDS the partial iteration), depth 1
+// always completes, and the winning-mate stop. This is the CLOSEST mirror
+// analogue of the shipped driver, since the asm's own budget is in cycles.
+// Deterministic given
 // (position, budget, features, dither seed): the cycle estimate is a pure
 // function of the tree, so an A/B replay is bit-identical, exactly like
 // the node-budgeted mode. This is the mode that taxes a feature by its
@@ -95,22 +143,23 @@ func (e *Engine) SearchCycleBudget(budget uint64, maxDepth int) (Move, int) {
 	e.CompletedDepth = 0
 	for d := 1; d <= maxDepth; d++ {
 		if d > 1 {
-			// Soft start gate: skip a new iteration past the halfway mark.
-			if e.Cyc.Est*2 >= budget {
-				break
-			}
-			e.CycleBudget = budget // hard cap for this (and later) iterations
+			// Hard abort at 2x budget (asm ABORTL), cumulative over the move.
+			e.CycleBudget = budget * 2
 		} else {
 			e.CycleBudget = 0 // depth 1 always completes (cyc stays on)
 		}
+		iterStart := e.Cyc.Est
 		e.aspIterate(d, bestScore) // window seeded by the last completed score
 		if e.aborted {
 			break // incomplete iteration: keep the last completed result
 		}
 		best, bestScore = e.Best, e.RootScore
 		e.CompletedDepth = d
-		if best.From == NoSq {
-			break // no legal moves (mate/stalemate): deeper won't help
+		if bestScore >= mateZoneLo {
+			break // winning mate: exact and final (asm idok)
+		}
+		if !idPredict(e.Cyc.Est, iterStart, budget) {
+			break // predicted to overshoot: stop with the completed move
 		}
 	}
 	e.CycleBudget = 0

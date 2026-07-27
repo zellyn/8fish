@@ -3,6 +3,86 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — INSTRUMENT FIX: budgeted mirror ID now matches the asm driver; new BUDGET-MODE parity gate
+
+The 2026-07-26 audit filed (but did not fix) a divergence in the mirror's
+budgeted iterative-deepening driver — the code path every `-cbudget` screen
+runs. Fixed here, mirror-side only (`internal/mirror/search.go`,
+`effort.go`); asm untouched.
+
+**The two drivers, before:**
+
+| | asm/engine.s (`idloop`/`idok`) | mirror (before) |
+|---|---|---|
+| start iteration d+1 | PREDICTIVE: cost = clock − ITSTART of the iteration just finished; start only if `now + 2*cost < BUDGET` (saturating; strict) | CUMULATIVE halfway: start only if `spent*2 < budget` |
+| hard abort | `ABORTL = 2*BUDGET` (`2*CEILMAX` under FT2_ADAPT), polled every 128 nodes, never below CURDEPTH 2 | `1*budget`, checked exactly, never at depth 1 |
+| partial iteration | DISCARDED; restore PREV\* move/score, `dec CURDEPTH` | DISCARDED; keep last completed (same) |
+| winning mate | STOP: `SCORE >= MATEZONEHI` ⇒ report (deepening can't improve an exact mate) | kept deepening |
+| moveless root | keeps iterating to the depth cap | broke out at depth 1 |
+| depth cap | `CURDEPTH <= MAXCAP` (leaves CURDEPTH at cap+1 on exit) | `d <= maxDepth` |
+
+Net: at the same budget the mirror bought a systematically SHALLOWER ID
+than the shipped engine — which is precisely the shape of a mirror→asm
+"compression" mechanism, and invisible to every gate we had, because they
+are all fixed-depth.
+
+**Fixed** by transcribing the asm's policy (including its 2x-growth
+estimate — fidelity, not improvement: the real growth ratio is 2-6 and the
+2x hard abort is what backstops it). `idPredict` is shared by
+`SearchBudget` (node-denominated), `SearchCycleBudget` and `SearchTimed`
+(whose asm counterpart, adaptmaybe, hangs off the same `idok`).
+
+**New gate: `TestBudgetModeParity`** (internal/chesstest/budget_parity_test.go,
+~8s, 284 positions = 71 starts × 2 masks × {2M, 8M} cycle budgets). At a
+matched budget it compares completed depth (asm CURDEPTH vs mirror
+CompletedDepth), chosen move, root score, tree size (search/make/eval
+entries) and spend. Tolerances are honest about the cycle model: exact
+depth on ≥70% of positions, |Δdepth| ≤ 1 everywhere, EXACT trees/moves/
+scores on the same-depth-no-abort subset (there the tree is a pure
+function of the depth sequence, so zero is the right tolerance), and a
+one-sided-SKEW test on the openings pool — the region the cycle model was
+fit on. Sensitivity, same 284 positions:
+
+| driver | depth exact (all) | openings-pool skew (asm-deeper − mirror-deeper) |
+|---|---|---|
+| before | 54.6% | **+53** (54 vs 1) — FAILS |
+| after | 82.4% | **+3** (9 vs 6) — passes |
+
+**BLAST RADIUS — the corrected instrument moves a known screen TOWARD its
+SPRT truth.** Re-ran the check-extension screen (a feature we KNOW is
+genuinely positive: SPRT +24 ± 23 / +12 ± 33) on the same openings and the
+same four seeds, once per driver, 2000 games per arm,
+`-cbudget 143000000 -afeat 0x1f -bfeat 0x1f -ackext 1`:
+
+| seed (500 g) | pre-fix driver | corrected driver |
+|---|---|---|
+| 6502 | +13 ± 26 | +26 ± 26 |
+| 4711 | +9 ± 25 | +24 ± 25 |
+| 1234 | +6 ± 25 | +8 ± 25 |
+| 9001 | −26 ± 26 | +21 ± 25 |
+| **aggregate (2000 g)** | **+0.5 ± 12.7** (700/603/697) | **+19.7 ± 12.6** (745/623/632) |
+
+Shift **+19.1 ± 17.9** (95%), and 4 of 4 seeds moved UP. The corrected
+instrument lands on top of the SPRT point estimate (+24) where the pre-fix
+one read ~0. So this divergence WAS a compression mechanism: a shallower
+budgeted ID under-pays a feature whose value is depth-dependent. (Caveat:
+2000 games/arm, so the shift itself is only marginally significant on its
+own; the 4/4 sign agreement is the stronger part of the evidence.)
+
+**Cost note:** the corrected driver may spend up to 2× budget on a move
+(the asm's real hard abort), where the mirror previously capped at 1×, so
+budgeted mirror screens now take noticeably more wall time. That is the
+shipped engine's actual spending behaviour, not overhead we added.
+
+**Second finding, from the gate's own diagnostics.** On identical trees the
+mirror's `Cyc.Est` tracks real emulated cycles with median ratio **0.999**
+on the openings pool but **0.776** on endgames/near-mate — the cycle model
+over-prices endgame nodes by ~30%, so a budgeted mirror screen runs
+shallower than the asm exactly where our losses live (29% endgame
+conversion). Not fixed here (that is a re-fit of `DefaultCycleCosts`); the
+gate reports it every run and the skew assertion is deliberately scoped to
+the fit region so it cannot be silently absorbed.
+
 ## 2026-07-26 — differential audit: full-game parity CLEAN; two instrument bugs found; Sargon driver had 6 defects
 
 zellyn asked two questions after the tt.s bug: could earlier verdicts be

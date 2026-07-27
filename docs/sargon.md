@@ -47,11 +47,41 @@ and retries a dropped/garbled entry.
 **Output — two channels:**
 
 1. **Text move-list (authoritative, always reliable).** Text page 1
-   (`$400-$7FF`, standard interleaved layout) shows a running move list. Columns:
-   move number at cols 4-7, PLAYER move at cols 10-15, SARGON move at cols 22-27.
+   (`$400-$7FF`, standard interleaved layout) shows a running move list on rows
+   10-23. Columns: move number right-justified in cols 0-7, WHITE's move from
+   col 10 and BLACK's from col 23 — *regardless of who Sargon is*; only the
+   SARGON/PLAYER header labels swap. A castle is printed one column right
+   (`  O-O `). The widest token is 8 chars (`B7-B8/Q+`), so the scrape windows
+   are cols [10,18) and [22,31). The list shows 13 moves and scrolls.
    Sargon's reply is read directly as algebraic (`E7-E5`, `E5XD4`, `0-0`,
-   `PXPEP`, `.../Q`). This works regardless of pondering.
+   `PXPEP`, `.../Q`, `+` for check). This works regardless of pondering.
 2. **Zero-page piece list (RAM, reliable only in Easy Mode).** See below.
+
+### Two move-list hazards (found 2026-07; both now handled)
+
+**A. Mid-search REPAINT.** While searching, Sargon transiently BLANKS the bottom
+move-list rows and repaints them identically ~167K cycles later. Measured
+(`internal/sargon` `TestRepaintWatch`): exactly one such blip, ~19.3M cycles into
+the FIRST search after Sargon leaves its (disk-resident) opening library, none in
+the following 130M cycles. Detecting "Sargon has moved" by comparing the move-list
+column TEXT therefore false-positives on that blank frame; the caller then reads
+the bottom-most *surviving* token, which is Sargon's PREVIOUS move — a stale,
+illegal-on-our-board reply. That killed 15 of 300 games in the 2026-07
+standard-start match (14 of them Sargon-as-White, all on the first out-of-book
+move). **Commit detection must key on the displayed move NUMBER**
+(`Machine.LastSargonEntry` / `sargonCommitted`), which only advances on a real
+commit and is immune to both the repaint and the scrolling.
+
+**B. 127-move capacity.** At move 128 Sargon restarts its move-list numbering at
+1 and its screen record no longer describes the game being played. All 3 games
+across two 300-game runs that reached move 128 broke there. `sargon.MaxSargonMoves`
+= 127 and `sargon-symmatch` clamps `-max-moves` to it.
+
+**Cross-check.** `Machine.CrossCheckHistory(hist, firstPly)` compares Sargon's own
+displayed list against our referee history ply for ply (overlapping suffix only —
+the window scrolls). `sargon-symmatch` runs it after every ply and dumps both
+histories plus the screen on any mismatch, plus a periodic `SCREEN-DUMP-BEGIN/END`
+capture every 10 full moves.
 
 ## Board in RAM: the zero-page piece-square list
 

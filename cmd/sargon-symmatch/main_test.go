@@ -35,6 +35,14 @@ func TestScreenTokenToCoord(t *testing.T) {
 		{"castle-queenside-white", "0-0-0", true, nil, "e1c1"},
 		{"castle-kingside-black", "0-0", false, nil, "e8g8"},
 		{"castle-queenside-black", "0-0-0", false, nil, "e8c8"},
+		// Sargon appends "+" for check. The FROM-TO forms are parsed at fixed
+		// offsets and never noticed it, but the square-less castling tokens are
+		// matched WHOLE — so before the 2026-07 audit a castle giving check read
+		// as unparseable and adjudicated the game away.
+		{"check-marker", "F5-F4+", true, nil, "f5f4"},
+		{"castle-kingside-check", "O-O+", true, nil, "e1g1"},
+		{"castle-queenside-check", "0-0-0+", false, nil, "e8c8"},
+		{"promotion-check", "B7-B8/N+", true, nil, "b7b8n"},
 		{"en-passant-PXPEP", "PXPEP", true, epPos, "e5d6"},
 		{"en-passant-lowercase", "pxpep", true, epPos, "e5d6"},
 		{"en-passant-no-ref", "PXPEP", true, nil, ""}, // unreadable without position

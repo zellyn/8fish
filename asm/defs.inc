@@ -314,6 +314,31 @@ FT_CKVERIFY = $80       ; debug: verify make's gives-check against a full
                         ; so the variant's FEATURES encoding is unchanged.
 
 ; ---- Second feature byte (FEATURES2) ----
+FT2_GENDEFER = $10      ; DEFERRED full-width move generation at snode: when
+                        ;  the TT offers a move for this ply, validate it with
+                        ;  ttmovevalid (search.s) and search it as a staged
+                        ;  one-move list WITHOUT generating; generate the real
+                        ;  list only if it fails to cut (~86% of TT-available
+                        ;  nodes cut on it, ~19% of all full-width nodes skip
+                        ;  generation entirely). TREE-IDENTICAL by construction:
+                        ;  ttmovevalid rejects promotions and castles (pass 0
+                        ;  searches all four promo variants in list order
+                        ;  N,B,R,Q, so replaying one would change the tree), and
+                        ;  the deferred node re-enters the normal passes through
+                        ;  the same p0done with the TT move's tier zeroed - the
+                        ;  same "consumed" marking pass 0 writes today. The
+                        ;  staged record lives at PLYBASE[PLY] so setmove4, the
+                        ;  scout refetch and the killer flag read are unchanged.
+                        ;  PASSNO[PLY] = PASS_TTDEF while it is live.
+                        ;  ttmovevalid must never be MORE permissive than
+                        ;  generate: tt.s indexes on 12 bits and verifies 24, so
+                        ;  a hit against a different position survives with
+                        ;  p = 2^-20 and today's eager generation is the only
+                        ;  thing that catches it (see docs/results.md
+                        ;  2026-07-27). TestTTMoveValidExhaustive gates that
+                        ;  over all 128x128 (from,to) pairs per corpus position;
+                        ;  the `ca65 -D GDVERIFY` variant traps (exit 102) on a
+                        ;  live disagreement.
 FT2_ADAPT  = $04        ; adaptive time/effort management (mirror.SearchTimed
                         ;  port). Budget mode only. The host pokes BUDGET =
                         ;  the per-move base ceiling and CEILMAX = the hard max
@@ -411,7 +436,15 @@ UNDOPHASE  = $0AE0
 UNDOHALF   = $0B00
 LEGALCNT   = $0B20      ; legal moves found at this ply
 PASSNO     = $0B40      ; move-loop pass: 0 TT move, 1 heavy captures/
-                        ;  promos, 2 light captures, 3 killers, 4 quiets
+                        ;  promos, 2 light captures, 3 killers, 4 quiets,
+                        ;  PASS_TTDEF = the FT2_GENDEFER staged TT move
+PASS_TTDEF = $80        ; PASSNO value while a deferred TT move is live: the
+                        ;  list has NOT been generated yet, so sloopret must
+                        ;  generate it before continuing (srdefer). Bit 7 so
+                        ;  sloopret's dispatch costs one `bmi` (the pass-4 scan
+                        ;  is the hottest, and must not grow a compare).
+                        ;  Never 4, so the LMR gate in slegal declines to
+                        ;  reduce it - exactly as it declines pass 0 today.
 QSKIND     = $0B60      ; 0 = full-width (or evasion) node, 1 = qs captures-only
 HASHSTK0   = $0B80      ; hash of the position at each ply (saved by make;
 HASHSTK1   = $0BA0      ;  doubles as the unmake restore source and the
@@ -453,6 +486,16 @@ SMODE      = $0DE0      ; child window mode for the move being searched:
 
 ; $0213-$0221 is free driver-scratch RAM (was FT_ROOKX's RKCNT[16] at
 ; $0210 and XSTRUCT at $0220, removed 2026-07-23 with the feature).
+; The `ca65 -D GDVERIFY` debug variant (FT2_GENDEFER's live equivalence
+; assertion + its exhaustive-sweep entry) borrows the first three bytes;
+; the shipped image assembles none of that code and leaves them free.
+GDVMSP     = $0213      ; GDVERIFY: MSP saved across the throwaway generate
+GDVBASE    = $0215      ; GDVERIFY: ttmvsweep's first from-square
+GDVBUF     = $3000      ; GDVERIFY: ttmvsweep's 32x128 result buffer. Plain
+                        ;  RAM under the engine's $4000 org and above the
+                        ;  resident book blob ($2000-$2F19); used only by
+                        ;  TestTTMoveValidExhaustive's stub runs, which
+                        ;  probe no book.
 
 ; ---- Entropy collector (asm/entropy.inc; M8 keyboard/text UI driver) ----
 ; The IIe has no clock and no RNG, so the eval dither's SEED is MANUFACTURED

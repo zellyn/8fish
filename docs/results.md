@@ -3,6 +3,101 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — Deferred move generation SHIPPED (FT2_GENDEFER): **−2.52% cycles**, bit-identical tree, 412 B
+
+The build of the entry below. `snode` no longer generates the move list
+when the TT offers a move: `ttmovevalid` validates the move against the
+board, it is staged as a real 4-byte move-stack record at `PLYBASE[PLY]`
+and searched, and `generate` runs only if it fails to cut. Behind
+`FT2_GENDEFER` ($10 in FEATURES2); OFF is today's path.
+
+**Measured saving −2.52%** (`TestGenDeferCycleDelta`) on the r5 profile
+position set at the shipped mask, per position deepened under real
+iterative deepening until it passed the ~30M-cycle control — against the
+predicted +1.9..+2.5%. Per phase, prediction in brackets: endgame 4.01%
+[3.8-4.1], opening 2.18% [3.5-3.6], midgame 1.80% [1.35], tactical 1.38%
+[1.55]. `generate` calls fall 8-26% per position.
+
+**The measurement regime matters and nearly went wrong — twice.**
+(1) Fixed-depth mode is ONE iteration against a COLD TT, where almost no
+node has a TT move to defer on: over the MicroAB fixed-depth tiers the
+saving is 0.96%/0.08%/0.24% (masks 0x1F/0x07/0x00). Every cycle number
+that counts is therefore taken under real ID, with the budget SATURATED
+(2e9) so the ID driver's predictive gate never fires and both A and B run
+identical trees; a real time budget cannot be used at all, since it
+converts the saving into extra nodes and the trees diverge by
+construction. (2) Depth must be calibrated to the CONTROL. MicroAB's
+positions at depth 6 cost 180-600M cycles — 6-20x the shipped ~30M — and
+there the ID-tier saving is only 1.17%, because a tree that big thrashes
+the 4096-entry TT and the per-node TT-move availability falls. Deepening
+each r5 position only until it passes 30M gives 2.52%. Same code, same
+positions, 2x apart on depth choice alone.
+
+**Tree identity** (`TestGenDeferTreeIdentity`, the acceptance test — no
+SPRT): over the MicroAB suite at its three fixed-depth tiers PLUS an ID
+tier at the shipped mask, the FNV hash of the (FROM,TO,MVFLAGS) stream at
+every `make`, the score, the best move and the search/make/eval/ttprobe
+counts are identical ON vs OFF. `generate` and `attacked` are excluded
+and are the only things that move: `attacked` falls with `generate`
+because castle emission calls `gcsafe2` (two `attacked` scans per
+castle-eligible node).
+
+**`ttmovevalid` is proved exactly as strict as `generate`**, which is the
+whole risk (tt.s indexes on 12 bits and verifies 24, so a hit against a
+different position survives with p = 2^-20 — and the eager generation was
+the only thing catching it). `TestTTMoveValidExhaustive` compares the
+routine against `generate`'s actual output over **all 128x128 (from,to)
+pairs** — off-board square codes included — for 32 corpus positions, in
+both the "is it a move" and the "which flags" directions. Not sampled: a
+2^-20 mode cannot be. The ONLY disagreements are the two deliberate
+rejections (promotions, castles), and the test asserts they are exactly
+that set. A mutation making pawn pushes accept an occupied target is
+caught immediately.
+
+**`ca65 -D GDVERIFY`** (`TestGenDeferVerify`) is the live CKVERIFY-style
+assertion: it generates the list anyway at every staged node and exits 102
+if the validated move is absent. Worth recording honestly: that gate did
+NOT catch the pawn-push mutation the exhaustive test caught in one run —
+the TT only ever offers moves that are real in *some* position, so a live
+gate can only catch the 2^-20 case. It is a long-run assertion, not a
+substitute for the exhaustive test.
+
+**Implementation notes.** Staging the move as a real move-stack record
+(tier byte 0, the same "consumed by pass 0" marking pass 0 writes today)
+is what keeps `setmove4`, the `sdemote` scout refetch, the killer flag
+read and the root `BESTFLAGS` read working unchanged. `PASSNO[PLY]` =
+`PASS_TTDEF` ($80) while it is live; `sloopret` dispatches it on one
+`bpl`, so the hot pass-4 scan grew no compare. When it fails to cut,
+`srdefer` generates at `PLYBASE+4` (the staged record stays at PLYBASE so
+`spop`'s MSP restore is unchanged) and a consume scan zeroes the
+generated copy's tier before joining the normal passes at `p0done` —
+exactly one entry can match, because promotions (the only repeated
+from/to) are rejected.
+
+Promotions and castles fall through to normal generation, as the entry
+below required: replaying a promotion would change the tree (pass 0
+searches all four variants N,B,R,Q), and a castle is rejected for free —
+`ATTACKTAB` has no `ATK_KING` bit for a two-file king step, so the
+geometry test declines it with no extra code.
+
+**Cost: 412 B of CODE** (ttmovevalid 213, staging 70, srdefer + consume
+scan 105, `snode`/`sloopret` restructure ~24). MAIN headroom 1622 → 1110 B
+(the extra 100 is TABLES' 256-byte alignment). Feature OFF costs ~7 cycles
+per full-width node for the gate — 0.03% of total, and symmetric, so it
+does not flatter the A/B.
+
+Gates, all green: `TestTTMoveValidExhaustive` (32 positions x 16384 pairs;
+coverage asserted to include captures, pawn moves, double pushes, en
+passant and rejected promos/castles), `TestTTMoveValidRejectsPromoAndCastle`,
+`TestGenDeferVerify`, `TestGenDeferTreeIdentity` (24 A/B pairs, all
+identical), `TestGenDeferAsmCost` (the pre-existing diagnostic still
+runs), `TestMicroAB` at FEATURES2 = 0 — all 18 fingerprints identical to
+the pre-change image, cycles +0.036% — and the parity suite:
+`TestFullGameMirrorParity` (780/780 exact, 436 positions, 7.78M nodes),
+`TestIDIterationParity` (399 iterations, 0 divergences),
+`TestSearchMirrorParity`, `TestTTSequenceParity` (150,041 TT operations),
+`TestBudgetModeParity`. Parity runs at FEATURES2 = 0, which with ON ≡ OFF
+gives ON ≡ mirror transitively.
 ## 2026-07-27 — Cycle-cost model: the endgame over-pricing is FIXED (phase-aware per-node cost, recalibrated on 23 positions)
 
 The mirror's cycle-cost model charged a **constant** cost per node, which

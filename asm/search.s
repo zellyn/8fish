@@ -725,17 +725,24 @@ stoph:  lda #1
         sta PASSNO,y
         ldy #0
         beq p1loop              ; always
-snode:  jsr gennodef            ; CURPTR = base, SENDL/H = end
-        ldy PLY
+snode:  ldy PLY
         lda TTFROMA,y
         cmp #NOSQ
-        beq stop0
-        sta TTF0                ; pass 0: hunt the TT move
+        beq sngen               ; no TT move: generate, then pass 1/2
+        sta TTF0                ; pass 0 mirrors (both paths need them)
         lda TTTOA,y
         sta TTT0
+        lda FEATURES2
+        and #FT2_GENDEFER
+        beq snp0                ; off: eager, exactly as before
+        jmp sntry               ; deferred generation (out of line below)
+snp0:   jsr gennodef            ; eager: CURPTR = base, SENDL/H = end,
+        ldy PLY                 ;  then pass 0 hunts the TT move in the list
         lda #0
         sta PASSNO,y
         beq p0loopj             ; always
+sngen:  jsr gennodef            ; (gennd2 leaves Y = PLY, which stop0 wants)
+        jmp stop0
 p0loopj:
         jmp p0loop
 
@@ -1019,7 +1026,9 @@ sloopret:
         lda PLYENDHI,y
         sta SENDH
         ldx PASSNO,y
-        beq srp0
+        bpl :+                  ; PASS_TTDEF: the staged TT move did not cut,
+        jmp srdefer             ;  so the real list still has to be built
+:       beq srp0
         cpx #3
         bcs srp34
         ldy #0
@@ -1044,6 +1053,179 @@ srp34:  cpx #3
         sta KT2
         jmp p3loop
 srp4:   jmp p4nk
+
+; ---------------------------------------------------------------
+; FT2_GENDEFER: deferred full-width generation at snode.
+;
+; sntry  - the TT offers a move for this ply. Validate it against the
+;          board (ttmovevalid) and, if it is a move `generate` would
+;          have emitted, STAGE it as a real 4-byte move-stack record
+;          and search it with no generation at all. ~86% of these cut,
+;          and that is the whole saving.
+; srdefer- it did not cut (or was illegal): build the real list now,
+;          consume the TT move from it exactly as pass 0 would have
+;          (zero its tier byte), and join the normal passes at p0done.
+;
+; The staged record sits AT PLYBASE[PLY] with tier 0, so:
+;   - setmove4, the sdemote scout refetch and the killer/BESTFLAGS
+;     (T0),y reads all work unchanged (they address CURSOR-4);
+;   - spop's MSP restore is unchanged (PLYBASE is still this node's
+;     entry MSP);
+;   - passes 1-4, which rescan from PLYBASE, skip it on the same
+;     single tier compare that skips a consumed pass-0 move today.
+; Generation, when it happens, therefore starts at PLYBASE+4 and the
+; consume scan must start there too - the staged record carries the
+; same from/to and would match first.
+; ---------------------------------------------------------------
+sntry:  jsr ttmovevalid         ; C set: pseudo-legal here, MVFLAGS = the
+        bcs :+                  ;  flags generate would have emitted
+        jmp snp0                ; declined: generate and hunt it in the list
+:
+; ---- GDVERIFY (debug, ASSEMBLY-TIME optional - same pattern as
+; CKVERIFY): prove live that the validator is never MORE permissive
+; than generate. Build the real list right here, where it would go
+; anyway, require (TTF0, TTT0, MVFLAGS) to be in it, then throw the
+; list away and stage as usual. Exit 102 on disagreement. Only this
+; direction is checked: being too STRICT is a documented, tree-neutral
+; outcome (promotions and castles), while being too permissive makes
+; an illegal move. TestGenDeferVerify builds `ca65 -D GDVERIFY`.
+.ifdef GDVERIFY
+        lda MSP
+        sta GDVMSP
+        lda MSP+1
+        sta GDVMSP+1
+        lda #0
+        sta CLSP
+        jsr generate
+        lda GDVMSP
+        sta CURPTR
+        lda GDVMSP+1
+        sta CURPTR+1
+gdvloop:lda CURPTR
+        cmp MSP
+        bne gdvgo
+        lda CURPTR+1
+        cmp MSP+1
+        bne gdvgo
+        lda #102                ; validated a move generate does not emit
+        sta EXIT_TRAP
+gdvgo:  ldy #1
+        lda (CURPTR),y
+        cmp TTF0
+        bne gdvnext
+        iny
+        lda (CURPTR),y
+        cmp TTT0
+        bne gdvnext
+        iny
+        lda (CURPTR),y
+        cmp MVFLAGS
+        beq gdvfound
+gdvnext:lda CURPTR
+        clc
+        adc #4
+        sta CURPTR
+        bcc gdvloop
+        inc CURPTR+1
+        jmp gdvloop
+gdvfound:
+        lda GDVMSP              ; discard the list and stage as usual
+        sta MSP
+        lda GDVMSP+1
+        sta MSP+1
+.endif
+        ldy PLY
+        lda MSP
+        sta PLYBASELO,y
+        sta CURPTR
+        lda MSP+1
+        sta PLYBASEHI,y
+        sta CURPTR+1
+        ldy #0
+        tya
+        sta (MSP),y             ; tier 0 = "consumed by pass 0"
+        lda TTF0
+        iny
+        sta (MSP),y             ; from
+        sta FROM
+        lda TTT0
+        iny
+        sta (MSP),y             ; to
+        sta TO
+        lda MVFLAGS
+        iny
+        sta (MSP),y             ; flags
+        lda MSP                 ; MSP past the record: children (and the
+        clc                     ;  real list, if it is ever built) go above
+        adc #4
+        sta MSP
+        bcc :+
+        jsr flushpage           ; page cross + move-stack overflow trap
+:       ldy PLY
+        lda #PASS_TTDEF
+        sta PASSNO,y
+        jmp sgo                 ; (PLYEND/SEND are unset until srdefer
+                                ;  builds the list; nothing reads them
+                                ;  before then - sloopret reloads SEND
+                                ;  from PLYEND, and srdefer rewrites both)
+
+srdefer:
+        lda #0
+        sta CLSP                ; class-presence accumulator (as gennodef)
+        jsr generate            ; MSP is back at PLYBASE+4: every child
+        ldy PLY                 ;  restores it, so the list lands there
+        lda MSP
+        sta PLYENDLO,y
+        sta SENDL
+        lda MSP+1
+        sta PLYENDHI,y
+        sta SENDH
+        lda CLSP
+        sta CLSPRES,y
+        lda TTFROMA,y           ; refresh the TT-move mirrors (a child's
+        sta TTF0                ;  own snode clobbered the ZP copies)
+        lda TTTOA,y
+        sta TTT0
+        lda PLYBASELO,y         ; scan from the first GENERATED move
+        clc
+        adc #4
+        sta CURPTR
+        lda PLYBASEHI,y
+        adc #0
+        sta CURPTR+1
+        jmp sdcloop
+sdcpage:
+        inc CURPTR+1
+        jmp sdcloop
+sdcnext:
+        lda CURPTR
+        clc
+        adc #4
+        sta CURPTR
+        bcs sdcpage
+sdcloop:
+        lda CURPTR
+        cmp SENDL
+        bne sdcgo
+        lda CURPTR+1
+        cmp SENDH
+        beq sdcdone             ; not in the list: only reachable if
+                                ;  ttmovevalid was MORE permissive than
+                                ;  generate, which the exhaustive gate
+                                ;  (and the GDVERIFY variant) forbid
+sdcgo:  ldy #1
+        lda (CURPTR),y
+        cmp TTF0
+        bne sdcnext
+        iny
+        lda (CURPTR),y
+        cmp TTT0
+        bne sdcnext
+        lda #0                  ; consume it: passes 1-4 skip it by tier.
+        tay                     ;  Exactly one entry can match - promotions
+        sta (CURPTR),y          ;  (the only repeated from/to) are rejected
+sdcdone:
+        jmp p0done              ; (p0done reloads Y = PLY itself)
 
 ; sgo: search the move at CURPTR (FROM/TO/MVFLAGS loaded): advance
 ; the cursor past it and persist for sloopret/setmove4, then make.
@@ -1472,6 +1654,227 @@ setmove4:
         lda (T0),y
         sta TTENTRY+4
         rts
+
+; ---------------------------------------------------------------
+; ttmovevalid (FT2_GENDEFER): would `generate` emit (TTF0 -> TTT0) in
+; THIS position?
+;   Out: carry SET   = yes, and MVFLAGS holds the exact flags byte
+;                      generate would have written for it;
+;        carry CLEAR = no, or a case we decline to reconstruct - the
+;                      caller then generates the list as usual.
+; Clobbers A, X, Y and GTMP/GPIECE plus atgeo's scratch (ATSQ/ATTMP/
+; ATBITS/DIFF/ATDELTA), all dead at snode entry.
+;
+; ** This routine must never be MORE PERMISSIVE than generate. **
+; asm/tt.s indexes on 12 bits and ttfetch verifies 24 more, so a TT hit
+; against a DIFFERENT position survives with p = 2^-20 - about one
+; wrong-position TT move per 25 games at the shipped control. Today the
+; eager generation IS that validator (pass 0 simply fails to find such a
+; move); with generation deferred, this routine is the only thing
+; standing between a stale TT entry and an illegal make() that corrupts
+; the board and piece lists irrecoverably. Being too STRICT only costs
+; cycles (the caller falls back to generation and pass 0 finds the move
+; in the list, same tree). TestTTMoveValidExhaustive compares this
+; routine against generate() over all 128x128 (from,to) pairs per corpus
+; position; the `ca65 -D GDVERIFY` variant re-generates at every staged
+; node and traps (exit 102) on a live disagreement.
+;
+; DELIBERATE REJECTIONS (fall through to generation; ~2.4% of TT moves):
+;   - PROMOTIONS. The TT stores from/to only, and pass 0 today searches
+;     ALL FOUR promo variants in list order N,B,R,Q - so the move the TT
+;     cutter searches first today is the KNIGHT promo. Replaying a single
+;     reconstructed promotion would change the tree.
+;   - CASTLING. Validating it needs two attacked() scans (~656 cycles).
+;     It falls out for free: ATTACKTAB has no ATK_KING bit for a
+;     two-file king step, so the geometry test below rejects it.
+; En passant and double pushes reconstruct exactly and ARE validated.
+; ---------------------------------------------------------------
+ttmovevalid:
+        lda TTF0                ; both squares must be ON the 0x88 board:
+        and #$88                ;  BOARD is a 128-byte window and a stale
+        bne ttmvno              ;  TT entry can hold anything
+        lda TTT0
+        and #$88
+        bne ttmvno
+        ldx TTF0
+        lda BOARD,x
+        beq ttmvno              ; empty from-square
+        sta GTMP                ; the mover's piece byte
+        eor SIDE
+        and #COLORMASK
+        bne ttmvno              ; not a piece of the side to move
+        ldx TTT0
+        lda BOARD,x
+        sta GPIECE              ; the target byte (0 = empty square)
+        beq ttmvocc
+        eor SIDE
+        and #COLORMASK
+        beq ttmvno              ; own piece on the target (also to == from)
+ttmvocc:
+        lda GTMP
+        and #TYPEMASK
+        cmp #PAWN
+        beq ttmvpawn
+        ; ---- knight / bishop / rook / queen / king: pure geometry.
+        ; atgeo answers "does the piece on TTF0 attack TTT0 along this
+        ; difference", walking the ray with the same blocker test
+        ; generate's rays make; the target has already been proved empty
+        ; or enemy, so attack == pseudo-legal move. No move of these
+        ; types ever carries flags. A castle has no ATK_KING bit for its
+        ; two-file difference and is rejected here (see the header).
+        lda #0
+        sta MVFLAGS
+        lda TTT0
+        sta ATSQ                ; atgeo walks its ray toward ATSQ
+        clc
+        adc #$77                ; TTT0 <= $77, so no carry out
+        tax                     ; X = ATSQ + $77 (atgeo's diff base)
+        sec
+        sbc TTF0
+        tay                     ; Y = TTT0 - TTF0 + $77
+        lda ATTACKTAB,y
+        beq ttmvno              ; no geometric relation at all
+        ldy TTF0                ; atgeo: A = bits, Y = from, X = base
+        jmp atgeo               ; carry = the verdict
+
+ttmvno: clc
+        rts
+
+        ; ---- pawns: pushes, double pushes, captures and en passant,
+        ; by colour. A move onto the last rank is a PROMOTION and is
+        ; rejected before anything else (see the header).
+ttmvpawn:
+        lda TTT0
+        sec
+        sbc TTF0                ; d = to - from (both on board)
+        ldx SIDE
+        bne ttmvbp
+        ldx TTT0                ; white promotes onto rank 8 ($7x)
+        cpx #$70
+        bcs ttmvno
+        cmp #$10
+        beq ttmvpush
+        cmp #$20
+        beq ttmvdblw
+        cmp #$0F                ; +$0F / +$11: the two capture diagonals
+        beq ttmvcap             ;  (no file wrap: both squares are on
+        cmp #$11                ;  board, so d fixes the file shift)
+        beq ttmvcap
+        clc
+        rts
+ttmvbp: ldx TTT0                ; black promotes onto rank 1 ($0x)
+        cpx #$08
+        bcc ttmvno
+        cmp #$F0
+        beq ttmvpush
+        cmp #$E0
+        beq ttmvdblb
+        cmp #$F1
+        beq ttmvcap
+        cmp #$EF
+        beq ttmvcap
+        clc
+        rts
+
+ttmvpush:
+        lda GPIECE              ; single push: the target must be EMPTY
+        bne ttmvno
+        lda #0
+        sta MVFLAGS
+        sec
+        rts
+ttmvdblw:
+        lda GPIECE              ; double push: target empty, home rank,
+        bne ttmvno              ;  and the skipped square empty too
+        lda TTF0
+        and #$F0
+        cmp #$10                ; white doubles from rank 2
+        bne ttmvno
+        lda TTF0
+        clc
+        adc #$10
+        jmp ttmvdbl2
+ttmvdblb:
+        lda GPIECE
+        bne ttmvno
+        lda TTF0
+        and #$F0
+        cmp #$60                ; black doubles from rank 7
+        bne ttmvno
+        lda TTF0
+        sec
+        sbc #$10
+ttmvdbl2:
+        tax
+        lda BOARD,x
+        bne ttmvno2
+        lda #FL_DOUBLE
+        sta MVFLAGS
+        sec
+        rts
+ttmvno2:clc                     ; (second reject exit: branch range)
+        rts
+ttmvcap:
+        lda GPIECE              ; diagonal: a real capture, or en passant
+        beq ttmvep              ;  onto the (empty) ep square
+        lda #0                  ; enemy piece there - own pieces and
+        sta MVFLAGS             ;  promotions were rejected above
+        sec
+        rts
+ttmvep: lda TTT0
+        cmp EPSQ                ; EPSQ = NOSQ when there is none, which
+        bne ttmvno2             ;  never equals an on-board TTT0
+        lda #FL_EP
+        sta MVFLAGS
+        sec
+        rts
+
+; ---------------------------------------------------------------
+; ttmvsweep (GDVERIFY variant only): the exhaustive-equivalence
+; harness entry. A 2^-20 failure mode cannot be gated by sampling, so
+; TestTTMoveValidExhaustive checks EVERY (from,to) pair of the 128
+; square codes - including the off-board 0x88 ones - against
+; generate()'s output, for every corpus position. Doing that from Go
+; one machine per pair is 16384 emulator boots per position, so the
+; sweep runs on the 6502: 32 from-squares per call (4 calls cover the
+; 128), 128 result bytes each.
+;   In:  GDVBASE = the first from-square of this chunk.
+;   Out: GDVBUF + (from - GDVBASE)*128 + to = (carry<<7) | MVFLAGS.
+; ---------------------------------------------------------------
+.ifdef GDVERIFY
+ttmvsweep:
+        lda #<GDVBUF
+        sta CURPTR
+        lda #>GDVBUF
+        sta CURPTR+1
+        lda GDVBASE
+        sta TTF0
+tmsf:   lda #0
+        sta TTT0
+tmst:   jsr ttmovevalid
+        lda #0
+        bcc :+
+        lda #$80                ; bit 7 = validated
+:       ora MVFLAGS
+        ldy TTT0
+        sta (CURPTR),y
+        inc TTT0
+        lda TTT0
+        bpl tmst                ; to = 0..127
+        lda CURPTR              ; next from: 128 bytes on
+        clc
+        adc #$80
+        sta CURPTR
+        bcc :+
+        inc CURPTR+1
+:       inc TTF0
+        lda TTF0
+        sec
+        sbc GDVBASE
+        cmp #32
+        bcc tmsf
+        rts
+.endif
 
         .segment "TABLES"
 

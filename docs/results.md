@@ -3,6 +3,60 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — RE-SCREEN of the rejected depth-class features: NOTHING recovered; and a CORRECTION to the compression claim
+
+Hypothesis under test: the budgeted-ID fix revealed the cycle screen was
+capping depth early, which should specifically undervalue features whose
+payoff IS depth. Three such features had been rejected on a screen number
+alone (no asm SPRT). Re-screened all three on the corrected instrument,
+2000 games each (4 seeds x 500), asm-matched 0x1f, cbudget 143M, original
+cost taxes — PLUS a CONTROL: king safety, an EVAL term, NOT depth-class,
+which should NOT move if the mechanism is what we think.
+
+| feature | corrected | published | shift |
+|---|---|---|---|
+| LMP 3+2d Dmax3 | −104.7 ± 13.7 | −85 ± 14 | −19.7 |
+| SEE atk-fw | +14.4 ± 12.5 | +2 ± 7 | +12.4 |
+| Countermove | +3.8 ± 12.6 | +4 ± 9 | −0.2 |
+| **CONTROL king safety** | **+1.9 ± 14.5** | **−19 ± 13** | **+20.9** |
+
+**THE CONTROL MOVED MORE THAN ANY CANDIDATE.** Every shift is ~1–2σ once
+both intervals are propagated; there is no coherent depth-class pattern.
+
+**Verdict: nothing is recovered.** LMP is confirmed dead and if anything
+worse (~−105; a deeper search exposes aggressive pruning errors more, not
+less). SEE and countermove remain statistically indistinguishable from
+their published verdicts. All screen-only verdicts stand as recorded, and
+the remaining ones (bishop pair, Texel retune, positional set,
+checks-in-QS) do not need revisiting.
+
+**CORRECTION TO THE 2026-07-27 COMPRESSION ENTRY.** That entry claimed
+the budgeted-ID divergence was "a REAL compression mechanism", resting on
+the check-extension screen reading +0.5 pre-fix and +19.7 corrected
+against an SPRT truth of +24. This control experiment shows a **+20.9
+shift occurring with NO mechanism present**, so a ~+19 shift is within
+what run-to-run variance produces at these game counts. That agent had
+already flagged its shift as "only marginally significant, the 4/4 sign
+agreement carrying most of the evidence" — the correct reading now is
+weaker: **the check-extension shift is NOT established as a mechanism
+effect.**
+
+What DOES stand: the budgeted-ID divergence was REAL and the fix is
+CORRECT — proven independently of any Elo measurement by
+TestBudgetModeParity (exact-depth agreement with the asm 54.6% → 82.4%,
+pool skew +53 → +3). We fixed a genuine fidelity bug in the instrument.
+What we cannot claim is that it was materially distorting our verdicts.
+
+So the compression mechanisms that remain EVIDENCED are: node-budget bias
+(proven directly), stale mirror defaults (a config bug, fixed), and
+ordering context (LMP +39 at 0x7f vs −85 at 0x1f). The tt.s TT bug was
+ruled out by the aspiration re-test; the budgeted-ID divergence is real
+but its verdict impact is unproven.
+
+**Consequence: the feature hunt is finished.** Every candidate has been
+screened, and the rejected ones stay rejected under a corrected
+instrument with a control.
+
 ## 2026-07-27 — ASPIRATION re-tested against a CORRECT TT: still NEUTRAL (+1.7 ± 23). The TT-taint hypothesis is NOT supported.
 
 FT_ASP was SPRT-rejected at −21 ± 32 on 2026-07-21, while asm/tt.s was

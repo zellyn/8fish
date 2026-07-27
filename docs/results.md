@@ -3,6 +3,158 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — Cycle-cost model: the endgame over-pricing is FIXED (phase-aware per-node cost, recalibrated on 23 positions)
+
+The mirror's cycle-cost model charged a **constant** cost per node, which
+over-priced low-material nodes by 30-40%. This was known and carved out
+rather than fixed: `TestCycleModelFrozen` excluded every FEN starting `8/`
+from its per-search accuracy check. Fixed now — the carve-out is **gone**
+and endgames are held to the same bound as everything else.
+
+**Instrument.** New `TestMicroABPhase` (internal/chesstest) = TestMicroAB
+plus material instrumentation: at every search/make/eval probe it also
+accumulates the live piece count, and at every search entry the engine's own
+PHASE byte. Those sums make a per-node cost of `Node + NodePhase*phase`
+a linear model in measurable columns.
+
+**Calibration set: 6 positions -> 23** (69 searches over masks
+0x1F/0x07/0x00). The old set was five 30-32-piece middlegames plus one
+10-piece endgame — a material term fit from that would have been fit to one
+outlier. Added 17 positions at 3, 4, 4, 4, 4, 8, 8, 10, 12, 12, 16, 16, 20,
+21, 23, 24, 28 pieces, with piece count and phase deliberately
+non-collinear. Sparse positions are searched deeper so every search is 5M-2.5G
+cycles (depth is not a regressor; the model is per operation).
+
+**Ground truth had also gone stale**: the asm is **7-14% faster** than at
+the previous calibration (23 asm commits), with op counts unchanged on 15 of
+the 18 old rows. Everything was re-measured.
+
+**New model** (fit non-negative, through the origin, minimizing RELATIVE
+error — the set spans 4.8M..2.5G cycles/search, so unweighted least squares
+would let the midgame searches set every coefficient, which is how the old
+model came to be 30% wrong on endgames and still "fit"):
+
+    Node 0 | NodePhase 44 (x the node's taper phase) | Make 1585 | Eval 888 | TTProbe 1824
+
+| | old model, old truth | old model, new truth | old FORM refit | **new model** |
+|---|---:|---:|---:|---:|
+| actual/pred, <=12 pieces | **0.714** | 0.488 | 0.980 | **0.993** |
+| actual/pred, rest | 1.014 | 0.821 | 1.077 | **1.019** |
+| worst per-search err | 46.9% | 168.8% | 28.2% | **20.4%** |
+| RMS rel err | — | 75.3% | 10.2% | **7.3%** |
+| leave-one-position-out CV RMS | — | — | 10.8% | **7.8%** |
+
+Per-position, old vs new (err% at 1f/07/00, new ground truth):
+
+    3pc  KPvK                +134/+132/+128   ->   -3/ -1/ -2
+    4pc  KP vs KR            +109/+169/ +64   ->   +5/ +9/+11
+    8pc  pawn ending          +95/+122/+141   ->   -6/ -1/ +4
+    10pc the old endgame      +57/ +45/ +48   ->   -9/ -2/ -3
+    16pc rook ending          +80/ +72/ +67   ->   -7/+10/+15
+    24pc queenless middlegame +23/ +29/ +16   ->   -7/ +4/ -4
+    32pc full middlegame      +12/ +16/  -4   ->   -7/+20/-13
+
+**Phase, not piece count**, and that is the physical result: the per-node
+work that scales with material is slider ray walks in `attacked()` and how
+many moves a piece emits, which phase (N=B=1,R=2,Q=4) weights and pawns
+barely affect. Piece count fits worse (CV 8.0% vs 7.8%, worst 22.4% vs
+20.3%) and would cost a 32-slot scan per node; phase is already maintained
+incrementally by both engines, so the fix is free at runtime.
+
+**Two mispricings, not one.** Separating them honestly: comparing like with
+like (the original six positions at their original depths) the material
+defect is the +45..+57% endgame error against -4..+30% on middlegames. The
+rest of the blow-up on deep sparse searches is a SECOND defect the extended
+set exposed — `TTProbe` was fitted at **9637** cycles/full-width node, an
+artifact of every old position having ttprobe/search ~ 0.08. Searches
+spanning 0.03..0.54 refit it at **1824**, which the round-5 profile
+independently supports (tt.s is 1.5% of all cycles).
+
+**Independent corroboration of the whole coefficient split.** The round-5
+per-file profile and the fitted model, on the same mask-0x1F searches:
+eval 21.3% profile vs 21.0% fitted; board.s+movegen 54.4% vs make 53.0%;
+search.s+tt.s 24.2% vs node+phase+ttprobe 22.2%. Two independent
+instruments, ~2 points apart.
+
+**End-to-end validation on an INDEPENDENT pool** — `TestBudgetModeParity`,
+284 budget-mode positions (2 configs x 2 budgets x 71 starts) at the shipped
+FEATURES 0x5F, comparing the mirror's `Cyc.Est` against the asm's real
+emulated cycles on identical trees. This is the instrument that filed the
+defect (the 0.776 / 0.999 numbers). Same gate, same positions, only the cost
+table changed:
+
+| | OLD table | NEW table |
+|---|---:|---:|
+| spend ratio (asm/mirror Est), openings pool | 0.999 | 1.073 |
+| spend ratio, **endgame/near-mate** | **0.776** | **1.023** |
+| ... p10 | 0.530 | 0.886 |
+| completed depth exact, all 284 | 82.4% | **93.3%** |
+| completed depth exact, endgame subset | 71.8% | **92.7%** |
+| endgame depth skew (asm-deeper − mirror-deeper) | **+35 / −0** | **−5** |
+
+The two subsets used to disagree by 22 points and now agree to 5. The
+remaining ~5-7% level offset (mirror slightly UNDER-charges) is expected:
+the model is fit at masks 0x1F/0x07/0x00 and this gate runs the shipped 0x5F
+with check extensions. **A second carve-out fell with the first**: that
+gate's one-sided depth-skew assertion was scoped to the openings pool
+precisely because of this pricing bias; it now asserts on the endgame subset
+too.
+
+**Transfer preserved** (the property the reduced 4-regressor form existed
+for). `TestEvalTermTax` stays green: the rook term's mirror-side cycle
+fraction is 4.75% against an asm ground truth of 4.78-5.17% — better
+centred than before (4.17% vs 3.47%). New `TestPhaseTransfers` checks the
+new regressor specifically: the mirror reproduces the asm's node count
+EXACTLY on all 69 searches and its mean phase per node matches to 0.00%.
+(The old "mirror QS is 0.9x-24x the asm's" caveat is stale; full-width
+TT-probe parity is 1.00 on all 69.)
+
+**Frozen-test guards, all with NO carve-out**: every search within 21%
+(worst 20.4%, and it is a 32-piece MIDGAME — the residual is no longer
+material-structured), per-mask grand total within 8% (was 12%), and both
+material ratios within 5% of 1.0 — the last is the guard that would have
+caught the original defect.
+
+**Impact on past verdicts: no recorded verdict is known to flip, and where
+the bias had a direction it FLATTERED the features that were rejected
+anyway.** Two things are worth separating.
+
+*Common-mode.* Every screen charges both sides A and B from the same cost
+table, and screens compare A vs B at one budget. A uniformly inflated
+endgame node price therefore mostly cancels: both engines simply searched
+less once material came off. That is a shift in how much search a screen
+bought in endgame positions, not an A-vs-B distortion, and nothing here
+changes an A-vs-B sign that was outside its error bar.
+
+*Where it did NOT cancel: the size of a feature's tax.* A screen taxes a
+feature by adding cycles per operation; what the feature actually pays is
+that tax as a FRACTION of the per-node cost. Inflating the endgame per-node
+cost shrinks that fraction, so a feature whose cost is charged mainly in
+endgame positions was **under-taxed** — screened too favorably, not too
+harshly. Measured directly (`TestEndgameCosted`, identical trees, only
+the cost table changed): the endgame-terms tax of 438 cyc/gated-eval was
+**4.84% / 5.05% / 3.94%** of estimated cycles on its three endgame probe
+positions under the old table and is **9.62% / 8.59% / 6.02%** under the
+new one — the term was screened paying **1.5-2.0x less** than its own cost
+model intended. That compounds with the already-documented 3x under-charge
+of the term's per-eval cost itself (438 charged vs 1278 real).
+
+That is exactly the feature whose screen did not survive: the endgame
+technique (`internal/mirror/endgame.go`) screened **+10 ± 9**, was ported,
+then measured **−9 ± 24** over 600 asm SPRT games and was stripped from the
+image. The 2026-07-26 entry blamed the 3x per-eval under-charge; this defect
+was pushing in the SAME direction on top of it. Correcting it makes endgame-specialist features screen slightly *worse*, so
+no rejected feature is owed a re-screen on account of this bug — a
+re-screen would only make the verdicts more negative. The reverse case
+(a feature unfairly rejected because the model over-charged it) would
+require a feature whose costs are paid in endgames and whose benefit is
+elsewhere; there is no such feature in the log.
+
+*Budget constants.* These now mean more search than they used to (~15% more
+per midgame node, far more per endgame node), so a `CycleBudget` copied from
+an older screen is not the same amount of work. Comparisons within a screen
+are unaffected; comparisons of node counts ACROSS the recalibration are not.
+
 ## 2026-07-27 — Deep optimization round 5, target selection: the profile is FLAT (four near-equal quarters)
 
 Re-profiled the whole search at the **shipped** gameplay config (FEATURES

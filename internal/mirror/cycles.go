@@ -5,21 +5,28 @@ package mirror
 // WHY. The mirror screens features by node-budgeted self-play before they
 // are ported to asm. A node budget charges every feature ZERO
 // implementation cost, so a term that is cheap in nodes but expensive in
-// cycles (e.g. the FT_ROOKX rook set, ~219 cycles/eval-call, ~4% of all
+// cycles (e.g. the FT_ROOKX rook set, ~219 cycles/eval-call, ~5% of all
 // cycles) screens far too favorably. A cycle budget taxes each feature by
 // its real per-node cost, so its measured Elo is automatically discounted.
 //
 // HOW. The engine keeps a running estimate of emulated 6502 cycles
 // (Cyc.Est), bumped at each accountable operation by a calibrated cost.
 // The costs (CycleCosts) are fit by least squares against the asm
-// differential harness (internal/chesstest TestMicroAB): 18 fixed-depth
-// searches across feature masks 0x1f/0x07/0x00, for which the harness
-// reports the TRUE emulated-6502 cycle total plus operation-entry counts
-// (search/make/eval/attacked/ttprobe/generate). The mirror replays the
-// SAME 18 searches (identical trees, so identical operation counts) and
-// its counts are regressed onto the asm cycle totals. See cycles_test.go
-// for the fit and the predicted-vs-actual validation, and cycles.md for
-// the coefficient table and known limitations.
+// differential harness (internal/chesstest TestMicroABPhase): 69 fixed-depth
+// searches — 23 positions spanning 3-32 pieces x feature masks
+// 0x1f/0x07/0x00 — for which the harness reports the TRUE emulated-6502
+// cycle total, the operation-entry counts (search/make/eval/attacked/
+// ttprobe/generate) and the MATERIAL sums over those entries. The mirror
+// replays the SAME 69 searches (identical trees, so identical operation
+// counts) and its counts are regressed onto the asm cycle totals. See
+// cycles_test.go for the fit and the predicted-vs-actual validation, and
+// cycles.md for the coefficient table and known limitations.
+//
+// One coefficient is not a flat per-operation cost: the per-NODE cost is
+// Node + NodePhase*phase, because real per-node work shrinks as material
+// comes off. A constant per-node cost over-priced endgame nodes by ~30-40%
+// and made every cycle-budget screen run shallower than the ship exactly
+// where the engine loses most of its games.
 //
 // The whole apparatus is inert unless accounting is active for the search
 // (CycleBudget != 0 or CycleTrack), so the existing NodeBudget path is
@@ -34,10 +41,24 @@ package mirror
 // the fitted coefficient absorbs the difference; it is not a pure
 // per-routine cost.
 type CycleCosts struct {
-	// Node is the per-search()-entry overhead NOT already attributed to the
-	// node's TT probe / eval / move generation / makes (bookkeeping,
-	// repetition/50-move checks, sprep dispatch, pass sequencing).
+	// Node is the MATERIAL-INDEPENDENT part of the per-search()-entry
+	// overhead not already attributed to the node's TT probe / eval /
+	// makes (bookkeeping, repetition/50-move checks, pass sequencing).
 	Node float64
+	// NodePhase is the MATERIAL-DEPENDENT part of the per-node cost: it is
+	// charged once per node, multiplied by the node's taper phase
+	// (Pos.Phase, N=B=1 R=2 Q=4 per side, 0..24). It exists because the
+	// per-node work is NOT constant — a node's quiescence move generation
+	// and its attacked() slot scans get cheaper as pieces come off, so a
+	// constant per-node cost over-charges low-material nodes (it
+	// over-priced the 7-piece calibration endgame by ~30-40%). Phase, not
+	// raw piece count, is the regressor the calibration selected: the
+	// per-node work that actually scales is dominated by SLIDER ray walks
+	// and by how many moves a piece emits, which pawns barely contribute
+	// to. Both were measured (see cycles.md); phase fit better and is
+	// already maintained incrementally by the mirror AND the asm, so it
+	// costs nothing to charge. Applied as an integer cost per phase unit.
+	NodePhase float64
 	// Make is charged once per real make() and covers the paired unmake()
 	// as well (every make has exactly one matching unmake, so the two are
 	// perfectly collinear and cannot be separated by the fit). It also
@@ -111,42 +132,58 @@ type CycleCosts struct {
 	MidTerm float64
 }
 
-// DefaultCycleCosts is the ridge-regularized fit against TestMicroAB's 18
-// searches (masks 0x1f/0x07/0x00), reduced to the [node,make,eval,ttprobe]
-// regressors so the costs transfer to the mirror's (QS-inflated) counts
-// without distortion. Applied to the asm operation counts it predicts each
-// per-mask GRAND TOTAL within ~12% and each middlegame search within ~20%
-// (the 7-piece endgame is a documented outlier). Applied to the mirror's
-// own counts it reproduces the ~4-6% rook-term cycle fraction the asm shows
+// DefaultCycleCosts is the fit against TestMicroABPhase's 69 searches (23
+// positions spanning 3-32 root pieces x masks 0x1f/0x07/0x00), reduced to
+// the [node, node*phase, make, eval, ttprobe] regressors so the costs
+// transfer to the mirror's own counts without distortion. Applied
+// to the asm operation counts it predicts each per-mask GRAND TOTAL within
+// ~4.2% and every one of the 69 searches within 20.4%, with NO material
+// bias: the actual/predicted ratio is 0.993 over the low-material positions
+// and 1.019 over the rest (the old constant-per-node model: 0.71 and 1.02 —
+// it over-charged an endgame node by ~40%). Applied to the mirror's own
+// counts it reproduces the ~4-6% rook-term cycle fraction the asm shows
 // (TestEvalTermTax) — the property that makes a cycle budget discount a
 // feature's Elo by its real cost. Derived in TestCycleModelFit; see
 // cycles.md. EvalTerm defaults to 0 (no experimental term); a screen sets
 // it via PlayerCfg.EvalTermsCost.
 var DefaultCycleCosts = CycleCosts{
-	Node:     fittedNode,
-	Make:     fittedMake,
-	Eval:     fittedEval,
-	TTProbe:  fittedTTProbe,
-	EvalTerm: 0,
+	Node:      fittedNode,
+	NodePhase: fittedNodePhase,
+	Make:      fittedMake,
+	Eval:      fittedEval,
+	TTProbe:   fittedTTProbe,
+	EvalTerm:  0,
 	// Attacked / Generate / MovePerGen / MakeNull / TTStore are folded into
-	// the four fitted coefficients above (their asm cost is absorbed via
-	// correlation with node/make counts) and default to 0. They exist so a
-	// future recalibration can price them separately. See cycles.md.
+	// the fitted coefficients above (their asm cost is absorbed via
+	// correlation with the node/phase/make counts) and default to 0. They
+	// exist so a future recalibration can price them separately. See
+	// cycles.md.
 }
 
 // Fitted coefficients (emulated 6502 cycles) for the reduced
-// [node,make,eval,ttprobe] model, from TestCycleModelFit (regressing the
-// asm cycle total onto the asm operation counts over the 18 microAB
-// searches). These four ops have the closest mirror/asm per-node frequency
-// so the costs transfer to mirror counts with least distortion. fittedConst
-// is the per-search intercept (reported/validated, not charged at runtime).
-// See cycles.md for the table, residuals, and known limitations.
+// [node, node*phase, make, eval, ttprobe] model, from TestCycleModelFit
+// (regressing the asm cycle total onto the asm operation counts over the 69
+// microAB searches, non-negative, through the origin, minimizing RELATIVE
+// error). These ops have the closest mirror/asm per-node frequency so the
+// costs transfer to mirror counts with least distortion; generate/attacked
+// are deliberately excluded because their mirror/asm per-node frequency
+// diverges. fittedConst is the per-search intercept (reported/validated, not
+// charged at runtime). Values are rounded to integers: the runtime charges
+// them with integer arithmetic so Est stays exactly the cost table dotted
+// with the counters. See cycles.md for the table, residuals, and limits.
 const (
-	fittedNode    = 1013.0 // per node entry (all nodes; bundles QS overhead)
-	fittedMake    = 1137.0 // per make()+unmake() pair
-	fittedEval    = 872.0  // per eval() base call
-	fittedTTProbe = 9637.0 // per full-width node (TT probe + sprep/null/futility dispatch)
-	fittedConst   = 0.0    // through-origin fit (zero ops = zero cycles)
+	// fittedNode is 0: with a material term in the model, the per-node cost
+	// that does NOT scale with material is not separately identifiable from
+	// the make/eval counts (which are themselves ~1 per node) and the fit
+	// drives it to the non-negativity boundary. The split the fit chose is
+	// corroborated by an INDEPENDENT measurement — the round-5 per-file
+	// profile (TestProfileR5, docs/results.md 2026-07-27) — see cycles.md.
+	fittedNode      = 0.0    // per node entry, material-independent part
+	fittedNodePhase = 44.0   // per node entry, per unit of taper phase (0..24)
+	fittedMake      = 1585.0 // per make()+unmake() pair
+	fittedEval      = 888.0  // per eval() base call
+	fittedTTProbe   = 1824.0 // per full-width node (TT probe + sprep/null/futility dispatch)
+	fittedConst     = 0.0    // through-origin fit (zero ops = zero cycles)
 )
 
 // CycleAccount holds the live cycle estimate plus per-operation counters.
@@ -159,6 +196,11 @@ type CycleAccount struct {
 	NodesFull    uint64 // ... at ply < MaxDepth (TT-probing full-width nodes)
 	NodesQS      uint64 // ... at ply >= MaxDepth, not in check (stand-pat QS)
 	NodesEvasion uint64 // ... at ply >= MaxDepth, in check (full evasion node)
+
+	// PhaseSum is Pos.Phase summed over every search() entry — the material
+	// regressor. Est's node term is exactly Node*Nodes + NodePhase*PhaseSum,
+	// which is what keeps Est reconstructible from the counters.
+	PhaseSum uint64
 
 	Makes    uint64 // real make() calls (== the asm "make" probe)
 	Unmakes  uint64 // unmake() calls (== Makes; folded into Make cost)
@@ -230,7 +272,9 @@ func (e *Engine) resetCycles() {
 	}
 }
 
-// chargeNode books one search() entry at the given node type.
+// chargeNode books one search() entry at the given node type. The node's
+// cost is Node + NodePhase*phase: the material-dependent half is what keeps
+// a low-material node from being charged midgame prices (see CycleCosts).
 func (e *Engine) chargeNode(qs, evasion bool) {
 	c := &e.Cyc
 	c.Nodes++
@@ -242,7 +286,12 @@ func (e *Engine) chargeNode(qs, evasion bool) {
 	default:
 		c.NodesQS++
 	}
-	c.Est += uint64(e.Costs.Node)
+	ph := e.Pos.Phase
+	if ph < 0 { // cannot happen; a negative would corrupt the uint64 sum
+		ph = 0
+	}
+	c.PhaseSum += uint64(ph)
+	c.Est += uint64(e.Costs.Node) + uint64(e.Costs.NodePhase)*uint64(ph)
 }
 
 // chargeMake books one real make()+unmake() pair, classified by move.

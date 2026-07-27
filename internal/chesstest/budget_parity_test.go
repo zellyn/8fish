@@ -46,7 +46,7 @@ import (
 // WHAT IT CANNOT CATCH:
 //   - sub-iteration timing effects. The two engines price cycles differently
 //     (the asm counts real emulated 6502 cycles; the mirror accumulates a
-//     least-squares fit good to ~12% per MASK but ~20% per individual search),
+//     least-squares fit good to ~8% per MASK but ~21% per individual search),
 //     so near a gate boundary the same policy legally buys one more or one
 //     fewer iteration on either side. Only a SYSTEMATIC (one-sided) depth skew
 //     is diagnostic.
@@ -69,20 +69,24 @@ import (
 //     the previous one, so two iterations is a >4x error.
 //   - completed depth exact on >= 70% of positions overall.
 //   - depth SKEW (asm-deeper minus mirror-deeper) within +-10% of n, asserted
-//     on the OPENINGS-POOL subset only. That subset is the region the cycle
-//     model was fit on (its median asm/mirror spend ratio on identical trees
-//     is 1.00); the endgame/near-mate extras are a KNOWN cycle-model outlier
-//     (median ratio 0.78 — the mirror over-prices endgame nodes by ~30%, so it
-//     buys fewer iterations there), and asserting a policy invariant on top of
-//     a documented pricing bias would just encode the bias. The endgame skew
-//     is REPORTED, not asserted.
+//     on the openings-pool AND endgame/near-mate subsets. Until 2026-07-27 it
+//     was asserted on the openings pool only, because the cycle model
+//     over-priced endgame nodes ~30% (this gate measured endgame spend ratio
+//     0.776 and skew +35/-0 against +3 on the openings pool) and asserting a
+//     policy invariant on top of a pricing bias would just encode the bias.
+//     The phase-aware re-fit removed the bias — endgame spend ratio 1.023,
+//     skew -5, depth exact 71.8% -> 92.7% — so the carve-out went with it.
 //   - node/make/eval counts, move and score: EXACT on the same-depth, no-abort
 //     subset. The honest tolerance there is zero, because the tree is a pure
 //     function of (position, depth sequence) and the fixed-depth gate already
 //     proves the per-depth trees are identical.
 //   - spend ratio (asm cycles / mirror Cyc.Est) on identical trees: median
-//     within [0.85, 1.15] on the openings subset — the cycle model's own
-//     documented accuracy. This is the instrument-health assertion; it fires
+//     within [0.85, 1.15] on each of the two subsets — the cycle model's own
+//     documented accuracy. (Measured 2026-07-27: 1.073 openings, 1.023
+//     endgame. The model is fit at masks 0x1F/0x07/0x00; this gate runs the
+//     shipped 0x5F, so a few points of level offset is expected. What matters
+//     is that the two subsets now agree with each other to 5 points, where
+//     they used to differ by 22.) This is the instrument-health assertion; it fires
 //     if the model drifts or an operation stops being charged.
 // ---------------------------------------------------------------------------
 
@@ -441,18 +445,32 @@ func TestBudgetModeParity(t *testing.T) {
 	// the same budget, which is exactly the mirror->asm "compression" this gate
 	// exists to detect. Measured over 160 openings positions: corrected driver
 	// +9/-6 (skew +3); pre-fix driver +54/-1 (skew +53, tolerance +-16).
-	if poolS.n > 0 {
-		skew, tol := poolS.deeper-poolS.shallower, poolS.n/10
+	//
+	// This is now asserted on the ENDGAME subset too. It used to be scoped to
+	// the openings pool because the cycle model over-priced endgame nodes
+	// ~30% (endgame spend ratio 0.776, skew +35/-0 on this very gate), and
+	// asserting a policy invariant on top of a pricing bias would have
+	// encoded the bias. The 2026-07-27 phase-aware re-fit removed it —
+	// endgame spend ratio 1.023, skew -5 — so the carve-out is gone with it.
+	for _, sub := range []struct {
+		name string
+		s    *budgetStats
+	}{{"openings pool", &poolS}, {"endgame/extra", &extraS}} {
+		if sub.s.n == 0 {
+			continue
+		}
+		skew, tol := sub.s.deeper-sub.s.shallower, sub.s.n/10
 		if skew < -tol || skew > tol {
-			t.Errorf("one-sided depth skew on the openings pool: asm deeper on %d, mirror deeper on %d "+
+			t.Errorf("one-sided depth skew on the %s subset: asm deeper on %d, mirror deeper on %d "+
 				"(skew %+d, tolerance +-%d of %d): the budget-mode ID drivers disagree on POLICY, "+
-				"not just on cycle pricing", poolS.deeper, poolS.shallower, skew, tol, poolS.n)
+				"not just on cycle pricing", sub.name, sub.s.deeper, sub.s.shallower, skew, tol, sub.s.n)
 		}
 		// Instrument health: on identical trees the mirror's cycle estimate must
 		// track the asm's real spend to the model's documented accuracy.
-		if m := median(poolS.ratios); m < 0.85 || m > 1.15 {
-			t.Errorf("cycle model drift: median asm/mirror spend ratio on identical trees is %.3f "+
-				"(want 0.85..1.15) — every cycle-budget screen is mis-scaled by this factor", m)
+		if m := median(sub.s.ratios); m < 0.85 || m > 1.15 {
+			t.Errorf("cycle model drift on the %s subset: median asm/mirror spend ratio on identical "+
+				"trees is %.3f (want 0.85..1.15) — every cycle-budget screen is mis-scaled by this factor",
+				sub.name, m)
 		}
 	}
 	if allS.sameTree < n/4 {

@@ -18,10 +18,15 @@ which should NOT move if the mechanism is what we think.
 | LMP 3+2d Dmax3 | −104.7 ± 13.7 | −85 ± 14 | −19.7 |
 | SEE atk-fw | +14.4 ± 12.5 | +2 ± 7 | +12.4 |
 | Countermove | +3.8 ± 12.6 | +4 ± 9 | −0.2 |
-| **CONTROL king safety** | **+1.9 ± 14.5** | **−19 ± 13** | **+20.9** |
+| **CONTROL king safety** | **−1.4 ± 12.6** | **−19 ± 13** | **+17.6** |
 
-**THE CONTROL MOVED MORE THAN ANY CANDIDATE.** Every shift is ~1–2σ once
-both intervals are propagated; there is no coherent depth-class pattern.
+(All four features at 2000 games = 4 seeds × 500. Shifts with both
+intervals propagated: LMP −19.7 ± 19.6, SEE +12.4 ± 14.4, countermove
+−0.2 ± 15.5, **CONTROL +17.6 ± 18.1**.)
+
+**THE CONTROL MOVED MORE THAN ANY CANDIDATE** (+17.6 vs SEE's +12.4), and
+**not one shift reaches significance** — every interval contains zero.
+There is no coherent depth-class pattern.
 
 **Verdict: nothing is recovered.** LMP is confirmed dead and if anything
 worse (~−105; a deeper search exposes aggressive pruning errors more, not

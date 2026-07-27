@@ -3,6 +3,156 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-26 — FULL-GAME asm↔mirror parity + quirk audit: CLEAN BILL, no new engine bugs
+
+Motivated by the tt.s mate-zone bug (below): it survived every parity gate
+because when the two engines disagreed, the MIRROR was taught to reproduce the
+asm's behavior (`mirror.Engine.TTPlyQuirk`) instead of anyone asking which
+side was right. Two deliverables: a much stronger parity gate, and an audit of
+every place the mirror models an asm oddity.
+
+### 1. The new gate: `TestFullGameMirrorParity` (internal/chesstest/fullgame_parity_test.go)
+
+Plays **complete games** with both engines configured identically and requires
+the same move, the same score, AND the same tree at **every ply**. Fixed depth
+(budget/cycle modes are not comparable across a 6502 emulator and a Go model);
+dither off; fresh 6502 machine and fresh mirror `Engine` every ply, so there is
+no hidden carry-over — each ply is a pure function of (position, halfmove
+clock, depth, mask) on both sides. The referee (`internal/refchess`) drives the
+game line; a divergence does not end the game, so later plies keep testing.
+
+- Configs: **0x5F** (the shipped gameplay mask, `0x1F|FT_CKEXT`, FEATURES2 0)
+  and **0x1F** (the tier every mirror screen is calibrated on).
+- Starts: all **40** of `tools/openings-pool.epd` plus **31** hand-picked
+  tactical / in-check / pawn-endgame / piece-endgame / near-mate / fortress
+  positions.
+- Compared per ply: best move, root score, and four exact tree fingerprints —
+  `search()` entries, `make()`s, `eval()`s, `makenull()`s — plus (added after
+  the first run) the **QS-node count** (`PLY >= MAXDEPTH` at the asm's search
+  probe vs the mirror's `Cyc.NodesQS + Cyc.NodesEvasion`).
+- Failure output dumps FEN, ply, both moves, both scores, all counters and the
+  deltas. `PARITY_DEPTH/PLIES/STARTS/CFG` scale it; the default is sized for
+  `make test` (~3 min).
+
+**RESULT — depth 4, 30 plies/game, 142 games: 3551/3551 plies EXACT.**
+
+| metric | exact |
+|---|---|
+| best move identical | 3551/3551 |
+| root score identical | 3551/3551 |
+| search-node count | 3551/3551 |
+| make count | 3551/3551 |
+| eval count | 3551/3551 |
+| makenull count | 3551/3551 |
+| QS-node count | 3551/3551 |
+| make-delta histogram | `+0:3551` |
+
+Coverage: **2,471 distinct positions**, 43 plies scored inside the mate zone,
+**43.3 M asm search nodes** emulated (18 min wall on 8 cores). Note the
+histogram: not even the ±1 legality-probe tolerance that
+`TestSearchMirrorParity` allows was needed — the trees are byte-for-byte.
+
+**RESULT — depth 5, 8 plies/game, 142 games: 1030/1030 plies EXACT** on all
+six fingerprints (move, score, nodes, makes, evals, makenull, **QS nodes**),
+642 distinct positions, 26 mate-zone plies, 28.1 M asm search nodes. The
+exactness is depth-independent, as it should be.
+
+### 1b. The QS-tree exactness check (the old 0.9–24× question)
+
+The mirror's quiescence tree was once 0.9–24× the asm's, and that was "fixed"
+by making the mirror's defaults match (`DefaultQS` = recap2). This audit
+verified it directly rather than trusting it: the asm's QS-node count is
+probed as `PLY >= MAXDEPTH` at the `search` label (read live, because check
+extensions mutate MAXDEPTH) and compared to the mirror's. **1030/1030 exact at
+depth 5 and 3551/3551 at depth 4** across both masks, on top of the exact
+node/make/eval counts.
+
+One measurement trap found and fixed *in the harness*: comparing against
+`mirror.Engine.QSNodes` showed deltas of +1..+12 per move on ~53% of plies —
+but that counter sits BELOW the hard ply cap and the 50-move / repetition /
+insufficient-material early returns, so it undercounts QS-ply nodes that bail
+out immediately. The entry-point quantity is `Cyc.NodesQS + Cyc.NodesEvasion`
+(charged at the top of `search()`), and against that the counts are exact.
+Worth knowing before anyone quotes `QSNodes` as "the QS tree size" again.
+
+**FIRST RUN FOUND 3 DIVERGENCES — all traced to ILLEGAL test FENs, not the
+engine.** Three of the hand-written endgame starts had the side NOT to move in
+check (`8/8/4k3/8/8/3K4/8/4R3 w`, `8/2k5/8/8/8/3K4/8/2R2R2 w`, and a
+kings-adjacent one). At such a root a king capture is pseudo-legal, both
+engines' behavior is undefined, and they do diverge (score off by 4 at depth 1,
+different QS trees). Root-caused with the new
+`TestParityDivergenceProbe` (depth ladder + static eval of the root and every
+root child: **no eval mismatch anywhere**, so it was never an eval bug), then
+the FENs were fixed and `playParityGame` now **rejects an illegal start
+loudly** instead of scoring it as an engine divergence.
+
+### 2. New side-gate: `TestPawnlessEvalParity`
+
+510 randomly generated pawnless endgames (KR/KQ/KRR/KBN/KBB/KNN/KRB/KQR/KN/KB,
+both colors, kings never adjacent, illegal positions filtered): **0 static-eval
+mismatches** between the asm and the mirror. Pawnless endgames are the eval
+shape the fixed FEN suites cover least — no pawn-structure term fires, kings
+sit on their back ranks (the open-file penalty applies with no pawns at all),
+and PHASE sits on the insufficient-material boundary.
+
+### 3. The quirk audit — every place the mirror models the asm
+
+| # | quirk / modelled behavior | where | verdict |
+|---|---|---|---|
+| 1 | **TT mate-zone classified with an UNSIGNED compare** (`cmp #$74`) | `asm/tt.s`, modelled as `mirror.TTPlyQuirk` | **BUG** — found and fixed 2026-07-25 (signed zone test). Flag confirmed dead (nothing set it) and **DELETED** this pass, along with its two branches in `ttprobe`/`ttstore`. |
+| 2 | **RFP/futility guard with an UNSIGNED compare** (any negative α or β silently disabled the whole block) | `asm/search.s`, modelled as `Fut.CorrectGuard=false` / `FixFutilityGuard` | **BUG** — already found and fixed (task #34: signed guard + RFP re-margined 120/500). The mirror's *doc comments still described the asm as buggy*; corrected. The false branch stays only as the A/B lever that measured the fix (`cmd/mirror -afix`, `PlayerCfg.FixFutility`). |
+| 3 | **Null-move β guard with an UNSIGNED compare** | `asm/search.s` snonull | Fixed (comment at search.s:459 documents it). All six `MATEZONEHI` compares in the image now branch on `bmi` first — audited, none left unguarded. |
+| 4 | **Doubled-pawn penalty is FLAT per file** (3 pawns on a file cost the same as 2) | `asm/eval.s` `DBLTAB` (12 iff ≥2 rank bits set); `mirror/eval.go` `doubledW++` when `pwcnt>1`; `refPStruct` spec | **INTENTIONAL, and self-consistent.** The Texel tuner tunes `Weights.Doubled` against *exactly this* flat indicator (`Sample.F` comes from `extractPawnFeatures`), so eval and tuning agree; 12 is the best flat coefficient for the indicator. Chess-wise it under-penalizes tripled pawns (rare); changing it to per-extra-pawn would need a re-tune, not a fix. |
+| 5 | **A passed pawn is blocked by an enemy pawn at the SAME rank on an adjacent file** | `WBLOCKM` includes the pawn's own rank bit; mirror `max3(pbmax) < r` | **ARGUABLE** (conservative, non-standard: a black pawn on d5 cannot stop a white pawn on e5). Identical on both sides and baked into the Texel features, so it is a design choice, not a divergence. Revisiting it is a re-tune. |
+| 6 | **Only the most advanced pawn per file is tested for passed status** | both | INTENTIONAL (standard; avoids double-counting a doubled passer). |
+| 7 | **King shield/open-file only when the king is on its OWN back rank** | both + `refPStruct` | ARGUABLE simplification (a king on g2 after h3/Kh2 gets no shield). Identical on both sides. Note the open-file −4 also applies in a totally pawnless position. |
+| 8 | **Mate delivered exactly on the 100th halfmove scores as a draw** | `asm/search.s` (comment: "Nuance accepted"), same in mirror | ARGUABLE, documented, identical on both sides. |
+| 9 | Lazy legality fast path; conservative `CLSPRES` class bits; conservative PDIRTY deferral | `asm/search.s`, `asm/board.s`, `defs.inc` | INTENTIONAL — pure optimizations with identical results; the mirror deliberately does not model them, and the exact tree match proves they are results-neutral. |
+| 10 | "A pseudo-legal node can have captured a king" defensive checks | `mirror/mopup.go`, `endgame.go`, `midgame.go` | INTENTIONAL defensive code. Confirmed unreachable from a LEGAL root (the legality test guarantees the child's side to move cannot capture a king); reachable only from an illegal root, which is exactly where the first run's three false divergences came from. |
+| 11 | `DefaultWeights` once drifted from the asm's retuned immediates | `mirror/eval.go` | Historical BUG, already fixed; now matches `refPStruct` exactly. |
+| 12 | `DefaultQS` = recap2 is the asm's shape; the **zero value is UNLIMITED QS** | `mirror/engine.go` | The shape itself is INTENTIONAL. But see the finding below — the zero-value trap is live. |
+
+### 4. FILED (not fixed): two model gaps that no parity gate covers
+
+**(a) `PlayerCfg.QS` zero-value trap — mirror-side, affects screens, not the
+ship.** `PlayerCfg.engine()` does `e.QS = c.QS` UNCONDITIONALLY, so a screen
+that omits `QS: DefaultQS` silently measures an engine with UNLIMITED
+quiescence instead of the asm's recap2 — the failure mode `search_parity_test.go`
+already names, and the one that corrupted the Texel corpus until the
+2026-07-23 `GenerateData` fix. Still omitted today by **`budget_test.go`,
+`effort_test.go`, `ordering_test.go`, `mopup_match_test.go`,
+`mopup_conversion_test.go`, `search_test.go`**. Their A/B sides share the same
+wrong QS so the *deltas* remain internally valid, but the absolute engine they
+screen is not the shipped one. A warning is now on the field; the real fix
+(treat the zero value as `DefaultQS` and add an explicit `QSUnlimited` opt-in)
+changes those screens' numbers and so was left to a deliberate decision.
+
+**(b) Budget-mode ID divergences (mirror vs asm driver).** Every asm↔mirror
+gate is fixed-depth, so these are invisible to all of them:
+1. `asm/engine.s idok` STOPS iterative deepening as soon as a completed
+   iteration returns a WINNING mate; `mirror.SearchBudget` /
+   `SearchCycleBudget` / `SearchTimed` keep deepening and spend the budget.
+2. The asm's hard abort is **2× BUDGET** with a PREDICTIVE soft gate
+   (`now + 2*last-iteration-cost <= BUDGET`); the mirror hard-aborts at **1×**
+   with a cumulative halfway gate — so for the same nominal budget the mirror
+   buys a slightly SHALLOWER ID than the asm does.
+   Both are now documented at `mirror.SearchBudget`.
+
+### 5. Verdict
+
+No new engine bug. Across **4,581 plies (3,551 at depth 4 + 1,030 at depth 5)
+/ 3,113 distinct positions / 71.4 M emulated search nodes** at the shipped mask
+and the plain mask, the asm and the
+mirror are identical in move, score and tree, with zero tolerance. Combined
+with the pawnless eval sweep and the re-audited mate-zone compares, the mirror
+is currently a faithful model of the shipped engine on every fixed-depth path.
+The remaining known infidelities are the two budget-mode gaps above, which are
+now written down instead of being discovered again.
+
+**Process rule established** (also in docs/testing.md): when the asm and the
+mirror disagree, find out which side is right. NEVER add a flag that teaches
+the mirror to reproduce an asm oddity.
+
 ## 2026-07-26 — ★★ CONFIRMED DECISIVE across 600 games: +110 Elo (335-151-114)
 
 A second, INDEPENDENT 300-game match — this one STANDARD-START, so both

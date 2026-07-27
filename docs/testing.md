@@ -131,6 +131,23 @@ SETKBD/SETVID/INIT/HOME first, like a real boot.
   the engine emits in self-play against an independent Go chess library.
   All run via `go test` — there is no CI yet (see Known infrastructure
   gaps below).
+- **asm↔mirror parity** (the faithfulness gates): `TestSearchMirrorParity`
+  (root positions, masks 0x00/0x07/0x08/0x1f) and `TestCheckExtMirrorParity`
+  (FT_CKEXT on/off) compare the asm and `internal/mirror` at fixed depth on
+  best move, score and make count. `TestFullGameMirrorParity`
+  (`fullgame_parity_test.go`) is the STRONG version: it plays COMPLETE GAMES
+  with both engines configured identically (shipped 0x5F and plain 0x1F,
+  dither off, fresh TT/killers each ply) from the 40 `tools/openings-pool.epd`
+  starts plus 31 tactical/endgame/near-mate starts, and requires the same
+  move, the same score AND the same tree (search-node / make / eval /
+  makenull counts) at every ply. Env knobs `PARITY_DEPTH` / `PARITY_PLIES` /
+  `PARITY_STARTS` / `PARITY_CFG` scale it; the default is sized for
+  `make test`. Rationale: the fixed-FEN gates are what let the tt.s unsigned
+  mate-zone bug survive for weeks (it was modelled into the mirror as a
+  "quirk" flag instead of being investigated). A game walk generates
+  positions nobody chose, in score ranges (mates, 50-move, insufficient
+  material) a FEN list never reaches. NEVER add a flag that teaches the
+  mirror to reproduce an asm oddity — find out which side is right.
 - **UCI bridge** (`cmd/uci`, `internal/ucibridge`): a long-lived Go
   process that speaks UCI to cutechess-cli, tracks position on the Go
   side, and pokes each move's position directly into a fresh `Machine`

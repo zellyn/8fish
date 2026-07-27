@@ -79,11 +79,11 @@ func mirrorCkExtRun(t *testing.T, fen string, depth int, on bool) (string, int, 
 	if on {
 		me.CheckExt = mirror.CheckExtParams{MaxExt: 1}
 	}
-	// TTPlyQuirk stays OFF: asm/tt.s' unsigned hi >= $74 mate classification
-	// (which ply-shifted every NEGATIVE stored score) was fixed to a signed
-	// zone test, so the mirror's own signed-correct ttstore/ttprobe is now
-	// the byte-faithful model. Both engines are node-for-node and
-	// store-for-store identical again, with and without extensions.
+	// (asm/tt.s' unsigned hi >= $74 mate classification, which ply-shifted
+	// every NEGATIVE stored score, was fixed to a signed zone test; the
+	// mirror's TTPlyQuirk model of it is deleted. Both engines are
+	// node-for-node and store-for-store identical, with and without
+	// extensions.)
 	me.CycleTrack = true
 	me.SetPosition(mp)
 	mb, ms := me.SearchFixed(depth)

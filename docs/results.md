@@ -3,6 +3,79 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — ★ THE MULTI-ITERATION TT DIVERGENCE IS CLOSED: it was the tt.s unsigned mate-zone compare, already fixed. Two new gates now cover the hole.
+
+The last unexplained asm↔mirror divergence — "past ~depth 6, in
+multi-iteration ID, same best move and same score but DIFFERENT node/make
+counts, present even at mask 0x00" (recorded during the 2026-07-21
+aspiration port, never root-caused) — is **not open, and not a design
+difference. It was the asm/tt.s UNSIGNED mate-zone compare** (`cmp #$74`
+on the score's high byte, ply-shifting every NEGATIVE stored score),
+fixed 2026-07-26 in ec9646a/4228474.
+
+**Current state: EXACT.** Both engines were run through real iterative
+deepening (1,2,…,N) at a budget large enough that only the depth cap
+stops them, and compared iteration by iteration:
+
+| gate | coverage | result |
+|---|---|---|
+| TestIDIterationParity (default) | 66 (mask, position) pairs, masks 0x00/0x1f/0x5f, caps 5/7/7, **399 completed iterations** | 0 tree, 0 move, 0 score divergences |
+| same, deepened to cap 9 | 54 pairs, 362 iterations | 0 divergences |
+| TestTTSequenceParity (default) | ID depth 5, all three masks: **150,041 TT operations** (89,380 stores, 10,793 probe hits) | every operation identical |
+| same, ID depth 6 | **389,276 TT operations** (228,146 stores, 31,704 probe hits) | identical in op, hash, ply, move, ply-adjusted score, and packed depth\|bound |
+
+**Proof it was the tt.s bug, not something still live.** Reintroducing
+that exact defect on the MIRROR side (unsigned `hi >= $74` in
+ttstore/ttprobe, nothing else changed) reproduces the reported signature
+to the letter (4 of 12 probed mask×position pairs go dirty at cap 6):
+
+```
+plain-0x1f  8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1   DIVERGES at iteration 6
+    iter 1: asm n=19    mk=34    | mirror n=19    mk=34
+    iter 2: asm n=122   mk=187   | mirror n=122   mk=187
+    iter 3: asm n=355   mk=485   | mirror n=355   mk=485
+    iter 4: asm n=571   mk=661   | mirror n=571   mk=661
+    iter 5: asm n=590   mk=693   | mirror n=590   mk=693
+    iter 6: asm n=2246  mk=2712  | mirror n=2395  mk=2882   <<<
+    asm b4f4/96 d6 | mirror b4f4/96 d6        (same move, same score)
+```
+
+Iterations 1–5 are byte-identical and iteration 6 is not; the root move
+and score still agree; it reproduces at mask **0x00**, where the TT is the
+only state carried between iterations (778,956 vs 779,022 nodes on the
+0x00 middlegame row — a 0.008% drift). At the shipped 0x5f mask it bites
+one iteration EARLIER (iteration 5) — which is exactly why the aspiration
+harness's second recorded finding ("at 0x1f|FT_CKEXT the multi-iteration
+ID trees diverge in make count, same move, same score … present on 41 of
+50 ckext rows" at maxD 5, filed as an unexplained check-extension/TT
+interaction) fired at ckext while 0x1f looked clean at that cap. That was
+**the same bug, one iteration earlier**, not a second defect. Both
+historical findings are now accounted for by one cause, and the ckext
+finding can be struck.
+
+**Why every gate missed it, and what now doesn't.** TestFullGameMirrorParity
+is a single `iterate` at the cap (no TT survives into a later iteration)
+AND runs at depth 4 by default — blind twice over. TestBudgetModeParity
+runs real ID but compares only final totals on the subset where both sides
+happened to buy the same depth, with the cycle model's ±12% deciding that
+subset. The new gates close both holes:
+
+- **TestIDIterationParity** — real ID on both engines; cumulative
+  node/make/eval counts must match **exactly after every completed
+  iteration** of the common prefix, so the cycle model's stop decision
+  can neither mask nor manufacture a divergence. Masks 0x00/0x1f/0x5f.
+  Vacuity-guarded: ≥80% of pairs must compare ≥4 iterations, and a
+  one-iteration run is only accepted when BOTH engines took the
+  winning-mate stop.
+- **TestTTSequenceParity** — every TT operation, in order, with operands,
+  diffed against the asm probed at `tthit`/`ttfmiss`/`tsgo`. Sensitivity
+  measured: with the historical bug reintroduced it fails on operation
+  **#1** of some positions (`asm store … score=-88` vs `mirror … score=-87`
+  at ply 1) instead of at iteration 6 of a 780k-node search.
+
+No asm change was needed and none was made. The mirror needed no
+behavioural change either — only two nil-default test taps
+(`Engine.IterHook`, `Engine.TTHook`).
 ## 2026-07-27 — Deep optimization round 5, target selection: the profile is FLAT (four near-equal quarters)
 
 Re-profiled the whole search at the **shipped** gameplay config (FEATURES

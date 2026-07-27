@@ -41,6 +41,16 @@ import (
 // function of (position, halfmove clock, depth, feature mask) on both sides.
 // Budget/cycle modes are deliberately NOT used - they are not comparable
 // across a 6502 emulator and a Go model.
+//
+// WHAT THIS GATE STRUCTURALLY CANNOT SEE: cross-iteration state. "Fresh state
+// every ply" plus a single `iterate` at the cap means no TT entry ever
+// survives into a later ID iteration here, so a divergence in what the TT
+// CARRIES FORWARD is invisible to it no matter how many plies it plays. That
+// hole let a real one live from 2026-07-21 to 2026-07-27 (it was the same
+// unsigned mate-zone compare, seen only past ~depth 6 in ID). It is now
+// covered by TestIDIterationParity and TestTTSequenceParity (idparity_test.go,
+// ttseq_test.go), which run REAL iterative deepening on both engines and
+// compare per-iteration trees and the TT operation sequence itself.
 // ---------------------------------------------------------------------------
 
 // parityConfig is one (FEATURES, FEATURES2) tier to run games under, with the

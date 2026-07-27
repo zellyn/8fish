@@ -1,5 +1,7 @@
 package mirror
 
+import "fmt"
+
 // SearchFixed runs one full-window fixed-depth search (the asm driver's
 // fixed-depth mode: a single iterate at the cap). It returns the root
 // best move (NoMove if no legal moves) and the root score.
@@ -69,6 +71,9 @@ func (e *Engine) SearchBudget(budget uint64, maxDepth int) (Move, int) {
 			e.NodeBudget = budget * 2
 		} else {
 			e.NodeBudget = 0 // depth 1 always completes
+		}
+		if e.IterHook != nil {
+			e.IterHook(d)
 		}
 		iterStart := e.Nodes
 		e.aspIterate(d, bestScore) // window seeded by the last completed score
@@ -147,6 +152,9 @@ func (e *Engine) SearchCycleBudget(budget uint64, maxDepth int) (Move, int) {
 			e.CycleBudget = budget * 2
 		} else {
 			e.CycleBudget = 0 // depth 1 always completes (cyc stays on)
+		}
+		if e.IterHook != nil {
+			e.IterHook(d)
 		}
 		iterStart := e.Cyc.Est
 		e.aspIterate(d, bestScore) // window seeded by the last completed score
@@ -912,6 +920,9 @@ func (e *Engine) ttprobe() (*ttEntry, int, bool) {
 	p := &e.Pos
 	ent := &e.tt[ttIndex(p.Hash)]
 	if ent.depthBound&3 == 0 || ent.verify != p.Hash>>8 {
+		if e.TTHook != nil {
+			e.TTHook(TTOp{Op: TTProbeMiss, Hash: p.Hash, Ply: p.Ply})
+		}
 		return nil, 0, false
 	}
 	// Mate scores are stored node-relative (asm tt.s ttadj: the SIGNED
@@ -922,7 +933,44 @@ func (e *Engine) ttprobe() (*ttEntry, int, bool) {
 	} else if score <= nmateZoneHi {
 		score += p.Ply
 	}
+	if e.TTHook != nil {
+		e.TTHook(TTOp{Op: TTProbeHit, Hash: p.Hash, Ply: p.Ply, From: ent.from,
+			To: ent.to, Score: int16(score), DepthBound: ent.depthBound})
+	}
 	return ent, score, true
+}
+
+// TTOp is one transposition-table operation, reported through Engine.TTHook.
+// It is the mirror-side twin of probing asm/tt.s at `ttprobe` / `tthit` /
+// `ttfmiss` / `tsgo`, so a harness can diff the two engines' TT operation
+// SEQUENCES rather than only their aggregate tree sizes. Score is the value
+// as the engine sees it at this node — ply-ADJUSTED on a probe hit, and
+// ply-adjusted to node-relative form on a store, exactly as the asm's
+// TTENTRY+5/6 reads at `tthit` / `tsgo`.
+type TTOp struct {
+	Op         byte
+	Hash       uint32
+	Ply        int
+	From, To   byte
+	Score      int16
+	DepthBound byte
+}
+
+// TT operation kinds for TTOp.Op.
+const (
+	TTProbeMiss byte = iota
+	TTProbeHit
+	TTStore
+)
+
+func (o TTOp) String() string {
+	name := [...]string{"miss ", "hit  ", "store"}[o.Op]
+	s := fmt.Sprintf("%s hash=%08x ply=%d", name, o.Hash, o.Ply)
+	if o.Op != TTProbeMiss {
+		s += fmt.Sprintf(" from=%02x to=%02x score=%d depth=%d bound=%d",
+			o.From, o.To, o.Score, o.DepthBound>>2, o.DepthBound&3)
+	}
+	return s
 }
 
 // ttstore writes an always-replace entry; depth = MaxDepth - Ply
@@ -948,11 +996,16 @@ func (e *Engine) ttstore(bound int, from, to byte, score int) {
 	} else if score <= nmateZoneHi {
 		score -= p.Ply
 	}
-	e.tt[ttIndex(p.Hash)] = ttEntry{
+	ent := ttEntry{
 		verify:     p.Hash >> 8,
 		from:       from,
 		to:         to,
 		score:      int16(score),
 		depthBound: byte(depth)<<2 | byte(bound),
 	}
+	if e.TTHook != nil {
+		e.TTHook(TTOp{Op: TTStore, Hash: p.Hash, Ply: p.Ply, From: from, To: to,
+			Score: ent.score, DepthBound: ent.depthBound})
+	}
+	e.tt[ttIndex(p.Hash)] = ent
 }

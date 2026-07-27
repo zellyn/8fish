@@ -117,6 +117,24 @@ type Engine struct {
 	// AspWindows counts iterations that opened a narrow aspiration window;
 	// AspFailLow/AspFailHigh count the fails that forced a re-search.
 	AspWindows, AspFailLow, AspFailHigh uint64
+	// IterHook, when set (tests/measurement only), is called at the TOP of
+	// every iterative-deepening iteration in SearchBudget /
+	// SearchCycleBudget, with the depth about to be searched. It is the
+	// mirror-side analogue of probing the asm driver's `iterate` label, and
+	// exists so a parity harness can compare the two engines
+	// ITERATION BY ITERATION instead of only on the final totals (see
+	// TestIDIterationParity in internal/chesstest). nil (the default) is a
+	// byte-identical no-op.
+	IterHook func(depth int)
+
+	// TTHook, when set (tests/measurement only), is called for EVERY
+	// transposition-table operation — probe miss, probe hit, and store — in
+	// the order the search performs them. It is the mirror-side twin of
+	// probing asm/tt.s at `ttfmiss` / `tthit` / `tsgo`, so a harness can diff
+	// the two engines' TT operation SEQUENCES and name the first disagreeing
+	// operation. nil (the default) is a byte-identical no-op.
+	TTHook func(op TTOp)
+
 	// CompletedDepth is the depth of the last COMPLETED ID iteration in the
 	// most recent SearchBudget/SearchCycleBudget call (the effective depth
 	// the budget bought). 0 if only depth 1 ran.

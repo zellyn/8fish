@@ -3,6 +3,50 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — ★ COMPRESSION MECHANISM FOUND AND FIXED: the mirror's budgeted ID was shallower than the ship's
+
+The residual "mirror over-promises" effect finally has a measured cause.
+The mirror's budgeted iterative deepening differed from the asm's in
+three ways: no mate stop; hard abort at 1× budget (asm: **2×**); and a
+CUMULATIVE halfway start-gate where the asm uses a **PREDICTIVE** one
+("start iff now + 2×last_iteration_cost < budget"). Net: at the same
+budget the mirror bought a systematically SHALLOWER search than the
+engine. Invisible to every gate — they are all fixed-depth — while every
+cycle-budget SCREEN runs exactly this path.
+
+**BLAST RADIUS, measured on a feature whose truth we know.** Re-ran the
+check-extension screen, same seeds, 2000 games/arm:
+
+| instrument | reading |
+|---|---|
+| pre-fix mirror | **+0.5 ± 12.7** |
+| corrected mirror | **+19.7 ± 12.6** |
+| asm SPRT (truth) | **+24 ± 23** |
+
+The corrected instrument lands on the truth; the old one read ~ZERO for
+a feature genuinely worth +24. All 4 seeds moved up. (Honest caveat: at
+2000 g/arm the shift +19.1 ± 17.9 is only marginally significant on its
+own — the 4/4 sign agreement carries most of the evidence.)
+
+So the compression story now has FOUR measured mechanisms, not a vibe:
+node-budget bias (proven), stale mirror defaults (fixed), ordering
+context (LMP +39→−85), and this. Plus the tt.s TT bug as a fifth
+candidate still under test.
+
+**New gate: TestBudgetModeParity** (284 positions) compares completed
+depth, move, score, trees and spend against the asm with justified
+tolerances. It FAILS on the pre-fix mirror (54.6% exact depth, pool skew
++53) and passes corrected (82.4%, skew +3) — it would have caught this.
+Note budgeted screens now legitimately spend up to 2× budget per move
+(the ship's real behaviour), so they take longer.
+
+**BONUS FINDING (filed, not fixed): the cycle model over-prices ENDGAME
+nodes ~30%.** On identical trees Cyc.Est/real is 0.999 on the openings
+pool but **0.776 on endgames/near-mate** — so budgeted screens run
+shallower than the ship precisely where 29% of our losses live. A
+DefaultCycleCosts re-fit; the new gate's skew assertion is deliberately
+scoped to the fit region so this cannot be silently absorbed.
+
 ## 2026-07-27 — INSTRUMENT FIX: budgeted mirror ID now matches the asm driver; new BUDGET-MODE parity gate
 
 The 2026-07-26 audit filed (but did not fix) a divergence in the mirror's

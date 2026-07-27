@@ -237,21 +237,28 @@ agreement, one-sided skew +35/-0 -> -5.
 
 ## Known limitations
 
-1. **Per-op costs still vary with FEATURES.** `make` is more expensive when
+1. **What the residual still is.** Across the 69 rows the shipped model's
+   relative error correlates with material at **r = −0.14** — i.e. essentially
+   not at all, which is the whole point of the exercise — and with generation
+   intensity (makes per generate call) at only r = +0.21. What is left is
+   mostly the per-MASK offsets below plus position-specific noise: the four
+   largest residuals are three mask-0x07 middlegames and one mask-0x00
+   16-piece ending.
+2. **Per-op costs still vary with FEATURES.** `make` is more expensive when
    `FtPstruct` is on (pawnterm runs inside make), and the model is
    deliberately mask-independent, which shows up as the per-mask grand-total
    spread (−3.9% / +4.1% / −1.4%). A per-mask cost table would fit better
    and would make cross-mask comparisons less honest; not done.
-2. **Collinearity.** The operation counts are near-proportional, so the
+3. **Collinearity.** The operation counts are near-proportional, so the
    split between `Node`, `make` and `eval` is not uniquely identifiable
    (hence `Node = 0`). The chosen point is corroborated by the independent
    per-file profile; individual coefficients should still not be read as
    pure per-routine costs.
-3. **The material term is per NODE only.** `make` and `eval` also get
+4. **The material term is per NODE only.** `make` and `eval` also get
    cheaper with less material; the fit says modelling that explicitly buys
    ~0.2 points of RMS, so their material dependence stays absorbed in the
    node term. If eval grows a lot of per-piece work, revisit.
-4. **Absolute Est is a mirror-internal quantity.** It is valid for A/B
+5. **Absolute Est is a mirror-internal quantity.** It is valid for A/B
    budgeting (both sides costed identically) and for feature-cost fractions;
    it is not a prediction of the asm's wall time, and the mirror is one
    search-shape change away from tracking the asm less exactly than it does

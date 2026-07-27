@@ -140,6 +140,16 @@ func main() {
 	lg("=== sargon-symmatch: %d game(s), budget B=%d cyc (%d ms), book=%v, mode=%s, symmetric ponder ===",
 		*games, *budget, *budget/cyclesPerMs, *usebook, mode)
 
+	// Sargon III cannot record a game longer than 127 full moves: at move 128 its
+	// move-list numbering restarts at 1 and its screen record — the only
+	// ponder-immune way to read its replies — becomes fiction. Both games in the
+	// 300-game 2026-07 run that reached move 128 broke there. Adjudicate first.
+	if *maxMoves > sargon.MaxSargonMoves {
+		lg("NOTE: -max-moves %d exceeds Sargon III's %d-move move-list capacity; clamping",
+			*maxMoves, sargon.MaxSargonMoves)
+		*maxMoves = sargon.MaxSargonMoves
+	}
+
 	var wins, losses, draws int
 	var sess timeAcct // whole-session 8fish own-move spend vs intended budget
 	for g := 0; g < *games; g++ {
@@ -476,7 +486,17 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		gameNo, sargonWhite, hard, strings.TrimSpace(m.TextRow(3)), fen, budget)
 
 	eng.newGame()
-	var moves []string // UCI move list from the opening position
+	var moves []string              // UCI move list from the opening position
+	var hist []sargon.HistMove      // same plies, in move-list cross-check form
+	nextDump := 2 * screenDumpEvery // ply at which the next periodic capture is due
+	// Move-list ply number our hist[0] occupies. CTRL-A setup clears Sargon's list
+	// and renumbers from 1 (verified: internal/sargon TestSetupResetsMoveList), so
+	// POOL games are cross-checkable too — but a Black-to-move setboard position
+	// puts our first recorded move in the BLACK column of row 1, i.e. list ply 2.
+	firstPly := 1
+	if ref.SideToMove() != 0 {
+		firstPly = 2
+	}
 
 	// If Sargon is White it moves first (CTRL-S). SetupPosition-based games in the
 	// pool are all white-to-move, so a Sargon-White game means Sargon opens.
@@ -488,8 +508,9 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 			return adjudicate(lg, gameNo, ref, m, false)
 		}
 		s := screenTokenToCoord(res.SargonText, true, ref)
-		if s == "" || !applyMove(ref, seen, s) {
+		if s == "" || !applyMove(ref, seen, &hist, s) {
 			lg("GAME %d: sargon opening move unreadable/illegal token=%q", gameNo, res.SargonText)
+			lg("%s", m.ScreenDump(fmt.Sprintf("g%d opening unreadable", gameNo)))
 			return resDraw
 		}
 		moves = append(moves, s)
@@ -499,6 +520,9 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		}
 		lg("MOVE g%d ply1 SARGON(open) move=%s think=%d sargon_instant=%v (no 8fish ponder: opening)",
 			gameNo, s, res.ThinkCycles, sargonInstant(res.ThinkCycles, budget))
+		if !crossCheck(lg, gameNo, 1, m, hist, firstPly) {
+			return resDraw
+		}
 		if term, r := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
 			return r
 		}
@@ -528,7 +552,7 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		lg("BANK g%d ply%d move=%s book=%v opening=%q income=%d alloc=%d spent=%d spent_over_income=%.4f bank_after=%d next_alloc=%d",
 			gameNo, len(moves)+1, sr.move, sr.book, sr.opening, budget, alloc, sr.cycles,
 			float64(sr.cycles)/float64(budget), clock.Bank(), clock.Alloc())
-		if !applyMove(ref, seen, sr.move) {
+		if !applyMove(ref, seen, &hist, sr.move) {
 			lg("MOVE g%d 8fish played illegal-to-referee move %q — aborting", gameNo, sr.move)
 			return resDraw
 		}
@@ -553,6 +577,11 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		if err != nil {
 			// No reply: Sargon may report game over (mate/stalemate/draw) on screen.
 			lg("MOVE g%d sargon no reply to %s: %v (msg=%q)", gameNo, sr.move, err, reply.Message)
+			lg("%s", m.ScreenDump(fmt.Sprintf("g%d no-reply ply%d", gameNo, usPly)))
+			return adjudicate(lg, gameNo, ref, m, false)
+		}
+		// Our move must have landed in Sargon's own record exactly as we played it.
+		if !crossCheck(lg, gameNo, usPly, m, hist, firstPly) {
 			return adjudicate(lg, gameNo, ref, m, false)
 		}
 		if reply.GameOver && reply.SargonText == "" {
@@ -560,9 +589,14 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 			return adjudicate(lg, gameNo, ref, m, false)
 		}
 		s := screenTokenToCoord(reply.SargonText, sargonWhite, ref)
-		if s == "" || !applyMove(ref, seen, s) {
+		if s == "" || !applyMove(ref, seen, &hist, s) {
 			lg("MOVE g%d sargon reply unreadable/illegal token=%q msg=%q — adjudicating",
 				gameNo, reply.SargonText, reply.Message)
+			lg("DESYNC g%d our history: %s", gameNo, sargon.HistoryString(hist))
+			lg("%s", m.ScreenDump(fmt.Sprintf("g%d unreadable-reply ply%d", gameNo, usPly+1)))
+			return adjudicate(lg, gameNo, ref, m, false)
+		}
+		if !crossCheck(lg, gameNo, usPly+1, m, hist, firstPly) {
 			return adjudicate(lg, gameNo, ref, m, false)
 		}
 
@@ -594,12 +628,26 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 			gameNo, usPly, sr.move, sr.cycles, sr.cycles,
 			sargonPly, s, reply.ThinkCycles, ponderCyc, sr.ponder, hit, sr.book, instant)
 
+		// Periodic full-screen capture: cheap (~1 KB of emulator RAM) and the only
+		// record of what SARGON thought the game was. Framed for grepping. Keyed on
+		// a ply counter, not len(moves)%2: when Sargon is White the move list is an
+		// ODD number of plies long after its reply, so a parity test would never
+		// fire for half the games.
+		if len(moves) >= nextDump {
+			lg("%s", m.ScreenDump(fmt.Sprintf("g%d periodic ply%d", gameNo, len(moves))))
+			nextDump = len(moves) + 2*screenDumpEvery
+		}
+
 		if term, r := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
 			lg("MOVE g%d after sargon %s -> %s (msg=%q)", gameNo, s, r, reply.Message)
 			return r
 		}
 	}
 }
+
+// screenDumpEvery is how often (in full moves) the whole Sargon text screen is
+// captured into the match log.
+const screenDumpEvery = 10
 
 // sargonInstant reports whether a Sargon reply came WITHOUT spending its budget:
 // its own opening book (or a single forced legal reply) commits the move as soon
@@ -637,18 +685,62 @@ func runSargonCycles(m *sargon.Machine, cycles uint64) {
 	}
 }
 
-// applyMove applies a UCI move to the referee and bumps the repetition count.
+// applyMove applies a UCI move to the referee, bumps the repetition count, and
+// appends the ply to hist — our record of the game, which is cross-checked
+// against SARGON's own on-screen move list after every ply (see crossCheck).
 // Returns false if the move is illegal in the referee position.
-func applyMove(ref *refchess.Position, seen map[uint64]int, uci string) bool {
+func applyMove(ref *refchess.Position, seen map[uint64]int, hist *[]sargon.HistMove, uci string) bool {
 	mv, err := refchess.ParseMove(uci)
 	if err != nil {
 		return false
 	}
+	h := histMove(ref, mv)
 	if err := ref.Make(mv); err != nil {
 		return false
 	}
 	seen[ref.ZobristKey()]++
+	*hist = append(*hist, h)
 	return true
+}
+
+// histMove records mv (legal in p, BEFORE it is made) in the minimal form the
+// move-list cross-check needs: from/to squares, plus the two forms Sargon prints
+// WITHOUT squares — castling ("0-0"/"0-0-0") and en passant ("PXPEP").
+func histMove(p *refchess.Position, mv refchess.Move) sargon.HistMove {
+	uci := mv.String()
+	h := sargon.HistMove{From: uci[0:2], To: uci[2:4]}
+	switch strings.TrimRight(p.SAN(mv), "+#") {
+	case "O-O":
+		h.Castle = "O-O"
+	case "O-O-O":
+		h.Castle = "O-O-O"
+	}
+	for _, ep := range p.EnPassantCaptures() {
+		if ep.From == mv.From && ep.To == mv.To {
+			h.EnPassant = true
+		}
+	}
+	return h
+}
+
+// crossCheck compares SARGON's own displayed move list with our history. They
+// must agree move for move; if they ever diverge, every later read of Sargon's
+// screen is fiction and the game is unusable. Logs LOUDLY (both histories, the
+// exact first differing ply, and a full screen dump) and reports whether the
+// game may continue.
+//
+// This is the alarm that would have caught the 2026-07 stale-token desync at the
+// ply it happened rather than as a mystery "illegal token" moves later.
+func crossCheck(lg func(string, ...any), gameNo, ply int, m *sargon.Machine, hist []sargon.HistMove, firstPly int) bool {
+	ok, bad, detail := m.CrossCheckHistory(hist, firstPly)
+	if ok {
+		return true
+	}
+	lg("DESYNC g%d ply%d *** SARGON MOVE LIST DISAGREES WITH OURS *** first bad ply %d: %s",
+		gameNo, ply, bad, detail)
+	lg("DESYNC g%d our history: %s", gameNo, sargon.HistoryString(hist))
+	lg("%s", m.ScreenDump(fmt.Sprintf("desync g%d ply%d", gameNo, ply)))
+	return false
 }
 
 // terminal reports whether the game is over from the referee's view (the
@@ -912,6 +1004,11 @@ func coordToSargon(coord string) (string, error) {
 // ref may be nil only for the square-bearing forms (e.g. the runConfirm probe).
 func screenTokenToCoord(tok string, sargonWhite bool, ref *refchess.Position) string {
 	t := strings.ToUpper(strings.TrimSpace(tok))
+	// Sargon appends "+" for check (observed: "F5-F4+", "H4-H1+"). The FROM-TO
+	// forms below index fixed offsets and are unaffected, but the square-less
+	// castling tokens are matched WHOLE — so a castle that gives check ("O-O-O+")
+	// must have the marker stripped first or it reads as unparseable.
+	t = strings.TrimSuffix(t, "+")
 	switch t {
 	case "0-0", "O-O":
 		if sargonWhite {

@@ -306,6 +306,14 @@ func (e *engine) trackApply(coord string) {
 	}
 }
 
+// uniqueEnPassant returns the tracked position's only legal en-passant capture
+// in UCI notation, or "" if the tracker is invalid or the capture is ambiguous.
+func (e *engine) uniqueEnPassant() string {
+	e.tmu.Lock()
+	defer e.tmu.Unlock()
+	return e.tracker.uniqueEnPassant()
+}
+
 // findDrawingMove asks the referee history for a legal move (for the side to
 // move) that forces a draw cutechess will recognize. Returns "" if none.
 func (e *engine) findDrawingMove() (coord string, count int, reason string) {
@@ -429,6 +437,15 @@ func (e *engine) replyCoord(res sargon.MoveResult) string {
 	// Sargon displays (with promotion "/Q" and capture "X"), read at commit
 	// time. The 8-char scrape window captures promotions in full. Use it first;
 	// fall back to the RAM from/to decode only if the token can't be parsed.
+	// En passant is the one capture Sargon records with NO squares ("PXPEP"), so
+	// the token alone cannot name it. Resolve it against the referee history —
+	// there is almost always exactly one legal e.p. capture — rather than falling
+	// through to the RAM piece-list decode, which is search scratch in Hard Mode.
+	if _, _, kind, ok := sargon.TokenSquares(res.SargonText); !ok && kind == "EP" {
+		if c := e.uniqueEnPassant(); c != "" {
+			return c
+		}
+	}
 	if c := screenTokenToCoord(res.SargonText, sw); c != "" {
 		return c
 	}
@@ -449,6 +466,9 @@ func (e *engine) replyCoord(res sargon.MoveResult) string {
 // "h7h8q", "e1g1", ...). Returns "" if it can't parse.
 func screenTokenToCoord(tok string, sargonWhite bool) string {
 	t := strings.ToUpper(strings.TrimSpace(tok))
+	// Strip Sargon's check marker before matching the square-less castling
+	// tokens whole: "O-O-O+" would otherwise fall through as unparseable.
+	t = strings.TrimSuffix(t, "+")
 	switch t {
 	case "0-0", "O-O": // kingside castle
 		if sargonWhite {

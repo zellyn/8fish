@@ -124,12 +124,15 @@ type MoveResult struct {
 // illegal or no reply appears in time.
 func (m *Machine) SubmitMove(move string, maxThinkSteps uint64) (MoveResult, error) {
 	var res MoveResult
-	mid, prevReply, err := m.enterMove(move)
+	// Sargon's newest move-list entry BEFORE our move is typed (see RequestMove
+	// for why the baseline must be taken here, not after enterMove).
+	baseNo, _, _ := m.LastSargonEntry()
+	mid, err := m.enterMove(move)
 	if err != nil {
 		return res, err
 	}
 	thinkStart := m.Cycles()
-	replied := m.waitReply(prevReply, maxThinkSteps)
+	replied := m.waitReply(baseNo, maxThinkSteps)
 	res.ThinkCycles = m.Cycles() - thinkStart
 	if !replied {
 		res.Message, res.GameOver = m.scrapeMessage()
@@ -138,7 +141,7 @@ func (m *Machine) SubmitMove(move string, maxThinkSteps uint64) (MoveResult, err
 		}
 		return res, fmt.Errorf("no reply from sargon within %d steps after move %q", maxThinkSteps, move)
 	}
-	return m.decodeReply(res, mid), nil
+	return m.decodeReply(res, mid, baseNo), nil
 }
 
 // RequestMove is the fair-match primitive: it enters the opponent's move, gives
@@ -153,8 +156,8 @@ func (m *Machine) SubmitMove(move string, maxThinkSteps uint64) (MoveResult, err
 func (m *Machine) RequestMove(move string, budgetCycles uint64) (MoveResult, error) {
 	var res MoveResult
 
-	// Sargon's newest committed move BEFORE we enter ours. Captured now (not after
-	// enterMove) so a FORCED reply is still seen as a change: when our move leaves
+	// Sargon's newest move-list entry BEFORE we enter ours. Captured now (not after
+	// enterMove) so a FORCED reply is still seen as new: when our move leaves
 	// Sargon a single legal response — common after a stalemate-avoiding
 	// under-promotion, e.g. f7-f8=R leaving the enemy king one square — Sargon
 	// plays it INSTANTLY the moment our move registers, on the Infinite level and
@@ -162,28 +165,22 @@ func (m *Machine) RequestMove(move string, budgetCycles uint64) (MoveResult, err
 	// a baseline taken after enterMove already contains the reply and the
 	// change-based detection below would wait forever, wrongly reporting "no reply"
 	// (the promotion-draw bug that contaminated ~10% of the 300-game run). Our move
-	// lands in the opponent-color move-list column, so entering it never alters
-	// Sargon's newest-move token (only a Sargon commit does), and the bottom-most
-	// token is scroll-immune — so this baseline is robust.
-	baseReply := m.scrapeReplyText()
+	// never advances SARGON's move number, so this baseline is robust.
+	baseNo, _, _ := m.LastSargonEntry()
 
-	mid, _, err := m.enterMove(move)
+	mid, err := m.enterMove(move)
 	if err != nil {
 		return res, err
 	}
 	thinkStart := m.Cycles()
 
 	// Forced/instant reply already on the list: return it without waiting.
-	if tok := m.scrapeReplyText(); tok != "" && tok != baseReply {
+	if committed, err := m.sargonCommitted(baseNo); err != nil {
+		return res, err
+	} else if committed {
 		res.ThinkCycles = m.Cycles() - thinkStart
-		return m.decodeReply(res, mid), nil
+		return m.decodeReply(res, mid, baseNo), nil
 	}
-
-	// Commit detection uses Sargon's whole move-list column text, which changes
-	// ONLY when Sargon commits a move — its internal search scribbles the
-	// $60-$7F piece list but never the move-list text, so this avoids both
-	// mid-search RAM garbage and repeated-token ambiguity.
-	prevCol := m.sargonColumnText()
 
 	// Spend the budget, watching for an early opening-book reply.
 	book := false
@@ -191,7 +188,11 @@ func (m *Machine) RequestMove(move string, budgetCycles uint64) (MoveResult, err
 		if err := m.Run(pollChunk); err != nil {
 			return res, err
 		}
-		if m.sargonColumnText() != prevCol {
+		committed, err := m.sargonCommitted(baseNo)
+		if err != nil {
+			return res, err
+		}
+		if committed {
 			book = true
 			break
 		}
@@ -201,10 +202,10 @@ func (m *Machine) RequestMove(move string, budgetCycles uint64) (MoveResult, err
 		if m.HardMode {
 			// Hard Mode: Sargon searches the Infinite level while pondering, so a
 			// single CTRL-T is often missed — re-send until it commits.
-			committed = m.forceCommitHard(prevCol, 80_000_000)
+			committed = m.forceCommitHard(baseNo, 80_000_000)
 		} else {
 			m.ForceMove() // CTRL-T: play best move so far
-			committed = m.waitSargonCommit(prevCol, 12_000_000)
+			committed = m.waitSargonCommit(baseNo, 12_000_000)
 		}
 		if !committed {
 			res.ThinkCycles = m.Cycles() - thinkStart
@@ -216,58 +217,51 @@ func (m *Machine) RequestMove(move string, budgetCycles uint64) (MoveResult, err
 		}
 	}
 	res.ThinkCycles = m.Cycles() - thinkStart
-	return m.decodeReply(res, mid), nil
+	return m.decodeReply(res, mid, baseNo), nil
 }
 
-// sargonColumnText returns Sargon's entire move-list column (all rows,
-// concatenated) — the left column when Sargon plays White, else the right. This
-// text changes only when Sargon commits a move (its search is internal), so a
-// change is a reliable commit signal, robust to repeated move tokens and to
-// scrolling (a new row alters the multi-row string even if the token repeats).
-func (m *Machine) sargonColumnText() string {
-	lo, hi := 22, 30 // Sargon Black -> right column
-	if m.SargonWhite {
-		lo, hi = 10, 18
+// sargonCommitted reports whether Sargon's move list has advanced past move
+// number baseNo, i.e. Sargon has committed a new move.
+//
+// This is THE commit signal. It replaces the older "Sargon's move-list column
+// TEXT changed" test, which was wrong: mid-search Sargon transiently BLANKS the
+// bottom rows of the list and repaints them ~167K cycles later (measured), and
+// a poll landing inside that window saw a "change", broke out of the budget
+// loop without ever sending CTRL-T, and then read the bottom-most SURVIVING
+// token — Sargon's PREVIOUS move. That stale reply is illegal on our board and
+// killed 15 of 300 games in the 2026-07 standard-start match (the other 2 were
+// the 127-move list wrap below). The repaint fires once per game, on the first
+// move Sargon has to search after leaving its opening book, which is why 14 of
+// the 15 were Sargon-as-White games with a long book line. The displayed move
+// NUMBER only ever advances on a real commit, so it is immune to the repaint and
+// to the list scrolling.
+//
+// It returns ErrListWrapped if the number goes BACKWARDS *near Sargon's 127-move
+// move-list capacity*, where a backwards number means the list has restarted its
+// numbering and Sargon's screen record is fiction. Below that, a backwards number
+// is just the repaint blank frame in progress (the newest rows are momentarily
+// missing) and is reported as "not committed yet" — the caller keeps polling.
+func (m *Machine) sargonCommitted(baseNo int) (bool, error) {
+	no, _, ok := m.LastSargonEntry()
+	if !ok {
+		return false, nil
 	}
-	var sb strings.Builder
-	for r := 10; r < 24; r++ {
-		row := m.TextRow(r)
-		if len(row) >= hi {
-			sb.WriteString(row[lo:hi])
-		}
-		sb.WriteByte('|')
+	if no < baseNo && baseNo >= MaxSargonMoves-1 {
+		return false, ErrListWrapped
 	}
-	return sb.String()
+	return no > baseNo, nil
 }
 
-// ourColumnText returns the KEYBOARD opponent's entire move-list column (all
-// rows concatenated) — the opposite column to sargonColumnText. White's moves
-// occupy the left column and Black's the right, regardless of who Sargon is, so
-// our column is the left one when we play White (Sargon Black) and the right one
-// when we play Black (Sargon White). Like sargonColumnText it changes only when
-// a move is committed to that column, so it is immune to Sargon's ponder-search
-// scribbling of the RAM piece list — the basis for Hard-mode move confirmation.
-func (m *Machine) ourColumnText() string {
-	lo, hi := 10, 18   // we play White -> left column
-	if m.SargonWhite { // we play Black -> right column
-		lo, hi = 22, 30
-	}
-	var sb strings.Builder
-	for r := 10; r < 24; r++ {
-		row := m.TextRow(r)
-		if len(row) >= hi {
-			sb.WriteString(row[lo:hi])
-		}
-		sb.WriteByte('|')
-	}
-	return sb.String()
-}
-
-// confirmMoveScreen polls up to maxSteps for Hard-mode move acceptance: our
-// move-list column changes from prevOwnCol (our move landed in the list) with no
+// confirmMoveScreen polls up to maxSteps for Hard-mode move acceptance: OUR
+// move-list entry advances past baseOwnNo (our move landed in the list) with no
 // ILLEGAL/INVALID message on the message row. Returns false (caller retries) if
-// an ILLEGAL/INVALID message appears or the window elapses with no column change.
-func (m *Machine) confirmMoveScreen(prevOwnCol string, maxSteps uint64) bool {
+// an ILLEGAL/INVALID message appears or the window elapses with no new entry.
+//
+// It keys on the displayed move NUMBER, not the column text, for the same reason
+// as sargonCommitted: Sargon transiently blanks and repaints the list rows, and
+// a text-change test false-positives on the blank frame — here that would report
+// a move accepted that Sargon never saw.
+func (m *Machine) confirmMoveScreen(baseOwnNo int, maxSteps uint64) bool {
 	var s uint64
 	for s < maxSteps {
 		if err := m.Run(pollChunk); err != nil {
@@ -277,7 +271,7 @@ func (m *Machine) confirmMoveScreen(prevOwnCol string, maxSteps uint64) bool {
 		if msg := m.messageLine(); strings.Contains(msg, "ILLEGAL") || strings.Contains(msg, "INVALID") {
 			return false
 		}
-		if m.ourColumnText() != prevOwnCol {
+		if no, _, ok := m.LastOwnEntry(); ok && no > baseOwnNo {
 			return true
 		}
 	}
@@ -291,7 +285,7 @@ func (m *Machine) confirmMoveScreen(prevOwnCol string, maxSteps uint64) bool {
 // enough for Sargon to read and clear the previous strobe), checking after each
 // send for a move-list column change (a committed move). Returns whether a
 // commit was seen within maxSteps. The Easy-mode single-CTRL-T path is unchanged.
-func (m *Machine) forceCommitHard(prev string, maxSteps uint64) bool {
+func (m *Machine) forceCommitHard(baseNo int, maxSteps uint64) bool {
 	const strobeGap = 2_000_000 // steps between CTRL-T re-sends
 	var steps uint64
 	for steps < maxSteps {
@@ -303,7 +297,9 @@ func (m *Machine) forceCommitHard(prev string, maxSteps uint64) bool {
 			}
 			steps += pollChunk
 			w += pollChunk
-			if m.sargonColumnText() != prev {
+			if committed, err := m.sargonCommitted(baseNo); err != nil {
+				return false
+			} else if committed {
 				m.Run(1_000_000) // let the piece list / display finish updating
 				return true
 			}
@@ -312,17 +308,19 @@ func (m *Machine) forceCommitHard(prev string, maxSteps uint64) bool {
 	return false
 }
 
-// waitSargonCommit polls up to maxSteps until Sargon's move-list column changes
-// from prev (a committed move), then settles briefly so the piece list is fully
+// waitSargonCommit polls up to maxSteps until Sargon's move list advances past
+// baseNo (a committed move), then settles briefly so the piece list is fully
 // updated. Returns whether a commit was seen.
-func (m *Machine) waitSargonCommit(prev string, maxSteps uint64) bool {
+func (m *Machine) waitSargonCommit(baseNo int, maxSteps uint64) bool {
 	var steps uint64
 	for steps < maxSteps {
 		if err := m.Run(pollChunk); err != nil {
 			return false
 		}
 		steps += pollChunk
-		if m.sargonColumnText() != prev {
+		if committed, err := m.sargonCommitted(baseNo); err != nil {
+			return false
+		} else if committed {
 			m.Run(1_000_000) // let the piece list finish updating
 			return true
 		}
@@ -330,64 +328,17 @@ func (m *Machine) waitSargonCommit(prev string, maxSteps uint64) bool {
 	return false
 }
 
-// sargonHalf returns the 16 piece-square bytes belonging to Sargon (white half
-// when Sargon plays White, else the black half).
-func (m *Machine) sargonHalf(pl PieceList) [16]Square {
-	var h [16]Square
-	lo := 16
-	if m.SargonWhite {
-		lo = 0
-	}
-	copy(h[:], pl[lo:lo+16])
-	return h
-}
-
-// waitSargonMove polls up to maxSteps until Sargon's half of the piece list
-// differs from mid and is stable for two consecutive polls — i.e. Sargon has
-// committed a move and (Easy Mode) returned to idle. Immune to repeated
-// move-list text. Returns whether a completed move was detected.
-func (m *Machine) waitSargonMove(mid PieceList, maxSteps uint64) bool {
-	base := m.sargonHalf(mid)
-	last := base
-	changed := false
-	stable := 0
-	var steps uint64
-	for steps < maxSteps {
-		if err := m.Run(pollChunk); err != nil {
-			return false
-		}
-		steps += pollChunk
-		cur := m.sargonHalf(m.ReadPieceList())
-		if !changed && cur != base {
-			changed = true
-		}
-		if changed {
-			if cur == last {
-				stable++
-			} else {
-				stable = 0
-			}
-			if stable >= 2 {
-				return true
-			}
-		}
-		last = cur
-	}
-	return changed
-}
-
 // enterMove settles, types the player move, and confirms it registered (the
 // mover's white piece reaches the destination square), retrying a dropped or
-// garbled entry. It returns the piece list just after our move (mid) and the
-// SARGON move-list token before Sargon replies (prevReply).
+// garbled entry. It returns the piece list just after our move (mid).
 //
 // move is "E2-E4" or "E4XD5" (separator '-' or 'X'); a trailing promotion
 // letter (e.g. "E7-E8N") is allowed and ignored for the square parse.
-func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err error) {
+func (m *Machine) enterMove(move string) (mid PieceList, err error) {
 	move = strings.ToUpper(strings.TrimSpace(move))
 	from, to, ok := parseFromTo(move)
 	if !ok {
-		return mid, "", fmt.Errorf("cannot parse move %q", move)
+		return mid, fmt.Errorf("cannot parse move %q", move)
 	}
 	// A promotion carries a trailing piece letter after the 5-char FROM-TO
 	// (e.g. "C2-C1Q" or "C2-C1N"). Sargon does not promote on the FROM-TO
@@ -412,7 +363,7 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 	// guard — the move is confirmed from the ponder-immune screen column below.
 	if !m.HardMode {
 		if err := m.Run(3_000_000); err != nil {
-			return mid, "", err
+			return mid, err
 		}
 	}
 
@@ -421,14 +372,14 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 	oppBlack := m.SargonWhite
 	fromIdx := pieceIndexAt(before, from, oppBlack)
 	if fromIdx < 0 && !m.HardMode {
-		return mid, "", fmt.Errorf("no %s piece on %s for move %q", colorName(oppBlack), from.Algebraic(), move)
+		return mid, fmt.Errorf("no %s piece on %s for move %q", colorName(oppBlack), from.Algebraic(), move)
 	}
 
-	// Hard-mode confirmation baseline: our move-list column BEFORE typing. Our
-	// column changes only when our move is accepted into the list; a rejected
-	// (ILLEGAL/INVALID) move never appears, so a column change is a reliable,
-	// ponder-immune accept signal.
-	prevOwnCol := m.ourColumnText()
+	// Hard-mode confirmation baseline: our newest move-list entry BEFORE typing.
+	// Our move number advances only when our move is accepted into the list; a
+	// rejected (ILLEGAL/INVALID) move never appears, so an advance is a reliable,
+	// ponder-immune AND repaint-immune accept signal.
+	baseOwnNo, _, _ := m.LastOwnEntry()
 
 	const stepsPerKey = 200_000
 	accepted := false
@@ -437,11 +388,11 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 			// Clear a partial/garbled entry: Return submits & rejects it.
 			m.Key(0x0D)
 			if err := m.Run(1_500_000); err != nil {
-				return mid, "", err
+				return mid, err
 			}
 		}
 		if err := m.TypePaced(fromTo+"\r", stepsPerKey); err != nil {
-			return mid, "", err
+			return mid, err
 		}
 		// Promotion: answer the "ENTER PROMOTED PIECE" prompt so the pawn
 		// actually reaches the last rank (without this the pawn stays put and
@@ -453,7 +404,7 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 		if promo != 0 {
 			done, err := m.completePromotion(promo)
 			if err != nil {
-				return mid, "", err
+				return mid, err
 			}
 			if done {
 				accepted = true
@@ -466,12 +417,12 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 			// Screen confirmation: our move appears in our move-list column, and
 			// no ILLEGAL/INVALID message shows. Ponder-immune (the RAM piece list
 			// is search scratch while Sargon ponders).
-			accepted = m.confirmMoveScreen(prevOwnCol, 5_000_000)
+			accepted = m.confirmMoveScreen(baseOwnNo, 5_000_000)
 		} else {
 			var s uint64
 			for s < 4_000_000 {
 				if err := m.Run(pollChunk); err != nil {
-					return mid, "", err
+					return mid, err
 				}
 				s += pollChunk
 				// Accept when any of our pieces has reached the destination.
@@ -485,9 +436,9 @@ func (m *Machine) enterMove(move string) (mid PieceList, prevReply string, err e
 		_ = fromIdx
 	}
 	if !accepted {
-		return mid, "", fmt.Errorf("move %q not accepted after retries (screen: %q)", move, m.messageLine())
+		return mid, fmt.Errorf("move %q not accepted after retries (screen: %q)", move, m.messageLine())
 	}
-	return m.ReadPieceList(), m.scrapeReplyText(), nil
+	return m.ReadPieceList(), nil
 }
 
 // completePromotion answers Sargon's "ENTER PROMOTED PIECE" prompt, which
@@ -595,30 +546,44 @@ func (m *Machine) confirmPromotionHard(confirm byte) bool {
 	return false
 }
 
-// waitReply polls up to maxThinkSteps CPU steps for a new SARGON move token to
-// appear (different from prevReply), returning whether one did. The text
+// waitReply polls up to maxThinkSteps CPU steps for Sargon's move list to
+// advance past baseNo (a new committed move), returning whether it did. The text
 // move-list is authoritative; the $60-$7F piece list is search scratch while
-// Sargon thinks and is only trusted once idle (see decodeReply).
-func (m *Machine) waitReply(prevReply string, maxThinkSteps uint64) bool {
+// Sargon thinks and is only trusted once idle (see decodeReply). Keying on the
+// move NUMBER rather than the token also avoids the mid-search repaint
+// false-positive described in sargonCommitted.
+func (m *Machine) waitReply(baseNo int, maxThinkSteps uint64) bool {
 	var steps uint64
 	for steps < maxThinkSteps {
 		if err := m.Run(pollChunk); err != nil {
 			return false
 		}
 		steps += pollChunk
-		if tok := m.scrapeReplyText(); tok != "" && tok != prevReply {
+		if committed, err := m.sargonCommitted(baseNo); err != nil {
+			return false
+		} else if committed {
 			return true
 		}
 	}
 	return false
 }
 
-// decodeReply, called once a reply token is on screen, settles to idle then
-// fills the move text, RAM-decoded move, board, and any status message.
-func (m *Machine) decodeReply(res MoveResult, mid PieceList) MoveResult {
+// decodeReply, called once a reply has been committed, settles to idle then
+// fills the move text, RAM-decoded move, board, and any status message. It
+// re-reads the list until an entry NEWER than baseNo is visible, so a settle
+// that lands inside Sargon's transient move-list repaint cannot hand back the
+// previous move's token.
+func (m *Machine) decodeReply(res MoveResult, mid PieceList, baseNo int) MoveResult {
 	// Let Sargon fully return to the idle input loop before trusting the list.
 	m.Run(2_000_000)
-	res.SargonText = m.scrapeReplyText()
+	res.SargonText = ""
+	for tries := 0; tries < 8; tries++ {
+		if no, tok, ok := m.LastSargonEntry(); ok && no > baseNo {
+			res.SargonText = tok
+			break
+		}
+		m.Run(500_000)
+	}
 	after := m.ReadPieceList()
 	// Diff Sargon's own half: black (16-31) when Sargon is Black, else white.
 	if mv, ok := DiffMove(mid, after, !m.SargonWhite); ok {
@@ -682,13 +647,13 @@ func (m *Machine) StartAsWhite(budgetCycles uint64) (MoveResult, error) {
 	var res MoveResult
 	mid := m.ReadPieceList() // initial position
 	m.SargonWhite = true
-	prevCol := m.sargonColumnText() // Sargon's (White, left) column; empty at start
-	m.Key(0x13)                     // CTRL-S: Sargon plays the side to move (White)
+	baseNo, _, _ := m.LastSargonEntry() // 0: Sargon's column is empty at the start
+	m.Key(0x13)                         // CTRL-S: Sargon plays the side to move (White)
 	thinkStart := m.Cycles()
 
 	if budgetCycles == 0 {
 		// Level mode: wait for Sargon's natural (timed-level) opening move.
-		if !m.waitSargonCommit(prevCol, 80_000_000) {
+		if !m.waitSargonCommit(baseNo, 80_000_000) {
 			return res, fmt.Errorf("no opening move from sargon-as-white (level mode)")
 		}
 	} else {
@@ -697,7 +662,11 @@ func (m *Machine) StartAsWhite(budgetCycles uint64) (MoveResult, error) {
 			if err := m.Run(pollChunk); err != nil {
 				return res, err
 			}
-			if m.sargonColumnText() != prevCol {
+			committed, err := m.sargonCommitted(baseNo)
+			if err != nil {
+				return res, err
+			}
+			if committed {
 				book = true
 				break
 			}
@@ -705,10 +674,10 @@ func (m *Machine) StartAsWhite(budgetCycles uint64) (MoveResult, error) {
 		if !book {
 			committed := false
 			if m.HardMode {
-				committed = m.forceCommitHard(prevCol, 80_000_000)
+				committed = m.forceCommitHard(baseNo, 80_000_000)
 			} else {
 				m.ForceMove() // CTRL-T
-				committed = m.waitSargonCommit(prevCol, 12_000_000)
+				committed = m.waitSargonCommit(baseNo, 12_000_000)
 			}
 			if !committed {
 				res.ThinkCycles = m.Cycles() - thinkStart
@@ -718,7 +687,7 @@ func (m *Machine) StartAsWhite(budgetCycles uint64) (MoveResult, error) {
 		}
 	}
 	res.ThinkCycles = m.Cycles() - thinkStart
-	return m.decodeReply(res, mid), nil
+	return m.decodeReply(res, mid, baseNo), nil
 }
 
 // parseFromTo extracts the from/to squares from a move like "E2-E4", "E4XD5",
@@ -740,40 +709,17 @@ func (m *Machine) messageLine() string {
 	return strings.TrimSpace(m.TextRow(5))
 }
 
-// blackChanged reports whether any black piece-list entry (16-31) differs.
-func blackChanged(a, b PieceList) bool {
-	for i := 16; i < 32; i++ {
-		if a[i] != b[i] {
-			return true
-		}
-	}
-	return false
-}
-
-// scrapeReplyText returns Sargon's most-recent move token from the on-screen
-// move list. The list is chronological with White's move in the LEFT column
-// (cols 10-15) and Black's in the RIGHT column (cols 22-27), regardless of who
-// Sargon is; the header label swaps but the columns do not. So Sargon's column
-// is the left one when it plays White, else the right one.
-//
-// It returns the LAST (bottom-most) non-empty token in that column, which is
-// always the newest move even after the list scrolls (Sargon shows ~13 moves,
-// newest at the bottom). Verified across a full 78-ply game.
-func (m *Machine) scrapeReplyText() string {
-	return m.scrapeMoveColumn(!m.SargonWhite /* right column iff Sargon is Black */)
-}
-
 // scrapeMoveColumn returns the bottom-most non-empty move token in the left
 // (rightCol=false) or right (rightCol=true) column. Windows are 8 chars wide so
 // a promotion token like "G2-G1/Q" (7 chars) is not truncated (which would drop
 // the promotion piece and emit an illegal non-promoting move).
 func (m *Machine) scrapeMoveColumn(rightCol bool) string {
-	lo, hi := 10, 18
+	lo, hi := whiteColLo, whiteColHi
 	if rightCol {
-		lo, hi = 22, 30
+		lo, hi = blackColLo, blackColHi
 	}
 	last := ""
-	for r := 10; r < 24; r++ {
+	for r := listTopRow; r < listBotRow; r++ {
 		row := m.TextRow(r)
 		if len(row) < hi {
 			continue
@@ -787,8 +733,12 @@ func (m *Machine) scrapeMoveColumn(rightCol bool) string {
 
 // scrapeMessage scans the screen for status keywords and reports the first one
 // found plus whether it is terminal.
+// The manual (Feature 12, Draw Offer) lists the draws Sargon announces by
+// itself: STALEMATE, REPETITION OF POSITION and the 50-MOVE RULE. The latter two
+// contain neither "DRAW" nor "MATE", so they must be matched by name or a
+// Sargon-declared draw reads as "no message".
 func (m *Machine) scrapeMessage() (msg string, gameOver bool) {
-	terminal := []string{"CHECKMATE", "STALEMATE", "DRAW", "MATE", "RESIGN"}
+	terminal := []string{"CHECKMATE", "STALEMATE", "REPETITION", "MOVE RULE", "DRAW", "MATE", "RESIGN"}
 	for _, k := range terminal {
 		if m.ScreenContains(k) {
 			return k, true

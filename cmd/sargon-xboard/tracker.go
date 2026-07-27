@@ -102,3 +102,18 @@ func (t *repTracker) findDrawingMove() (coord string, count int, reason string) 
 	}
 	return "", 0, ""
 }
+
+// uniqueEnPassant returns the tracked position's only legal en-passant capture
+// in UCI notation, or "" when the tracker is invalid or there is not exactly
+// one. Sargon records en passant as the square-less token "PXPEP", so this is
+// the only way to name the move without trusting the ponder-scratch RAM decode.
+func (t *repTracker) uniqueEnPassant() string {
+	if t == nil || !t.valid || t.pos == nil {
+		return ""
+	}
+	eps := t.pos.EnPassantCaptures()
+	if len(eps) != 1 {
+		return ""
+	}
+	return eps[0].String()
+}

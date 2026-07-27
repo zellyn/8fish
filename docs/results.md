@@ -11,6 +11,25 @@ board, it is staged as a real 4-byte move-stack record at `PLYBASE[PLY]`
 and searched, and `generate` runs only if it fails to cut. Behind
 `FT2_GENDEFER` ($10 in FEATURES2); OFF is today's path.
 
+**ENABLED IN THE SHIPPED GAMEPLAY CONFIG** (`ucibridge.runEngine` now sets
+FEATURES2 = FT2_GENDEFER) after independent re-verification of every gate:
+`TestTTMoveValidExhaustive` PASS with non-vacuous coverage (792 accepted,
+66 captures, 64 double pushes, 3 en passant, 164 pawn moves, 38 rejected
+promo/castle), `TestTTMoveValidRejectsPromoAndCastle` PASS,
+`TestGenDeferVerify` PASS, `TestGenDeferTreeIdentity` PASS (24 A/B pairs,
+all identical), `TestMicroAB` PASS, `TestMicroABPhase` PASS. Adopted with
+NO SPRT, deliberately: the tree is bit-identical, so there is nothing for a
+game-playing test to resolve that the fingerprint does not already settle.
+
+`TestProfileR5` now profiles at FEATURES2 = FT2_GENDEFER as well, so round
+5 aims at shares that still exist. Generation's share moved as predicted:
+movegenbody.inc **26.0% → 24.5%**, leaving board.s the largest quarter at
+27.4% (search.s 23.1%, eval.s 21.9%). Note the profile's per-run totals are
+NOT the way to read the saving — it is a cycle-budget run, so faster code
+buys more work rather than a smaller total. The saving is measured on
+identical trees, where it ranges −0.74% to −2.83% per position at ID depth
+6 and −2.52% at the shipped control.
+
 **Measured saving −2.52%** (`TestGenDeferCycleDelta`) on the r5 profile
 position set at the shipped mask, per position deepened under real
 iterative deepening until it passed the ~30M-cycle control — against the

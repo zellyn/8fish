@@ -56,6 +56,10 @@ func TestProfileR5(t *testing.T) {
 		t.Fatal(err)
 	}
 	shipped := byte(defs["FT_CKEXT"]) | 0x1F
+	// FEATURES2 must match the gameplay config too (ucibridge.runEngine).
+	// FT2_GENDEFER was adopted 2026-07-27 and changes the generation mix, so
+	// profiling without it would aim round 5 at a share that no longer exists.
+	shipped2 := byte(defs["FT2_GENDEFER"])
 
 	// Aggregate PC cycles across every position, and per phase.
 	total := &Profile{PCCycles: make([]uint64, 65536)}
@@ -71,6 +75,7 @@ func TestProfileR5(t *testing.T) {
 			t.Fatal(err)
 		}
 		SetFeatures(m, defs, shipped)
+		SetFeatures2(m, defs, shipped2)
 		SetBudget(m, defs, 30_000_000, 24)
 		m.Mem.Main[defs["HALFMOVE"]] = p.Halfmove
 		exited, code, prof, err := RunProfiled(m, defs, 400_000_000_000)

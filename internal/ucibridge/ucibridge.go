@@ -554,7 +554,21 @@ func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64
 	// work showed the horizon-blind losses are a SEARCH problem, not an eval
 	// one. Tests keep the plain 0x1F default so stored fingerprints stay exact.
 	//
-	// FEATURES2 is 0: the only implemented bits are FT2_MOPUP (gated off) and
+	// FEATURES2 = FT2_GENDEFER.
+	//
+	// FT2_GENDEFER (deferred full-width move generation) ADOPTED 2026-07-27
+	// on a BIT-IDENTICAL TREE, so it needs no SPRT and gets none: `snode` no
+	// longer generates the move list when the TT offers a move, validating it
+	// with `ttmovevalid` and staging it instead, and generating only if it
+	// fails to cut. Measured −2.52% cycles at the shipped ~30M control (the
+	// saving is TT-warmth-driven, so it shrinks at smaller budgets and at
+	// depths whose trees thrash the 4096-entry TT — see docs/results.md).
+	// Tree identity is gated by TestGenDeferTreeIdentity (24 A/B pairs) and
+	// the validator by TestTTMoveValidExhaustive (all 128×128 from/to pairs
+	// over 32 positions) — exhaustive rather than sampled because a too-lax
+	// validator fails at p = 2⁻²⁰, about once per 25 games.
+	//
+	// The other implemented bits stay off: FT2_MOPUP (gated off) and
 	// FT2_ADAPT (budget-mode policy, poked separately by the match harness).
 	// FT2_EGTECH (endgame technique, −9 ± 24) and FT2_IMPROV (improving,
 	// adopted 2026-07-21 then RETRACTED 2026-07-22 at −1.8 ± 8.6 over 4200
@@ -564,6 +578,7 @@ func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64
 		return engineResult{}, err
 	}
 	chesstest.SetFeatures(m, b.Defs, byte(b.Defs["FT_CKEXT"])|0x1F)
+	chesstest.SetFeatures2(m, b.Defs, byte(b.Defs["FT2_GENDEFER"]))
 	chesstest.SetBudget(m, b.Defs, budget, depth)
 	if adapt != nil {
 		chesstest.SetAdaptive(m, b.Defs, adapt.maxCeiling, adapt.unstTarget, adapt.minSpend)

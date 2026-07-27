@@ -10,7 +10,7 @@ ifneq ($(CC65_VERSION),$(TESTED_CC65))
 $(warning ca65 is $(CC65_VERSION); this repo was last tested with $(TESTED_CC65))
 endif
 
-.PHONY: all hello perft banktest entropytest engine tables test test-siblings clean
+.PHONY: all hello perft banktest entropytest uitest engine tables test test-siblings clean
 
 all: hello perft engine test
 
@@ -28,6 +28,8 @@ banktest: asm/banktest.bin
 
 entropytest: asm/entropytest.bin
 
+uitest: asm/uitest.bin
+
 engine: asm/engine.bin
 
 tables: asm/tables.s
@@ -41,6 +43,13 @@ asm/banktest.bin: asm/banktest.s asm/banktest.cfg
 asm/entropytest.bin: asm/entropytest.s asm/entropy.inc asm/defs.inc asm/entropytest.cfg
 	cd asm && $(CA65) entropytest.s -o entropytest.o
 	cd asm && $(LD65) -C entropytest.cfg entropytest.o -o entropytest.bin
+
+# Proof-of-concept image for the on-device UI renderer (asm/ui.s): a $4000
+# stub copies the UI into Language Card RAM at $E000 and runs it there.
+# Driven by internal/ui's tests.
+asm/uitest.bin: asm/uitest.s asm/ui.s asm/defs.inc asm/uitest.cfg
+	cd asm && $(CA65) uitest.s -o uitest.o
+	cd asm && $(LD65) -C uitest.cfg uitest.o -o uitest.bin
 
 asm/tables.s: cmd/gentables/main.go cmd/gentables/pesto.go
 	go run ./cmd/gentables

@@ -1,0 +1,583 @@
+# 8fish on-device user interface — design
+
+Status: **design + verified proof of concept**. Not merged, not built beyond the
+renderer. The PoC (`asm/ui.s`, `asm/uitest.s`, `internal/ui`) is real code that
+runs in the emulator; everything else below is a plan with priced components.
+
+All byte counts are **measured** (ca65 `.out` on label differences, or the ld65
+segment map) unless labelled *derived*, in which case the instruction-level
+accounting is shown. All cycle counts are **measured by difference** under
+`harness` (run the same image with N and N+1000 repaints; divide) unless
+labelled *derived*.
+
+---
+
+## 1. Summary
+
+| decision | choice |
+|---|---|
+| display | **40-column text page 1**, inverse-video checkerboard, FEN-case pieces |
+| where the code lives | **Language Card RAM `$E000-$FFEF`** — 8,192 B that cost **zero** of the image's 1,622 B headroom |
+| move input | **typed coordinate** (`e2e4`, optional 5th promotion char), validated against the engine's own generator |
+| levels / time control | **fixed depth** (`BUDGET = 0`). The IIe has no readable clock, so budget mode cannot run on hardware as built |
+| `FT2_ADAPT` | **not exposed.** It is budget-mode-only and its ceilings are host-computed; see §6.3 for the one cheap change that would unlock it |
+| progress during search | printed **between iterative-deepening iterations**, from the UI's own driver loop. **Zero lines of `search.s` change** |
+| MAIN-RAM cost | **0 bytes permanent** (a run-once 30-byte copier lives in soon-to-be-overwritten RAM) |
+| LC budget | ~4,000 B of 8,176 B used; **~50% headroom** |
+
+The single most important finding is in §2: this project has never used its
+Language Card. The UI does not have to compete for the 1,622 bytes.
+
+---
+
+## 2. The memory map, and where the UI actually fits
+
+Verified against the current build (`ld65 -m`, engine.bin md5 `3902502c`):
+
+```
+MAIN
+  $0000-$00FF  zero page          engine (BOARD $40-$BF, search/eval $C0-$FF)
+  $0100-$01FF  6502 stack
+  $0200-$030C  engine driver state (PWBITS, ENTCNT/ENTROPY, BOOKRND, ADAPT...)
+  $030D-$03EF  FREE (227 B)       <- the PoC pokes its repeat counters here
+  $0400-$07FF  TEXT PAGE 1        <- the UI's screen. Engine never touches it.
+  $0800-$0DFF  engine per-ply arrays
+  $0E00-$1FFF  MOVESTACK (4,608 B; dead until the first search)
+  $2000-$3FFF  resident opening book (3,866 B used)  == HI-RES PAGE 1
+  $4000-$78BC  engine CODE  (14,525 B)               == HI-RES PAGE 2
+  $7900-$B958  engine TABLES (16,473 B)
+  $B99A        image top.  Ceiling $BFF0 (harness traps).  HEADROOM 1,622 B
+AUX
+  $0200-$81FF  transposition table, 4096 x 8 B
+  $8200-$BFFF  free (15.9 KB), reachable only through the LC aux primitives
+LANGUAGE CARD  (engine runs with $C08B latched: bank 1, read RAM + write RAM)
+  $D000-$D040  LCCODE, 65 bytes    <- the ENTIRE current LC usage
+  $D041-$DFFF  FREE, bank 1        4,031 B
+  $D000-$DFFF  FREE, bank 2        4,096 B   (one $C083/$C08B switch to reach)
+  $E000-$FFEF  FREE, unbanked      8,176 B   <- THE UI LIVES HERE
+  $FFF0-$FFFF  6502 vectors (RAM once LC read is enabled — see §9 risk 3)
+```
+
+Because the engine already latches `$C08B` at entry and never switches back,
+`$E000-$FFFF` is ordinary, directly-executable, directly-addressable RAM in the
+normal address space. No bank switching, no aux primitives, no soft-switch dance
+around every access. The UI is `jsr`-callable from the engine's address space and
+can `jsr` into the engine's routines by their published addresses.
+
+**This is the design's foundation**: the UI is not competing for the 1,622-byte
+headroom, so the honest answer to "what does the UI cost the engine?" is *nothing
+in MAIN, nothing in the transposition table, nothing in the opening book*. No
+space-reclamation pass is requested.
+
+Loading it costs nothing permanent either. `UI.BIN` is `BLOAD`ed to `$0E00` (the
+move stack, which is garbage until the first search); a 30-byte copier — itself
+`BRUN` at `$0800`, which the engine will later overwrite with `PIECESQ` — latches
+`$C08B`, copies `$0E00`→`$E000`, and jumps there. `asm/uitest.s` is exactly this
+stub and it is proven to work in the emulator.
+
+> Incidental finding, not acted on: `defs.inc` reserves `$2000-$207F` as
+> move-stack overflow guard slack "which must stay unallocated", while
+> `book.inc` puts `BOOK_BASE = $2000`. They overlap. Only a 1151-move
+> single-ply generation could trip it, so it is theoretical — but the two
+> comments disagree and one of them should be corrected.
+
+---
+
+## 3. Display mode
+
+### 3.1 The options, priced
+
+| mode | RAM it must take | book must move? | renderer bytes | repaint cost | verdict |
+|---|---|---|---|---|---|
+| **40-col text** (page 1 `$0400-$07FF`) | none — engine never uses it | no | **508 measured** | **23,659 cyc measured** (23.2 ms) | **CHOSEN** |
+| 80-col text | AUX `$0400-$07FF` = 1,024 B **of the TT** (128 of 4096 entries, 3.1%) | no | ~750 *derived* (every row split across two banks; 80STORE/PAGE2 per write) | ~2x | reject |
+| hi-res page 1 (`$2000-$3FFF`) | MAIN `$2000-$3FFF` | **yes** | ~1,850 *derived* | ~80,000 cyc *derived* | stage 2, viable |
+| hi-res page 2 (`$4000-$5FFF`) | that is engine CODE | — | — | — | impossible |
+| double hi-res | MAIN **and** AUX `$2000-$3FFF` = 8,192 B **of the TT** (1024 of 4096 entries, **25%**) | yes | ~2,600 *derived* | ~160,000 cyc *derived* | reject |
+
+Derivations for the rejected/deferred rows:
+
+- **80-column.** Text page 1 in 80-col mode is main RAM for odd columns and AUX
+  `$0400-$07FF` for even ones. AUX `$0400-$07FF` sits inside the TT
+  (`TTBASE = $0200`, 4096 × 8 B = `$0200-$81FF`), so 128 TT entries die. In
+  exchange we get 80 columns for a board that occupies 16 of them. It also puts
+  `80STORE`/`PAGE2` into the same soft-switch space the LC aux primitives use for
+  `RAMRD`/`RAMWRT`, which is a real interaction risk for zero benefit.
+- **Hi-res page 1.** Make squares **28 pixels** wide (exactly 4 hi-res bytes) so
+  every square is byte-aligned — this is the trick that dodges the sub-byte glyph
+  alignment problem `docs/sargon.md` records for Sargon's own board. Board is
+  224 × 192 of 280 × 192. Glyphs: 4 B × 20 rows = 80 B each; 6 types × 2 colours
+  = 960 B. Row-base table 192 × 2 = 384 B. Blit + background ~250 B. Text
+  primitives are still needed for the mixed-mode bottom 4 rows (`$C053`): ~250 B.
+  Total ≈ 1,850 B — which **fits in LC** alongside the text UI. Repaint: 64
+  squares × 24 lines × 4 bytes = 6,144 stores at ~13 cyc ≈ 80,000 cyc (78 ms).
+  So hi-res is *affordable*; it is deferred because of what it costs in
+  **information**, not bytes: mixed mode leaves 4 text rows, so the move list,
+  the opening name, the thinking readout and the prompt cannot all be on screen
+  at once. Sargon III has exactly this problem, which is why ESC toggles between
+  its board and its text screen. 40-column text shows **all of it
+  simultaneously**, and that is a straight UX win over the period reference.
+- **Double hi-res.** Costs a quarter of the transposition table. Paying
+  measurable playing strength for prettier pieces is the wrong trade for a
+  project whose whole thesis is squeezing strength out of a 1 MHz 6502.
+
+### 3.2 The chosen encoding
+
+Two characters per square (piece letter + blank), so a cell is 14 × 8 pixels —
+close to square, and the board is a 16 × 8 character block.
+
+- **Square colour** → **inverse video** on dark squares (both characters of the
+  cell), giving a real checkerboard with no glyph cost at all.
+- **Piece colour** → **letter case**: uppercase = White, lowercase = Black. The
+  FEN convention, instantly readable, and it survives *under* the checkering, so
+  neither channel is lost when a piece stands on a dark square.
+
+Apple IIe screen-byte encoding used:
+
+```
+normal video   ASCII | $80     ($80-$FF; lowercase at $E0-$FF)
+inverse upper  ASCII & $3F     ($00-$3F)
+inverse lower  ASCII           ($60-$7F)
+```
+
+`$60-$7F` is inverse lowercase on both the enhanced and unenhanced IIe (they
+differ only at `$40-$5F`, which this design does not use). The whole mapping is a
+single **32-byte table** indexed by `dark<<4 | (piece & $0F)` — see `PIECECH` in
+`asm/ui.s`. Entry `$00` is a normal space and entry `$10` an inverse space, which
+also serves as the blank half-cell, so the inner loop needs no second table.
+
+*Fallback for a II+ / non-lowercase machine:* drop the checkering and use
+normal = White, inverse = Black on uppercase letters only. Same code, a different
+32-byte table. Not implemented; noted so the choice is reversible.
+
+---
+
+## 4. Screen layout
+
+Verified — this is a literal capture of the PoC running in the emulator
+(`go test ./internal/ui -run TestRenderPosition -v`), with the inverse-video map
+beside it:
+
+```
+    +----------------------------------------+
+ 0  | 8FISH 1.0    LEVEL 4     YOU ARE WHITE |  ########################################
+ 1  |                                        |  ........................................
+ 2  | 8 r   b q k     r    MOVES             |  .....##..##..##..##..###################
+ 3  | 7   p p p b p p p    1 e2e4 e7e5       |  ...##..##..##..##.......................
+ 4  | 6 p   n     n        2 g1f3 b8c6       |  .....##..##..##..##.....................
+ 5  | 5         p          3 f1b5 a7a6       |  ...##..##..##..##.......................
+ 6  | 4 B       P          4 b5a4 g8f6       |  .....##..##..##..##.....................
+ 7  | 3           N        5 e1g1 f8e7       |  ...##..##..##..##.......................
+ 8  | 2 P P P P   P P P                      |  .....##..##..##..##.....................
+ 9  | 1 R N B Q   R K                        |  ...##..##..##..##.......................
+10  |   a b c d e f g h                      |  ........................................
+11  |                                        |  ........................................
+12  |WHITE TO MOVE                           |  ........................................
+13  |CHECK                                   |  ........................................
+14  |D7  +0.34  b1c3                         |  ........................................
+15  |                                        |  ........................................
+16  |BOOK: RUY LOPEZ, CLOSED                 |  ........................................
+17  |ILLEGAL MOVE - TRY AGAIN                |  ........................................
+18  |                                        |  ........................................
+19  |                                        |  ........................................
+20  |N-NEW T-TAKEBACK R-RESIGN D-DRAW L-LEVEL|  ........................................
+21  |                                        |  ........................................
+22  |                                        |  ........................................
+23  |YOUR MOVE? e2e4                         |  ........................................
+```
+
+Regions:
+
+| rows | cols | content |
+|---|---|---|
+| 0 | 0-39 | inverse status bar: name/version, level, which colour the human has |
+| 2-9 | 1 | rank digits 8..1 |
+| 2-9 | 3-18 | the board (16 × 8 cells) |
+| 10 | 3-18 | file letters a..h |
+| 2 | 21-39 | inverse `MOVES` panel header |
+| 3-15 | 21-39 | move list, 13 full moves (matching Sargon's 13), scrolling |
+| 12 | 0-19 | side to move |
+| 13 | 0-19 | check / mate / stalemate / draw-claim status |
+| 14 | 0-19 | thinking readout: depth, score, current best move |
+| 16 | 0-39 | opening name while in book (`CUROPENING` → name table) |
+| 17 | 0-39 | messages: illegal move, promotion prompt, draw offer |
+| 20 | 0-39 | command reminder |
+| 23 | 0-39 | input line |
+
+Everything the player needs is on screen at once. The status column (0-19) and
+the move panel (21-39) never overlap, so a status update never repaints the
+panel and vice versa.
+
+Rank/file labels use the same lowercase files the input syntax uses, so the
+mapping from what you see to what you type is direct.
+
+---
+
+## 5. Move input
+
+### 5.1 Typed coordinate, not cursor selection
+
+Recommendation: **typed from-to coordinate**, e.g. `e2e4`, with an optional 5th
+character for promotion (`e7e8q`), `RETURN` to submit, `←`/DELETE to backspace.
+
+| | typed `e2e4` | cursor / joystick square picking |
+|---|---|---|
+| code | ~70 B parse + shared validation | ~200-260 B *derived*: 2 bytes of cursor state, 4 arrow keys + select + cancel dispatch, highlight/unhighlight repaint, board clamping — plus it *still* needs the same validation and a separate promotion prompt |
+| notation | identical to the engine's internal `(from,to,flags)` and to every log, test and PGN in this repo | needs its own translation for the move list |
+| keystrokes per move (entropy) | 4-5 | 6-14 |
+| errors | typo → one clear message | mis-click → same problem, more state |
+
+Typed entry wins on every axis that matters here, and `asm/entropy.inc`'s own
+doc-comment already assumes it ("a UCI-style move entry is 4-5 of them"). A
+joystick/cursor mode is a clean later addition on top of the same validator; it
+is not the thing to build first.
+
+Every keystroke — menus, confirmations, move entry, all of it — goes through
+`jsr entkey`. The 16-cycle poll loop and the ROL-then-EOR fold are the shipped,
+byte-verified collector; the UI does not get its own keyboard loop. Just before
+each search: `jsr entseed`. For the book's `BOOKRND` (4 bytes at `$0222`) the UI
+seeds from `ENTROPY`/`ENTCNT` (~20 B *derived*).
+
+### 5.2 Validation — reuse, don't reimplement
+
+The UI never contains chess rules. Validation is:
+
+```
+jsr evalinit            ; root accumulators + HASH0-3
+PLY = 0 ; MSP = MOVESTACK
+jsr gennodef            ; the engine's own pseudo-legal generator
+walk PLYBASELO/HI[0] .. PLYENDLO/HI[0]   ; 4 bytes/move: tier, from, to, flags
+    match FROM and TO (and, if the entry has FL_PROMO, the promotion type)
+jsr make
+    ; the engine's own legality test, lifted verbatim from search.s sdomove:
+    ATSIDE = SIDE ; ATSQ = PIECESQ[(SIDE ^ COLORMASK) << 1] ; jsr attacked
+    C = 1 -> the mover left his own king attacked: jsr unmake, reject
+```
+
+This makes every special case free, because the generator already emits them:
+
+- **castling** — type `e1g1`; the generated entry carries `FL_CASTLE` and `make`
+  moves the rook. No UI code.
+- **en passant** — type `e5d6`; the entry carries `FL_EP`. No UI code.
+- **promotion** — the generator emits four separate entries. If the typed move
+  has a 5th char, match it against `flags & FL_PROMO`; if not, and the matched
+  from/to is a promotion, prompt on row 17: `PROMOTE TO (Q R B N)?` and read one
+  key (through `entkey`). ~30 B.
+- **illegal move** — no match, or the legality test rejects: print
+  `ILLEGAL MOVE - TRY AGAIN` on row 17, clear the input line, do not advance the
+  clock or history. ~20 B.
+- **mate / stalemate** — run the same loop over the whole list counting legal
+  moves. Zero legal moves and `curincheck` set → checkmate; zero and clear →
+  stalemate. ~90 B including the message.
+
+### 5.3 Commands
+
+Files are `a`-`h`, so any other leading letter is unambiguously a command. Single
+keys on the input line:
+
+`N` new game · `T` take back · `R` resign · `D` offer/claim draw · `L` level ·
+`S` swap sides · `?` help.
+
+**Take back** replays rather than un-makes. The UI keeps the game as three
+parallel 256-byte arrays (`UIHFROM`/`UIHTO`/`UIHFLAG`, so a ply index is a plain
+`X` with no multiply — 256 plies = 128 full moves, more than Sargon's 127-move
+limit). Take back = restore the start position, then `make` plies
+0..n-3. At order 300-600 cycles per `make`, a 100-ply replay is ~30-60k cycles
+= 30-60 ms *derived* — imperceptible,
+and it costs **80 B of code instead of a per-ply undo record**, while
+simultaneously being the move list the panel draws.
+
+**Draw claims.** The engine detects repetition and the 50-move rule *inside* the
+search (`search.s` scans `HASHSTK` back `HALFMOVE` plies), but at the root
+`PLY = 0` and there is no game history in `HASHSTK` — exactly the situation
+`internal/ucibridge` handles host-side with `refchess`. On device the UI keeps
+its own 4 × 256-byte hash history: after each game move, `jsr evalinit` leaves
+`HASH0-3` for the new position; push it, and scan the last `HALFMOVE` entries for
+two prior matches. `HALFMOVE >= 100` is the 50-move claim. ~80 B + 1,024 B of LC
+data. The status line then reports `DRAW BY REPETITION` / `DRAW - 50 MOVE RULE`,
+and `D` claims it.
+
+---
+
+## 6. Game flow
+
+### 6.1 New game / colour / level
+
+- `N` → copy a 160-byte start image (128 B `BOARD` + 32 B `PIECESQ`) into place,
+  `CASTLE = $0F`, `EPSQ = NOSQ`, `HALFMOVE = 0`, `SIDE = 0`, `UIHCNT = 0`,
+  `CUROPENING = 0`. The TT is left alone: entries verify `HASH1-3`, so stale
+  entries from the previous game are noise, never wrong.
+- `S` → swap which colour the human has; if the engine now has the move, it moves
+  immediately.
+- `L` → `LEVEL 1..9`, stored to `MAXCAP`. This is the **search depth**, not
+  seconds; see below.
+
+### 6.2 The Apple IIe has no clock — so levels are depths
+
+This is the design's most consequential constraint and it deserves to be stated
+plainly.
+
+The engine's budget mode reads `CLOCK_TRAP` (`$BFF4`) — three absolute reads in
+`search.s checkclock`, plus the predictive gate in `engine.s idloop`. Under the
+harness that address is a live 24-bit cycle counter. **On real hardware it is
+plain RAM.** And the IIe offers no substitute: no real-time clock, no readable
+video counters (that is the IIgs), VBL (`$C019`) only tells you *whether* you are
+in blanking and would have to be polled ~60 times a second by code that is busy
+searching, and the paddle timer is a ~3 ms one-shot.
+
+Therefore the shipped on-device engine runs in **fixed-depth mode**
+(`BUDGET0/1/2 = 0`), which `engine.s` already supports as a first-class path:
+one iteration at `MAXCAP`, no clock read anywhere. Levels 1-9 map to depths
+(≈ 2..8 plus quiescence, with the top level reserved for "as deep as you dare").
+This is also period-honest: fixed-ply levels were standard for 8-bit engines.
+
+### 6.3 `FT2_ADAPT` is not exposed — and what it would take
+
+`FT2_ADAPT` is budget-mode-only by construction, and its parameters
+(`CEILMAX`/`UNSTCEIL`/`MINSPEND`) are deliberately computed **host-side** because
+the on-device engine has no multiply for the ceiling arithmetic. With no clock
+and no host, both halves are missing. Exposing it on device is not a UI decision;
+it is an engine decision, and it has a cheap, specific price:
+
+> Give the engine a **node** budget instead of a cycle budget. `checkclock`
+> already runs once per 128 nodes; adding a 24-bit increment there
+> (`inc N0 / bne + / inc N1 / bne + / inc N2`) is **13 bytes** and **~8 cycles per
+> 128 nodes = 0.06 cycles/node ≈ 0.004%** *derived*. Replacing the three
+> `CLOCK_TRAP` reads with reads of that counter is byte-neutral. Nodes-per-second
+> on a 1 MHz 6502 is near-constant, so a node budget *is* a time budget, and it is
+> exactly the currency `internal/mirror`'s node-budgeted inner loop already uses.
+
+That is a `search.s` change on the hot path and therefore **out of scope for this
+design** — it needs the hot-path owner's sign-off and its own fingerprint run. It
+is recorded here priced so the decision can be made on evidence. Until then:
+fixed depth, and the level menu says `LEVEL n` and means plies.
+
+---
+
+## 7. The search blocks — what the screen does about it
+
+The search runs to completion with interrupts disabled and no callback. Two
+things could give the player feedback, and only one of them is free.
+
+**Rejected: a callback from `checkclock`.** It is the only periodic hook, it
+lives in `search.s`, and it is on the hot path. Not touched.
+
+**Chosen: paint between iterative-deepening iterations.** The UI supplies its own
+ID driver — a fixed-depth-mode port of `engine.s`'s loop, ~40 B, living in LC —
+which calls `jsr iterate` and then repaints row 14 with the completed depth, the
+score, and the best move:
+
+```
+D1  +0.21  e2e4
+D2  +0.14  e2e4
+D3  +0.31  g1f3
+...
+```
+
+Cost: row 14 is ~20 characters. The measured full repaint is 23,659 cycles for
+960 characters = 24.6 cycles/character, so a 20-character line is **~500 cycles**
+(*derived from a measured per-character rate*), plus ~200 cycles of number
+formatting. Call it **~700 cycles per iteration**, ~10 iterations per move =
+**~7,000 cycles per move**. Against a level-5 search of order 10⁷ cycles that is
+**0.07%**, and it is entirely outside `search.s`, `eval.s`, `movegen.s` and
+`board.s`. The engine's tree shape is byte-identical.
+
+This is strictly better than the period reference: Sargon III shows a blinking
+asterisk; 8fish shows the search actually getting deeper and the evaluation
+actually moving, with the natural exponential pacing of iterative deepening
+supplying the "it's alive" signal for free.
+
+The static half is a `THINKING` marker on row 13 painted before the search and
+cleared after (~30 cycles).
+
+---
+
+## 8. Where the code lives, and the byte budget
+
+New files only. **No engine file is modified.** The UI links against the engine's
+published symbols (`iterate`, `generate`, `gennodef`, `make`, `unmake`,
+`attacked`, `curincheck`, `evalinit`, `bookprobe`) via an `engsyms.inc`
+generated from `asm/engine.lbl` by the Makefile, so `engine.bin` stays
+bit-identical and `TestMicroAB` is green by construction (verified: `make engine`
+produces md5 `3902502c…` before and after this work, and `TestMicroAB` passes).
+
+| component | bytes | basis |
+|---|---|---|
+| `uiboard` — 8×8 board paint | **81** | measured |
+| `uicoords` — rank/file labels | **54** | measured |
+| `uimoves` — move-list panel | **114** | measured |
+| `uistatic` — layout-table painter | **50** | measured |
+| `uicls` / `uiputs` / `uigotorc` | **55** | measured |
+| `uisqout` / `uidec2` — square + decimal formatting | **54** | measured |
+| `ROWLO`/`ROWHI` row-base tables | **48** | measured |
+| `PIECECH` piece→screen-byte table | **32** | measured |
+| **renderer subtotal (`asm/ui.s` today)** | **508** | **measured** |
+| `entropy.inc` (keyboard + fold + seed) | 56 | measured (existing file) |
+| line editor (buffer, echo, backspace, RETURN) | 80 | derived |
+| move parse (`e2e4[q]` → FROM/TO/promo) | 70 | derived |
+| move validation + legality (§5.2) | 120 | derived |
+| legal-move count → mate/stalemate | 90 | derived |
+| game hash history + repetition/50-move claim | 80 | derived |
+| ID driver + score formatting + thinking line | 160 | derived |
+| take back (replay from start) | 80 | derived |
+| new game (start-position image + reset) | 190 | derived (160 B is data) |
+| book probe glue + opening-name streaming | 90 | derived |
+| command dispatch (N/T/R/D/L/S/?) | 150 | derived |
+| LCCODE install + reset/IRQ vectors | 45 | derived |
+| static strings, help text, menus | 400 | derived |
+| **code + static data** | **≈ 2,119** | |
+| game history `UIHFROM`/`UIHTO`/`UIHFLAG` | 768 | 3 × 256 |
+| game hash history | 1,024 | 4 × 256 |
+| input buffer, misc state | 100 | |
+| **RAM data** | **≈ 1,892** | |
+| **TOTAL** | **≈ 4,011 of 8,176 B at `$E000-$FFEF`** | **51% headroom** |
+
+**MAIN-RAM cost: 0 bytes.** **TT cost: 0 bytes.** **Book: unmoved.** No
+space-reclamation pass is requested, and the 1,622-byte headroom stays available
+for the strength work it was freed for.
+
+If a later stage wants the hi-res board (§3.1, ~1,850 B) it also fits in LC, and
+the book would move to LC **bank 2** (`$D000-$DFFF`, 4,096 B free, book is
+3,866 B) behind a `$C083`/`$C08B` pair around the once-per-move probe — about
+8 bytes and ~10 cycles. Bank 1's `$D041-$DFFF` (4,031 B) would also just fit, but
+with only 165 B of slack; bank 2 is the safer home.
+
+---
+
+## 9. Proof of concept — what was built and what it proved
+
+Files (all new): `asm/ui.s`, `asm/uitest.s`, `asm/uitest.cfg`,
+`internal/ui/render_test.go`, plus a `uitest` Makefile target.
+
+`asm/uitest.cfg` mirrors the shipping plan exactly: `CODE` loads at `$4000`,
+`UICODE` loads inside the image but **runs at `$E000`**. The `$4000` stub latches
+`$C08B` with the same double read `engine.s` uses, copies `UICODE` up to `$E000`,
+and jumps there. The renderer then paints from `BOARD`, which the Go test poked
+from a FEN exactly the way `chesstest.NewMachine` pokes the engine.
+
+`go test ./internal/ui -v` — **both tests pass**:
+
+```
+=== RUN   TestRenderPosition        (screen capture reproduced in §4)
+--- PASS: TestRenderPosition (0.02s)
+=== RUN   TestRenderCost
+    uiboard  (8x8 board only):      4410.0 cycles =  4.32 ms at 1.0205 MHz
+    paint    (whole 40x24 screen): 23659.0 cycles = 23.18 ms at 1.0205 MHz
+    cold start (LC copy + one paint): 40688 cycles = 39.87 ms
+--- PASS: TestRenderCost (0.52s)
+PASS
+```
+
+`TestRenderPosition` asserts, against a real Ruy Lopez position
+(`r1bqk2r/1pppbppp/p1n2n2/4p3/B3P3/5N2/PPPP1PPP/RNBQ1RK1 w kq -`):
+
+- all 8 board ranks render the correct pieces in the correct case;
+- all 128 board characters carry the correct inverse/normal attribute
+  (dark iff `rank+file` is even, **both** halves of every cell);
+- rank digits, file letters, the inverse title bar, the move panel (which lists
+  the same game that produced the position), and every status/prompt row.
+
+`TestRenderCost` measures by difference — the image repaints N extra times and
+two runs are subtracted — so the numbers carry no timer-resolution error.
+
+Byte sizes come from `ca65` evaluating label differences at assembly time, and
+the image layout from the `ld65` segment map.
+
+**What this de-risks (the riskiest parts, in order):**
+
+1. **The Language Card really is usable and really is free.** Code assembled for
+   `$E000`, copied there at run time, executes correctly under the emulator. This
+   is what makes the whole zero-MAIN-cost budget real rather than aspirational.
+2. **The text board is legible and the two-channel encoding works.** Checker
+   *and* piece colour survive together; the attribute assertion proves it for all
+   64 squares.
+3. **The cost is negligible.** A full-screen repaint after every single move
+   costs 23 ms — about 0.1% of a 30-second move, and about one and a half video
+   frames. There is no reason to ever do partial repaints, which removes a whole
+   category of incremental-update bugs from the design.
+4. **The engine is untouched.** `engine.bin` md5 is unchanged and `TestMicroAB`
+   passes.
+
+**Not yet de-risked** (and honestly so): keyboard input on real hardware (the
+harness stands in for `$C000`/`$C010` via `HARNESSKBD`, which is how
+`internal/entropy` already validates the collector); the actual IIe character
+generator (goapple2 carries the ][+ 2 KB character ROM and does not model
+`ALTCHARSET`, so the inverse-lowercase glyphs are verified as *bytes* against the
+documented IIe encoding, not as pixels); and everything in §5-§7 that is a plan
+rather than code.
+
+---
+
+## 10. Implementation plan
+
+Each step is independently verifiable in the emulator, and each ends green before
+the next starts.
+
+1. **Renderer** — `asm/ui.s` + `internal/ui`. **DONE**; 508 B, 23.2 ms full
+   repaint, tests passing.
+2. **Symbol bridge.** Makefile rule turning `asm/engine.lbl` into
+   `asm/engsyms.inc`, and an `asm/ui.cfg` that links `ui.s` standalone at `$E000`
+   against it. *Verify:* build `ui.bin`; assert `engine.bin` md5 is unchanged and
+   `TestMicroAB` still passes.
+3. **Keyboard + line editor.** `entkey`-driven input line with echo, backspace and
+   RETURN, painting row 23. *Verify:* extend `internal/ui` to drive the harness
+   input traps (`internal/entropy`'s existing pattern) and assert both the echoed
+   line and that `ENTROPY` changed on every keystroke.
+4. **Move parse + validation.** `e2e4[q]` → generator match → legality test.
+   *Verify:* a Go table of (FEN, typed move, accept/reject) including castling,
+   en passant, both promotion spellings, a pinned piece, and a move that leaves
+   the king in check — cross-checked against `internal/refchess`.
+5. **Make the move, update the display.** Push to the history arrays, `make`,
+   repaint. *Verify:* play a scripted 10-ply game; compare the resulting `BOARD`
+   against `refchess` and the move panel against the script.
+6. **Game-over detection.** Legal-move count, mate/stalemate, `HALFMOVE >= 100`,
+   repetition via the UI's hash history. *Verify:* known mate-in-1, stalemate,
+   50-move and threefold positions; assert the status row text.
+7. **Engine's turn.** Fixed-depth ID driver + between-iteration thinking line +
+   apply the engine's move. *Verify:* a fixed FEN and depth must produce the same
+   `BESTFROM/BESTTO/BESTFLAGS` as `chesstest.SearchMove` on the same position —
+   proving the UI-driven engine plays byte-identical chess.
+8. **Book integration.** `jsr bookprobe` before searching; on a hit, play it and
+   stream the `CUROPENING` name from the blob's name table to row 16.
+   *Verify:* a booked position must reproduce
+   `TestBookProbeParityASMvsGo`'s choice for the same `BOOKRND`.
+9. **Commands.** New game, take back (replay), resign, draw offer/claim, level,
+   swap sides, help. *Verify:* scripted key sequences; take back must restore a
+   `BOARD` byte-identical to the position before the move.
+10. **Boot path + vectors.** The `$0800` copier, `BLOAD` layout, LCCODE install,
+    `$FFFA-$FFFF`. *Verify:* full cold start in the emulator; then on hardware or
+    a full goapple2 machine with a disk image.
+11. **Whole-game soak.** Drive a complete game keystroke-by-keystroke through the
+    harness against `refchess` as referee, asserting agreement every ply — the
+    same discipline `internal/sargon`'s `CrossCheckHistory` applies to Sargon.
+
+Steps 1-9 need no hardware. Step 10 is the first that does.
+
+---
+
+## 11. Risks
+
+1. **Biggest risk — no clock on the target machine (§6.2).** It is not a UI bug;
+   it is a fact about the IIe that the harness has been hiding, and it means the
+   on-device engine ships in fixed-depth mode and `FT2_ADAPT` — a validated,
+   measured feature — cannot run at all. The fix is a 13-byte, ~0.004% node
+   counter in `checkclock`, but that is a hot-path change and belongs to the
+   search owner. **Decide this before shipping**, because "levels are plies" vs
+   "levels are node budgets" changes the level menu, the manual, and how 8fish
+   compares to Sargon's time-based levels in any future match.
+2. **Character-generator verification gap.** goapple2 carries the ][+ 2 KB
+   character ROM and does not model `ALTCHARSET`, so inverse lowercase is
+   verified as bytes-against-the-documented-encoding, not as pixels. If a real
+   IIe disagrees, the fallback in §3.2 is a 32-byte table swap.
+3. **The 6502 vectors at `$FFFA-$FFFF` are RAM** once LC read is enabled. The UI
+   must write them (RESET → UI entry, IRQ/BRK → a safe handler). Whether Ctrl-Reset
+   on a IIe forces ROM back in before the vector fetch needs hardware
+   confirmation; the emulator will not settle it.
+4. **Symbol drift.** The UI links against addresses from `engine.lbl`, which move
+   on every engine rebuild. The Makefile regenerates `engsyms.inc`, so the failure
+   mode is a stale build, not a wrong one — but the rule must be a real
+   dependency, not a manual step.
+5. **Rebase.** The hot path is being optimised concurrently. Everything here is in
+   new files (`asm/ui.s`, `asm/uitest.s`, `asm/uitest.cfg`, `internal/ui/`) plus
+   two additive Makefile rules, so the rebase surface is a Makefile and nothing
+   else.

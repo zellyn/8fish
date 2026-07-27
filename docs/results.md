@@ -3,7 +3,61 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
-## 2026-07-27 — ★ THE HARDWARE CLOCK BLOCKER IS CLOSED: an on-device elapsed-time ESTIMATOR (FT2_SOFTCLK), **+0.0073% cycles**, aggregate estimate/truth **1.052**
+## 2026-07-27 — ★ FT2_SOFTCLK Elo A/B: **DO NOT ENABLE.** It "wins" +29 ± 26 by OVERRUNNING its clock 17%, and the static accuracy test had the bias BACKWARDS
+
+The deciding measurement for the entry below. Soft clock vs exact clock,
+both sides otherwise the shipped config, **per-GAME banked** mode (the
+honest one: the bank is debited REAL cycles, so an engine whose estimate
+runs short cannot launder the overrun — which is what a tournament clock
+would do to it on hardware).
+
+    A(0x5f/a2 0x30 soft) vs B(0x5f/a2 0x10 exact) @ 4000ms, 400 games
+    +132 =169 -99   score 54.1%   elo +29 +/- 26   llr(0,10) 1.37
+    spend: A_total=88,200,069,492  intended=75,337,200,000  adherence=1.1707
+           B_total=69,997,151,425  intended=75,300,480,000  adherence=0.9296
+           equal-total-spend A/B = 1.2601  (A used 26.01% MORE)
+
+**The +29 Elo is an artifact, not a result.** The soft-clock side used
+**26% more total cycles** than its opponent. At the project's measured
+130-150 Elo/doubling, 26% more compute is ~0.33 doublings ≈ +43 Elo of
+expected gain — so the observed +29 is fully explained by the extra
+compute, with nothing left over to credit the estimator. Read as
+"FT2_SOFTCLK is worth +29 Elo" this would be one of the worst overclaims
+in this log; the spend accounting is the only reason it is not.
+
+**On real hardware this is not a bonus, it is a forfeit.** A 17% overrun
+against a tournament clock means flagging. The engine believes it still
+has time when it does not.
+
+**★ And the static accuracy test had the SIGN BACKWARDS.**
+`TestSoftClockAccuracy` measured aggregate est/truth = **1.052**, i.e. the
+estimator OVERSTATES elapsed time, which would make the engine stop EARLY
+and spend LESS (adherence < 1). In actual games it spends **17% MORE**, so
+in game conditions the estimator runs LOW. The two measurements disagree
+in direction, not merely in magnitude.
+
+So the 284-position pool test is **not representative of game conditions**
+and must not be trusted as the estimator's acceptance gate. Most likely
+mechanism (to be confirmed, not assumed): the pool searches each start
+from a comparatively cold TT, while a real game carries a warm TT across
+moves via the aux bank, changing the node mix the per-node cost model is
+supposed to price. This is the same class of instrument defect as the
+budgeted-ID divergence and the endgame cost mispricing — a measurement
+that looked clean because it was measuring the wrong situation.
+
+**Actions taken:** FT2_SOFTCLK stays OFF everywhere. The estimator needs
+recalibration under GAME conditions (warm TT, banked income), and the
+acceptance gate must be adherence-in-game, not pool est/truth. Re-measure
+after. The feature bit, the identical-instruction-stream OFF path, and the
+harness's exact-clock mode all stay — this is a calibration failure, not a
+design failure, and the exact-clock path is what caught it.
+
+**Also note the safe direction:** overestimating elapsed time is benign
+(the engine stops early and plays slightly weaker), underestimating is
+not (it overruns and, on hardware, loses on time). The recalibration
+should be deliberately biased to overestimate.
+
+## 2026-07-27 — the FT2_SOFTCLK build: an on-device elapsed-time ESTIMATOR, **+0.0073% cycles**, aggregate estimate/truth **1.052** (superseded above)
 
 The blocker filed with the UI design that morning: `checkclock` reads
 `CLOCK_TRAP` (`$BFF4`), which is a live cycle counter **only under the

@@ -489,7 +489,7 @@ func colVal(r asmRow, name string) float64 {
 //
 // It minimizes RELATIVE error: every row is divided by its own cycle total
 // before the least-squares solve. That is not cosmetic. The calibration set
-// spans 4.8M to 940M cycles per search, so plain least squares is a
+// spans 4.8M to 2.5G cycles per search, so plain least squares is a
 // cycle-weighted average that lets the handful of huge midgame searches set
 // every coefficient and leaves the cheap low-material ones with almost no
 // leverage — which is exactly how the old constant-cost model came to

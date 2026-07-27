@@ -77,8 +77,8 @@ search.s+tt.s 24.2% vs node+phase+ttprobe 22.2%. Two independent
 instruments, ~2 points apart.
 
 **End-to-end validation on an INDEPENDENT pool** — `TestBudgetModeParity`,
-284 budget-mode positions (2 configs x 2 budgets x 71 starts) at the shipped
-FEATURES 0x5F, comparing the mirror's `Cyc.Est` against the asm's real
+284 budget-mode positions (2 configs x 2 budgets x 71 starts) at FEATURES
+0x5F and 0x1F, comparing the mirror's `Cyc.Est` against the asm's real
 emulated cycles on identical trees. This is the instrument that filed the
 defect (the 0.776 / 0.999 numbers). Same gate, same positions, only the cost
 table changed:
@@ -94,8 +94,8 @@ table changed:
 
 The two subsets used to disagree by 22 points and now agree to 5. The
 remaining ~5-7% level offset (mirror slightly UNDER-charges) is expected:
-the model is fit at masks 0x1F/0x07/0x00 and this gate runs the shipped 0x5F
-with check extensions. **A second carve-out fell with the first**: that
+the model is fit at masks 0x1F/0x07/0x00 and half this gate runs the shipped
+0x5F, whose check extensions the model never saw. **A second carve-out fell with the first**: that
 gate's one-sided depth-skew assertion was scoped to the openings pool
 precisely because of this pricing bias; it now asserts on the endgame subset
 too.

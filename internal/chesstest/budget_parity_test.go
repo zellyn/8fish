@@ -83,10 +83,11 @@ import (
 //   - spend ratio (asm cycles / mirror Cyc.Est) on identical trees: median
 //     within [0.85, 1.15] on each of the two subsets — the cycle model's own
 //     documented accuracy. (Measured 2026-07-27: 1.073 openings, 1.023
-//     endgame. The model is fit at masks 0x1F/0x07/0x00; this gate runs the
-//     shipped 0x5F, so a few points of level offset is expected. What matters
-//     is that the two subsets now agree with each other to 5 points, where
-//     they used to differ by 22.) This is the instrument-health assertion; it fires
+//     endgame. The model is fit at masks 0x1F/0x07/0x00; half of this gate
+//     runs the shipped 0x5F, whose check extensions the model never saw, so a
+//     few points of level offset is expected. What matters is that the two
+//     subsets now agree with each other to 5 points, where they used to
+//     differ by 22.) This is the instrument-health assertion; it fires
 //     if the model drifts or an operation stops being charged.
 // ---------------------------------------------------------------------------
 

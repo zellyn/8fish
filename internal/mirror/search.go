@@ -28,6 +28,21 @@ func (e *Engine) SearchFixed(depth int) (Move, int) {
 // move is always produced. Deterministic given (position, budget,
 // features, dither seed): the budget is denominated in nodes, never wall
 // time, so an A/B replay is bit-identical.
+//
+// KNOWN DIVERGENCES FROM THE ASM DRIVER (budget mode only; every asm<->mirror
+// parity gate is fixed-depth and exact). Recorded by the 2026-07-26 quirk
+// audit so nobody has to re-derive them:
+//  1. asm/engine.s `idok` STOPS iterative deepening the moment a completed
+//     iteration returns a WINNING mate ("deepening can't improve it"); the
+//     mirror keeps deepening and spends the rest of the budget.
+//  2. The asm's hard abort is 2x BUDGET (ABORTL) and its soft gate is
+//     PREDICTIVE (start the next iteration only if now + 2*last-iteration
+//     cost fits the budget); the mirror hard-aborts at 1x budget with a
+//     cumulative halfway gate, so for the same nominal budget it runs a
+//     slightly SHALLOWER ID than the asm would.
+//
+// Neither changes any fixed-depth tree, but both shift the depth a budgeted
+// mirror screen buys relative to the shipped engine.
 func (e *Engine) SearchBudget(budget uint64, maxDepth int) (Move, int) {
 	e.Nodes = 0 // per-move node accounting for the budget
 	e.resetCycles()
@@ -357,14 +372,13 @@ func (e *Engine) search() int {
 			}
 		}
 		// RFP + forward futility, guarded away from mate-zone windows.
-		// The asm's current guard uses an unsigned compare, so ANY
-		// negative alpha or beta silently skips the block (futility
-		// fires only when the whole window is in [0, +mate-zone)) — a
-		// bug. The signed-aware guard (Fut.CorrectGuard / the deprecated
-		// FixFutilityGuard) enables the block in every non-mate window;
-		// the margins (Fut.RFP by remaining depth, Fut.Fut for the leaf)
-		// are then the real tuning surface, since the corrected guard
-		// re-margined is the port target, not the reverted bug.
+		// The asm SHIPS the signed-aware guard (asm/search.s rfpapos:
+		// bmi first, then MATEZONEHI/NMATEZONEHI), so Fut.CorrectGuard =
+		// true (DefaultFutility) is the faithful model. The false branch
+		// reproduces the HISTORICAL asm bug — an unsigned compare, under
+		// which ANY negative alpha or beta silently skipped the block —
+		// and is retained only as the A/B lever that measured the fix
+		// (Fut.CorrectGuard / the deprecated FixFutilityGuard).
 		correctGuard := e.FixFutilityGuard || e.Fut.CorrectGuard
 		var guardOK bool
 		if correctGuard {
@@ -851,15 +865,10 @@ func (e *Engine) ttprobe() (*ttEntry, int, bool) {
 	if ent.depthBound&3 == 0 || ent.verify != p.Hash>>8 {
 		return nil, 0, false
 	}
-	// Mate scores are stored node-relative.
+	// Mate scores are stored node-relative (asm tt.s ttadj: the SIGNED
+	// MATEZONEHI/NMATEZONEHI zone test).
 	score := int(ent.score)
-	if e.TTPlyQuirk {
-		// asm tt.s: hi >= $74 unsigned, i.e. a winning mate OR any negative
-		// score, takes the -Ply path; nothing else is adjusted.
-		if score >= mateZoneLo || score < 0 {
-			score -= p.Ply
-		}
-	} else if score >= mateZoneLo {
+	if score >= mateZoneLo {
 		score -= p.Ply
 	} else if score <= nmateZoneHi {
 		score += p.Ply
@@ -884,11 +893,8 @@ func (e *Engine) ttstore(bound int, from, to byte, score int) {
 	if depth > 31 {
 		depth = 31
 	}
-	if e.TTPlyQuirk {
-		if score >= mateZoneLo || score < 0 {
-			score += p.Ply // asm tt.s' unsigned hi >= $74 classification
-		}
-	} else if score >= mateZoneLo {
+	// Inverse of the probe adjustment (asm tt.s tsadj).
+	if score >= mateZoneLo {
 		score += p.Ply
 	} else if score <= nmateZoneHi {
 		score -= p.Ply

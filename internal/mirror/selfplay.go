@@ -10,10 +10,21 @@ import (
 // PlayerCfg configures one side of a self-play game. A nil LMR means
 // the asm's current rules (DefaultLMR).
 type PlayerCfg struct {
-	Features    byte
-	Weights     Weights
-	Depth       int
-	LMR         *LMRParams
+	Features byte
+	Weights  Weights
+	Depth    int
+	LMR      *LMRParams
+	// QS is copied into the engine UNCONDITIONALLY, so the zero value here
+	// is the UNLIMITED quiescence (RecapAfter 0), NOT the asm's shipped
+	// recap2 shape — a screen that omits it measures an engine that
+	// searches a QS tree several times larger than the one that ships.
+	// Set QS: DefaultQS unless the experiment is specifically about QS
+	// shape. (This trap already cost the Texel corpus once; see
+	// GenerateData's 2026-07-23 fix. AUDIT 2026-07-26: budget_test,
+	// effort_test, ordering_test, mopup_match_test, mopup_conversion_test
+	// and search_test still omit it — their A/B sides share the same wrong
+	// QS, so the deltas remain internally valid, but the absolute engine
+	// they screen is not the shipped one.)
 	QS          QSParams
 	FixFutility bool
 	Fut         *FutilityParams

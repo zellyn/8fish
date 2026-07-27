@@ -65,18 +65,14 @@ type Engine struct {
 	// CheckExts counts extensions actually applied (diagnostic; the asm
 	// parity harness compares it against the asm's own count).
 	CheckExts uint64
-	// TTPlyQuirk models a HISTORICAL asm defect in the TT's node-relative
-	// mate bookkeeping (asm/tt.s ttstore/ttprobe): the classification
-	// `lda scoreHi : cmp #$74 : bcc ...` was an UNSIGNED compare, so EVERY
-	// NEGATIVE score (high byte $80-$FF) took the winning-mate path and got
-	// +Ply on store / -Ply on probe (and the losing-mate branch was dead
-	// code). A score stored at ply s and read at ply p came back off by s-p
-	// centipawns whenever it was negative, and a losing mate was shifted the
-	// WRONG WAY. The asm now uses a signed zone test (MATEZONEHI /
-	// NMATEZONEHI, the same shape as search.s' RFP guard), so the mirror's
-	// own signed-correct arithmetic — this flag OFF — is the faithful model.
-	// Kept only so the pre-fix trees can still be reproduced for archaeology.
-	TTPlyQuirk bool
+	// (The TTPlyQuirk flag lived here: it modelled asm/tt.s' UNSIGNED
+	// `cmp #$74` mate classification, which ply-shifted every NEGATIVE
+	// stored score. The asm was fixed to a signed zone test (MATEZONEHI /
+	// NMATEZONEHI) on 2026-07-25, at which point the mirror's own
+	// signed-correct ttstore/ttprobe became the faithful model and the flag
+	// was dead. DELETED 2026-07-26: modelling an asm defect in the mirror is
+	// how that bug survived every parity gate for weeks; the pre-fix trees
+	// are in git history if archaeology ever needs them.)
 
 	// CM configures the countermove heuristic in the five-pass moveLoop
 	// (zero value = off: a byte-identical no-op). See countermove.go.
@@ -222,16 +218,17 @@ type LMRParams struct {
 var DefaultLMR = LMRParams{LateR1: 4, LateR2: 7, MinRemR1: 3, MinRemR2: 5, EvasionPVS: true}
 
 // FutilityParams configure the reverse-futility-pruning (RFP) and
-// forward (leaf) futility block in search(). The asm currently hard-
-// codes a single unsigned-compare guard plus two static margins
-// (120 @ remaining 1, 250 @ remaining 2). This struct makes both the
-// guard and the depth-indexed margins tunable so the corrected guard
-// can be re-margined rather than reverted.
+// forward (leaf) futility block in search(). The asm SHIPS the corrected
+// signed-aware guard with margins 120 @ remaining 1 / 500 @ remaining 2
+// (asm/search.s rfpapos..rfphave); this struct keeps both the guard and
+// the depth-indexed margins tunable so the scheme can be re-margined.
 type FutilityParams struct {
 	// CorrectGuard selects the signed-aware guard (RFP/futility active
-	// in every non-mate-zone window). The asm's current guard uses an
-	// unsigned compare, so ANY negative alpha or beta silently disables
-	// the block — a bug. false reproduces that bug; true is the fix.
+	// in every non-mate-zone window), which is what the asm now does.
+	// false reproduces the HISTORICAL asm bug — an unsigned compare, so
+	// ANY negative alpha or beta silently disabled the block — and exists
+	// only as the A/B lever that measured the fix. Never use it to model
+	// the shipped engine.
 	CorrectGuard bool
 	// RFP is the reverse-futility margin indexed by remaining depth
 	// (RFP[r] used when remaining == r). A zero margin disables RFP at
@@ -249,8 +246,9 @@ type FutilityParams struct {
 // behavior was the unsigned-compare guard with RFP 120/250; enabling
 // the correct guard at 250 over-prunes remaining-2 nodes in negative
 // windows for −43 Elo, but at 500 it is neutral-to-positive
-// (+4 ± 14 over 1600 depth-6 games) while keeping −16.9% nodes. This is
-// the asm port target; we do not re-enshrine the unsigned-compare bug.
+// (+4 ± 14 over 1600 depth-6 games) while keeping −16.9% nodes. PORTED:
+// asm/search.s ships exactly this (signed zone test + 120/500), so this
+// is the faithful model, not a port target.
 var DefaultFutility = FutilityParams{
 	CorrectGuard: true,
 	RFP:          [8]int{0, 120, 500},

@@ -506,6 +506,28 @@ func (e *Engine) moveLoop() int {
 		pass = 0
 	}
 
+	// GenDefer diagnostic (deferred-generation study): tally this node's
+	// generation and TT-move situation. gdFound/gdLegal are per-node
+	// latches so a TT promotion (four list entries share from/to) counts
+	// once. Off by default: a byte-identical no-op.
+	gd := e.GenDeferCount
+	var gdFound, gdLegal bool
+	if gd {
+		if qs {
+			e.GenDefer.QSNodes++
+		} else {
+			e.GenDefer.FWNodes++
+			e.GenDefer.ListLen += uint64(len(list))
+			if ply >= e.MaxDepth {
+				e.GenDefer.Evasion++
+			}
+			if e.ttFrom[ply] != NoSq {
+				e.GenDefer.TTAvail++
+				e.GenDefer.AvailLen += uint64(len(list))
+			}
+		}
+	}
+
 	// Late-move pruning arming (same rule as orderedMoveLoop): quiets are
 	// passes 3 (killers) and 4 (non-killer), so once the node qualifies the
 	// per-move test is a pure count compare. Never armed at qs nodes
@@ -544,6 +566,11 @@ func (e *Engine) moveLoop() int {
 			if pass == 0 {
 				if m.From != e.ttFrom[ply] || m.To != e.ttTo[ply] {
 					continue
+				}
+				if gd && !gdFound {
+					gdFound = true
+					e.GenDefer.TTFound++
+					e.gdSample(m)
 				}
 			} else if pass != 7 && e.ttFrom[ply] != NoSq && m.From == e.ttFrom[ply] && m.To == e.ttTo[ply] {
 				continue
@@ -683,6 +710,10 @@ func (e *Engine) moveLoop() int {
 				e.QSCheckNodes++
 			}
 			e.legal[ply]++
+			if gd && pass == 0 && !gdLegal {
+				gdLegal = true
+				e.GenDefer.TTLegal++
+			}
 
 			// Child window mode (FT_LMR: PVS + late move reductions),
 			// mirroring the asm smset block: 0 = full window, 1 = zero-
@@ -759,6 +790,10 @@ func (e *Engine) moveLoop() int {
 
 			if score >= e.beta[ply] {
 				// Fail-hard beta cutoff.
+				if gd && pass == 0 {
+					e.GenDefer.TTCut++
+					e.GenDefer.CutLen += uint64(len(list))
+				}
 				if !qs {
 					if e.Features&FtKiller != 0 && p.Board[m.To] == 0 &&
 						m.Flags&(FlEP|FlPromo) == 0 {
@@ -842,6 +877,43 @@ func (e *Engine) moveLoop() int {
 				return e.done()
 			}
 		}
+	}
+}
+
+// gdSample records the operand shape of a TT move that pass 0 matched,
+// for the deferred-generation cost model (diagnostic only; see
+// GenDeferStats). Called at most once per node.
+func (e *Engine) gdSample(m Move) {
+	p := &e.Pos
+	typ := p.Board[m.From] & TypeMask
+	e.GenDefer.AvailType[typ&7]++
+	if p.Board[m.To] != 0 {
+		e.GenDefer.AvailCap++
+	}
+	if m.Flags&FlPromo != 0 {
+		e.GenDefer.AvailPromo++
+	}
+	if m.Flags&FlCastle != 0 {
+		e.GenDefer.AvailCastle++
+	}
+	if m.Flags&FlEP != 0 {
+		e.GenDefer.AvailEP++
+	}
+	if typ == Bishop || typ == Rook || typ == Queen {
+		df := int(m.To&0x0F) - int(m.From&0x0F)
+		dr := int(m.To>>4) - int(m.From>>4)
+		if df < 0 {
+			df = -df
+		}
+		if dr < 0 {
+			dr = -dr
+		}
+		d := df
+		if dr > d {
+			d = dr
+		}
+		e.GenDefer.AvailRay += uint64(d)
+		e.GenDefer.AvailRayN++
 	}
 }
 

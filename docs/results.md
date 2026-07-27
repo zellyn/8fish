@@ -3,6 +3,69 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — UI design + PoC: the Language Card was never used (8,176 B free), and a REAL hardware blocker found
+
+Design doc: `docs/ui-design.md`. PoC: `asm/ui.s` + `asm/uitest.s` +
+`internal/ui/`. Engine untouched — `engine.bin` md5 `3902502c` byte-identical
+across the merge, `TestMicroAB` green.
+
+**Recommendation adopted:** 40-column text page 1, inverse-video
+checkerboard, typed coordinate move entry (`e2e4`) validated against the
+engine's own generator, fixed-depth levels, progress printed between ID
+iterations from the UI's own driver loop — so `search.s` is not touched.
+
+**The resource finding: this project has never used its Language Card.**
+The engine latches `$C08B` at entry and uses just 65 bytes of it (`LCCODE`
+at `$D000`). `$E000-$FFEF` is **8,176 bytes of ordinary, directly
+executable RAM** in the normal address space — no banking, no aux
+primitives. The UI lives there, so it costs the engine **nothing**: 0 MAIN
+bytes, 0 TT entries, book stays at `$2000`, the 1,622 B MAIN headroom is
+untouched and no space-reclamation pass is needed. Measured PoC: board
+repaint **4,410 cycles (4.32 ms)**, full 40×24 repaint **23,659 cycles
+(23.2 ms)** — by difference over N vs N+1000 repaints, so no
+timer-resolution error. Budget ~4,011 B of 8,176, leaving 51% headroom.
+
+Note for optimization work: this is >5× the MAIN headroom, and at least one
+optimization was previously rejected **on space** (colour-specialised PSQT
+needed 3,072 B against 1,622 B available). Whether search tables can live
+in LC is now worth asking — with the UI's own claim on the space counted.
+
+Hi-res was priced, not dismissed: 28-pixel byte-aligned squares cost
+~1,850 B and ~80,000 cycles and would also fit in LC (book moving to LC
+bank 2 behind one `$C083`/`$C08B` pair), but mixed mode leaves only 4 text
+rows, losing the simultaneous move list + opening name + thinking readout
+that 40-col text affords — which is exactly why Sargon needs ESC to
+toggle. DHGR is rejected outright: it eats aux `$2000-$3FFF`, **25% of the
+transposition table**.
+
+**★ THE BLOCKER: the Apple IIe has no readable clock, so budget mode
+cannot run on real hardware.** `checkclock` reads `CLOCK_TRAP` (`$BFF4`),
+which is a live counter only under the harness; on hardware it is plain
+RAM. There is no substitute — no RTC, no readable video counters (that is
+the IIgs), VBL needs polling by code that is busy searching, and the paddle
+timer is a 3 ms one-shot. Consequences: levels must ship as **plies**, and
+**`FT2_ADAPT` — a validated, measured feature — cannot run at all**, being
+budget-mode-only with host-computed ceilings.
+
+This has been latent all along: every match result in this log was measured
+under a harness that supplies a clock the target hardware does not have.
+It does not invalidate those Elo numbers (both engines were measured on the
+same instrument) but it does mean the shipped on-device engine is not yet
+the engine we benchmarked. Proposed fix, priced but NOT yet applied because
+it is a `search.s` hot-path change: give the engine a **node** budget —
+`checkclock` already runs once per 128 nodes, so a 24-bit increment there
+is **13 bytes and ~0.004%** (derived), and replacing the three `CLOCK_TRAP`
+reads is byte-neutral. Nodes/sec on a 1 MHz 6502 is near-constant, so a
+node budget *is* a time budget, and it is the currency `internal/mirror`
+already uses. Filed as its own task; decide before shipping, since it
+changes the level menu and how 8fish compares to Sargon's timed levels.
+
+Secondary risks recorded in the design doc: goapple2 carries the ][+
+character ROM and does not model `ALTCHARSET`, so inverse lowercase is
+verified as *bytes* against the documented IIe encoding rather than pixels
+(32-byte table swap is the fallback); and `$FFFA-$FFFF` are RAM once LC
+read is enabled, so the UI must write sane vectors.
+
 ## 2026-07-27 — ★ THE MULTI-ITERATION TT DIVERGENCE IS CLOSED: it was the tt.s unsigned mate-zone compare, already fixed. Two new gates now cover the hole.
 
 The last unexplained asm↔mirror divergence — "past ~depth 6, in

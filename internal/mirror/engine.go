@@ -51,6 +51,13 @@ type Engine struct {
 	QSNodes      uint64 // nodes entered at ply >= MaxDepth (evasion included)
 	QSCheckNodes uint64 // quiet checking moves searched from QS nodes (task #37)
 
+	// GenDeferStats is a pure DIAGNOSTIC tally (never read by the search)
+	// for the deferred-generation study: at full-width nodes, how often
+	// does the TT move alone end the node, making the eager generate()
+	// at snode entirely wasted work? Enabled by GenDeferCount.
+	GenDeferCount bool
+	GenDefer      GenDeferStats
+
 	// LMP configures late-move (movecount) pruning in the scored move
 	// loop (zero value = off).
 	LMP LMPParams
@@ -386,6 +393,43 @@ type QSParams struct {
 	// whose destination square is attacked by an enemy pawn (cheap "the
 	// checker hangs to a pawn" filter). Off = all quiet checks searched.
 	SafeChecks bool
+}
+
+// GenDeferStats (diagnostic) measures the OPPORTUNITY for deferring move
+// generation past the TT move at full-width nodes. The asm's snode calls
+// gennodef (full generation) BEFORE pass 0 hunts the TT move in the list,
+// so every node whose TT move alone causes a beta cutoff generated the
+// whole list for nothing. Counters are cumulative over the engine's life
+// and are never read by the search.
+//
+// Node taxonomy (matches asm/search.s): a "full-width" node is any node
+// that reaches gennodef — that is every node with ply < MaxDepth, PLUS
+// the in-check evasion nodes at ply >= MaxDepth (asm: squiesce -> snode).
+// Evasion nodes never probe the TT, so they are split out.
+type GenDeferStats struct {
+	FWNodes  uint64 // nodes that reached full generation (asm: snode)
+	Evasion  uint64 // ... of which in-check evasion nodes (never TT-probed)
+	TTAvail  uint64 // ... with a TT move stored for this ply
+	TTFound  uint64 // ... whose TT move was actually present in the list
+	TTLegal  uint64 // ... and survived the king-safety legality test
+	TTCut    uint64 // ... and produced a beta cutoff (node returns in pass 0)
+	ListLen  uint64 // total pseudo-legal moves generated at FWNodes
+	CutLen   uint64 // ... generated at the TTCut nodes specifically
+	AvailLen uint64 // ... generated at the TTAvail nodes specifically
+	QSNodes  uint64 // qs capture nodes (no TT pass exists there at all)
+
+	// Operand distribution of the TT move, sampled at the first pass-0
+	// match. This is what prices a `ttmovevalid` routine honestly: a
+	// knight move costs a table lookup, a queen move costs a ray walk,
+	// a pawn move takes a bespoke path, and castling needs two attacked()
+	// scans. Indexed by piece TYPE (Pawn..King).
+	AvailType [8]uint64
+	// AvailRay is the total number of ray STEPS a slider validation would
+	// walk (Chebyshev distance) for bishop/rook/queen TT moves, and
+	// AvailRayN the number of such moves — the ray-walk cost driver.
+	AvailRay, AvailRayN uint64
+	// Special-case counts among TT-available moves.
+	AvailCap, AvailPromo, AvailCastle, AvailEP uint64
 }
 
 // DefaultQS is the asm's current quiescence shape: recap-gated at qs ply

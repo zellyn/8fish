@@ -806,6 +806,13 @@ func parseQS(s string) mirror.QSParams {
 		os.Exit(2)
 	}
 	q.SafeChecks = safe != 0
+	// "0,0" is the documented UNLIMITED-QS experiment baseline. Since
+	// PlayerCfg's zero value now means the SHIPPED shape (DefaultQS/recap2 —
+	// the old zero-is-unlimited semantics silently screened a fictional
+	// engine), map it to the explicit sentinel so the CLI contract holds.
+	if q == (mirror.QSParams{}) {
+		return mirror.QSUnlimited
+	}
 	return q
 }
 

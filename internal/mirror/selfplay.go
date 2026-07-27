@@ -123,7 +123,22 @@ func (c *PlayerCfg) engine() *Engine {
 	if c.LMR != nil {
 		e.LMR = *c.LMR
 	}
-	e.QS = c.QS
+	// QS zero value means "the SHIPPED shape" (DefaultQS = recap2), not
+	// unlimited quiescence. The old zero-value-is-unlimited semantics was a
+	// trap: a screen that simply omitted QS silently measured an engine with
+	// a several-times-larger QS tree than the asm's, so its absolute strength
+	// was not the ship's (A/B deltas stayed valid — both sides shared the
+	// wrong shape — but the engine under test was fiction). It corrupted the
+	// Texel corpus once (fixed 2026-07-23) and was still live in six screens.
+	// Ask for unlimited QS explicitly with QSUnlimited.
+	switch {
+	case c.QS == (QSParams{}):
+		e.QS = DefaultQS
+	case c.QS == QSUnlimited:
+		e.QS = QSParams{}
+	default:
+		e.QS = c.QS
+	}
 	e.FixFutilityGuard = c.FixFutility
 	if c.Fut != nil {
 		e.Fut = *c.Fut

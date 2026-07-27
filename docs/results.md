@@ -3,6 +3,73 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-26 — differential audit: full-game parity CLEAN; two instrument bugs found; Sargon driver had 6 defects
+
+zellyn asked two questions after the tt.s bug: could earlier verdicts be
+wrong, and how do we make sure nothing else is lurking? He proposed the
+right invariant — "should we make exactly the same plays as our mirror?"
+
+**FULL-GAME PARITY GATE (new, and it is CLEAN).** Complete games, both
+engines identical, fixed depth, comparing move + score + FIVE tree
+fingerprints (search entries, makes, evals, makenulls, QS nodes) at every
+ply, over 142 starts × 2 configs: **4581 plies / 3113 distinct positions /
+71.4M emulated nodes, BYTE-IDENTICAL** — not even the ±1 legality-probe
+tolerance the old spot-check allowed. The historical 0.9–24× QS gap is
+genuinely gone, not papered over. Plus 510 random pawnless endgames, 0
+eval mismatches. (Three initial "divergences" were illegal FENs the audit
+itself wrote — the loop now rejects an illegal start loudly.)
+
+**QUIRK AUDIT — the process failure named.** When mirror and asm
+disagreed we had sometimes taught the MIRROR to imitate the asm rather
+than asking which was right; that is how the tt.s bug survived every
+gate. 12 quirks reviewed: TTPlyQuirk confirmed dead and DELETED; stale
+lore still claimed the asm's futility guard was unsigned (fixed long
+ago) — corrected; all SIX mate-zone compares in the image audited and all
+now branch signed-first. The doubled-pawn "flat per file" quirk is
+INTENTIONAL and self-consistent (Texel tunes against exactly that flat
+indicator). STANDING RULE: a divergence is a BUG until proven a design
+choice — never model it away.
+
+**TWO INSTRUMENT BUGS FILED (they corrupt measurements, not games):**
+1. **PlayerCfg.QS zero-value trap — FIXED HERE.** The zero value meant
+   UNLIMITED quiescence, so any screen omitting `QS: DefaultQS` measured
+   an engine with a several-times-larger QS tree than the ship. Six
+   screens still omitted it (budget/effort/ordering/mopup×2/search) —
+   their A/B deltas stay valid (both sides shared the wrong shape) but
+   the absolute engine was fiction. It corrupted the Texel corpus once
+   already. Zero now means DefaultQS; unlimited is the explicit
+   `QSUnlimited` sentinel (CLI "0,0" maps to it, contract preserved).
+2. **Budget-mode ID divergence (documented, not fixed).** The asm stops
+   ID on a winning mate and hard-aborts at 2× BUDGET behind a predictive
+   soft gate; the mirror does neither (1×, cumulative halfway gate). So
+   budgeted mirror screens buy a slightly SHALLOWER ID than the asm —
+   invisible to every gate we have, because they are all fixed-depth.
+   This is a live candidate mechanism for residual mirror→asm compression.
+
+**SARGON DRIVER AUDIT — 6 defects, all conservative.** Root cause of the
+17/300 desyncs: Sargon transiently BLANKS and repaints its own move list
+~19.3M cycles into its first search after leaving its opening library
+(~167K cycles). Commit detection keyed on "column text changed", so a
+poll inside the blank frame read it as a commit, skipped CTRL-T, and
+scraped Sargon's PREVIOUS move → illegal → adjudicated draw. Fixed by
+keying on MOVE NUMBER. Also fixed: move-list numbering restarts at 1
+after move 127 (3/3 affected games broke); castle+check tokens never
+stripped '+'; 8-char Black tokens truncated; REPETITION/50-MOVE messages
+undetected; xboard PXPEP unparseable; Hard-mode/LEVEL-9 computed but
+never asserted (600/600 historical games did read correctly).
+Validation: 34 games / 446 replies, all new+legal, 0 stale reads.
+
+**BLAST RADIUS — +110 STANDS, and was an UNDER-estimate.** Every harness
+failure in 600 games was loud and conservative (adjudicated draw), never
+a silently substituted move. Correcting the 18 lost games gives ≈ **+114**;
+absolute bounds [+99, +122], inside the ±35 CI. The one path that could
+have inflated silently (Easy mode / wrong level) never fired and is now
+an assertion.
+
+New permanent instrumentation: Sargon's own displayed move list is
+cross-checked against our history EVERY ply, with screen dumps every 10
+moves and on every anomaly.
+
 ## 2026-07-26 — FULL-GAME asm↔mirror parity + quirk audit: CLEAN BILL, no new engine bugs
 
 Motivated by the tt.s mate-zone bug (below): it survived every parity gate

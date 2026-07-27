@@ -397,6 +397,12 @@ type QSParams struct {
 // wrong searches a QS tree up to ~10x the asm's and shifts tactical scores.
 var DefaultQS = QSParams{RecapAfter: 2}
 
+// QSUnlimited is the EXPLICIT opt-in for unlimited quiescence (the old
+// zero-value meaning). Only QS-shape experiments want this: it is NOT what
+// the asm ships. PlayerCfg.engine() maps it back to the zero QSParams.
+// Sentinel-valued so it can never collide with a real shape.
+var QSUnlimited = QSParams{PlyCap: -1}
+
 // NewEngine returns an engine with all features on and the asm's current
 // pstruct weights, LMR rules, and QS shape (recap2).
 func NewEngine() *Engine {

@@ -58,6 +58,12 @@ import (
 //     preamble (measured here as aEntry) are real asm<->mirror differences the
 //     gate measures but deliberately does not fail on: both are <1% of any
 //     real budget.
+//   - a SYSTEMATIC per-iteration tree difference. Tree equality is asserted
+//     only on the same-depth/no-abort subset, and which depth a budget buys is
+//     itself a cycle-model decision, so a cross-iteration divergence can hide
+//     as "different depth, not compared". TestIDIterationParity closes that:
+//     it compares the two ID ladders ITERATION BY ITERATION over their common
+//     prefix, which no stop decision can mask.
 //   - the NODE-budgeted mode (mirror.SearchBudget) has NO asm counterpart at
 //     all — the asm's budget is denominated in cycles only — so it cannot be
 //     gated this way. It shares SearchCycleBudget's driver code and idPredict,

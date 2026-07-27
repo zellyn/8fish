@@ -3,6 +3,51 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — ASPIRATION re-tested against a CORRECT TT: still NEUTRAL (+1.7 ± 23). The TT-taint hypothesis is NOT supported.
+
+FT_ASP was SPRT-rejected at −21 ± 32 on 2026-07-21, while asm/tt.s was
+corrupting 54% of TT stores (unsigned mate-zone compare ply-shifting
+every negative score). Aspiration is the most TT-score-dependent feature
+in the image — it seeds its window from the PREVIOUS ITERATION'S SCORE —
+so the rejection was re-tested from scratch on the fixed engine, with an
+asm review pass first (the new standing practice).
+
+| batch (aspiration ON vs OFF, same binary, 30M/move) | Elo |
+|---|---|
+| openseed default, 300 g: +97 =97 −106 (48.50%) | −10 ± 32 |
+| openseed 7, 300 g: +102 =108 −90 (52.00%) | +14 ± 32 |
+| **combined 600 g: +199 =205 −196 (50.25%)** | **+1.7 ± 23** |
+
+Equal-spend verified both batches (0.9987 / 1.0027).
+
+**Verdict: aspiration is NEUTRAL, and the rejection stands on its own
+merits.** +1.7 ± 23 lies inside the old −21 ± 32 — statistically the same
+answer — and is centred on ZERO, not on the +19–23 the node-budget mirror
+screen once promised. **The cycle-budget screen called this exactly**: the
+same config re-screened at 143M cyc/move measured −2 ± 13 over 2000 games
+on a mirror whose TT was always signed-correct. Two independent
+instruments, one TT-clean from the start, agree on zero.
+
+**Consequence — this CLOSES the TT-taint line.** The tt.s bug was real,
+worth fixing, and made mate searches 6.8% faster, but it was NOT a
+significant source of wrong feature verdicts. It does not license
+re-opening other TT-dependent rejections; history ordering (mirror +56 →
+asm −16) should only be revisited for the node-vs-cycle budget bias,
+which is separately documented. The −21 → +1.7 shift is inside the noise
+of either measurement: a corrupted TT plausibly cost aspiration a few
+Elo, not twenty.
+
+So the compression story's mechanisms are: node-budget bias (proven),
+stale mirror defaults (fixed), ordering context (LMP +39→−85), and the
+budgeted-ID divergence (proven, large — +0.5→+19.7 on a known +24
+feature). The TT bug is NOT among them.
+
+**Disposition: main keeps FT_ASP OUT.** Rejected twice now, and our
+standing discipline strips rejected features (that is what freed 1752 B
+across FT_ASP/FT_ROOKX/FT2_IMPROV/FT2_EGTECH). The re-port is preserved,
+parity-verified, on branch `worktree-agent-a6cf9e23e982687c0` (f0ef8d7);
+this re-test proved resurrecting from git history works cleanly.
+
 ## 2026-07-27 — ★ COMPRESSION MECHANISM FOUND AND FIXED: the mirror's budgeted ID was shallower than the ship's
 
 The residual "mirror over-promises" effect finally has a measured cause.

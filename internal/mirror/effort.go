@@ -205,8 +205,13 @@ type TimeDiag struct {
 // instability signals or cut short by the easy-move signal, all clamped to
 // [baseCeiling, min(Base*MaxEighths/8, Base+bank)]. It returns the root best
 // move (NoMove only on mate/stalemate), the root score, and the cycles
-// spent. The soft-stop / hard-cap / discard-incomplete-iteration semantics
-// are exactly SearchCycleBudget's; only the ceiling moves.
+// spent. The predictive soft-start gate / mate stop / discard-incomplete-
+// iteration semantics are exactly SearchCycleBudget's; the ceiling moves, and
+// the hard abort is 2x the hard-MAX ceiling (asm adaptaborthi: ABORTL =
+// 2*CEILMAX) rather than 2x the current one, so a raised ceiling is not
+// hard-aborted at the base ceiling's limit. With every signal off,
+// maxCeiling == baseCeiling and this is byte-identical to
+// SearchCycleBudget(Base) — TestEffortOffIdentical is the gate.
 //
 // bank is the current EffortBank balance (income already conceptually
 // available as Base). The caller settles the bank with the returned spend.
@@ -269,23 +274,22 @@ func (e *Engine) SearchTimed(tp *TimeParams, bank int64, maxDepth int) (Move, in
 
 	for d := 1; d <= maxDepth; d++ {
 		if d > 1 {
-			// Soft start gate against the CURRENT ceiling (raised by signals
-			// from the previous completed iteration).
-			if e.Cyc.Est*2 >= ceiling {
-				break
-			}
-			e.CycleBudget = ceiling // hard cap for this (and later) iterations
+			// Hard abort at 2x the hard-max ceiling: the asm's adaptaborthi
+			// sets ABORTL = 2*CEILMAX at entry, so a RAISED ceiling is not
+			// hard-aborted at 2x the base. Constant for the whole move.
+			e.CycleBudget = maxCeiling * 2
 		} else {
 			e.CycleBudget = 0 // depth 1 always completes (accounting stays on)
 		}
+		iterStart := e.Cyc.Est
 		e.aspIterate(d, bestScore)
 		if e.aborted {
 			break // incomplete iteration: keep the last completed result
 		}
 		best, bestScore = e.Best, e.RootScore
 		e.CompletedDepth = d
-		if best.From == NoSq {
-			break // mate/stalemate: deeper won't help
+		if bestScore >= mateZoneLo {
+			break // winning mate: exact and final (asm idok, before adaptmaybe)
 		}
 
 		// --- signal tracking on the just-completed iteration ---
@@ -340,6 +344,13 @@ func (e *Engine) SearchTimed(tp *TimeParams, bank int64, maxDepth int) (Move, in
 		}
 
 		prevScore, prevBest = bestScore, best
+
+		// Predictive soft-start gate for the NEXT iteration, against the
+		// ceiling as just raised (asm: adaptmaybe runs first, then the flat
+		// predictive gate reads the movable BUDGET).
+		if !idPredict(e.Cyc.Est, iterStart, ceiling) {
+			break
+		}
 	}
 
 	e.CycleBudget = 0

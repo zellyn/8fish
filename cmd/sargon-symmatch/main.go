@@ -475,7 +475,20 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		return resDraw
 	}
 	m.Run(1_000_000)
+	// Assert, don't just log: the whole measurement assumes Sargon is on the
+	// INFINITE level (so CTRL-T at our budget is what bounds its search) in HARD
+	// mode (so it ponders like a real opponent). Easy mode roughly halves its
+	// strength and a lower level would make it move on its own timer — either
+	// would INFLATE our score silently. Row 3 shows "LEVEL <n>" with a trailing
+	// "E" in Easy mode.
+	row3 := strings.ToUpper(strings.TrimSpace(m.TextRow(3)))
 	hard := verifyHardMode(m)
+	if !hard || !strings.Contains(row3, "LEVEL 9") {
+		lg("WARNING g%d: SARGON MODE WRONG — want Hard + LEVEL 9, row3=%q hard=%v; ABANDONING GAME",
+			gameNo, row3, hard)
+		lg("%s", m.ScreenDump(fmt.Sprintf("g%d bad-mode", gameNo)))
+		return resDraw
+	}
 	if fen != "" {
 		if err := m.SetupPosition(fen); err != nil {
 			lg("GAME %d: sargon setup %q: %v", gameNo, fen, err)

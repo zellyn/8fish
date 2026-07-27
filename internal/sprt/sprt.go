@@ -375,6 +375,15 @@ func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCy
 		}
 		chesstest.SetFeatures(m, defs, features)
 		chesstest.SetFeatures2(m, defs, features2)
+		// FT2_SOFTCLK means "run on the engine's own ESTIMATED elapsed-cycle
+		// clock", which is only actually exercised if the harness's $BFF4 read
+		// trap is off — the estimator accumulates INTO $BFF4, so with the trap
+		// live the engine would keep reading the true counter and the feature
+		// would measure exactly nothing. Derive the trap from the bit rather
+		// than taking a separate flag, so the two cannot disagree.
+		if ft2 := defs["FT2_SOFTCLK"]; ft2 != 0 && features2&byte(ft2) != 0 {
+			m.Mem.ClockAddr = 0
+		}
 		// Budget/time-management poke. Per-move mode: flat BudgetCycles.
 		// Per-game mode: draw this move's allocation from the side's bank; the
 		// adaptive side additionally installs the FT2_ADAPT ceiling params.

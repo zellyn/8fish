@@ -3,6 +3,209 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — ★ THE HARDWARE CLOCK BLOCKER IS CLOSED: an on-device elapsed-time ESTIMATOR (FT2_SOFTCLK), **+0.0073% cycles**, aggregate estimate/truth **1.052**
+
+The blocker filed with the UI design that morning: `checkclock` reads
+`CLOCK_TRAP` (`$BFF4`), which is a live cycle counter **only under the
+harness**. On a IIe it is plain RAM and the machine has no readable clock at
+all — no RTC, no readable video counters (that is the IIgs), VBL needs polling
+by code that is busy searching, the paddle timer is a 3 ms one-shot. So budget
+mode could not run on hardware, levels had to ship as raw plies, and
+`FT2_ADAPT` — validated and measured — could not run at all.
+
+**The decision was to do what Sargon III does: estimate.** Sargon has no clock
+either and counts toggles of its "thinking" asterisk (docs/sargon.md). This is
+the same concession, with a calibrated cost model behind it.
+
+**Mechanism — 125 B of CODE and one table lookup.** `checkclock` already fires
+once per 128 nodes. Behind `FT2_SOFTCLK` ($20) the poll enters one instruction
+earlier, at `checkclocks`, which adds `128 × cost(PHASE)` to a 24-bit
+accumulator and falls through into the ordinary poll:
+
+    lda PHASE / cmp #25 / bcc + / lda #24 / + tax      ; clamp (promotions)
+    clc / lda CLOCK_TRAP / adc PCOSTLO,x / sta CLOCK_TRAP
+          lda CLOCK_TRAP+1 / adc PCOSTHI,x / sta CLOCK_TRAP+1
+          bcc + / inc CLOCK_TRAP+2
+
+**The accumulator IS `$BFF4`**, so **not one clock-read site changes** — the
+three reads in `checkclock`, the six in the `idloop` predictive gate, the three
+in `adaptmaybe`'s easy-stop. On hardware those reads see this accumulator; under
+the harness they see the real counter. That is the whole integration.
+
+**Feature-OFF is the identical instruction stream, not merely equivalent.**
+`engine.s` patches the operand of search's one `ccsite: jsr checkclock` to
+`checkclocks` only when the bit is set (CODE is ordinary RAM at $4000; the entry
+already block-copies LCCODE). A run with the bit clear executes byte-for-byte
+today's engine at today's cost — which is what makes the A/B measure the
+estimator and nothing else.
+
+**Cycles, not raw nodes**, deliberately. Per-node cost varies ~2.5× by phase, so
+a node budget would make "30 seconds" mean materially different things by phase
+— and would drift worst exactly where `FT2_ADAPT` is trying to allocate
+cleverly. Phase is the regressor because the mirror's recalibration that morning
+already showed it beats piece count *and* is free at runtime (both engines
+maintain it incrementally).
+
+**One regressor, per the brief — and the measurement says one is enough.**
+Candidate models, fit against the 69-search microAB ground truth:
+
+| model | RMS | worst | CV RMS |
+|---|---:|---:|---:|
+| nodes only (constant per node) | 17.6% | 44.1% | 18.1% |
+| **nodes × (a + b·phase)** | **13.8%** | **35.9%** | **14.5%** |
+| + a make counter | 9.6% | 23.7% | 9.9% |
+| full 4-regressor mirror model | 7.3% | 20.3% | 7.8% |
+
+A make counter would buy ~4 points of RMS for a 16-bit increment in `make`
+itself: `inc lo / bne + / inc hi` is ~8 cycles, and at the measured 1.2 makes
+per node that is ~9.7 cycles/node against ~3.3k — **~0.29%, forty times the
+whole estimator's cost**. Not taken. (Those figures are the microAB fit across three
+feature masks; the shipped-config fit below does better because it is one
+config and uses the sampled regressors directly.)
+
+**Calibrated with the engine as its own instrument.** `TestSoftClockCalibrate`
+runs each of the 23 calibration positions twice at fixed depth with the cost
+table overwritten — all entries 1 (so `$BFF4` ends at the POLL COUNT) and
+entry[p] = p (so it ends at the SAMPLED PHASE SUM) — and regresses true cycles
+onto those two columns, minimizing relative error. So the regressors are
+measured exactly as the runtime forms them, sampling and 128-node quantization
+included, at the **shipped** config (0x5F + FT2_GENDEFER) rather than at the
+0x1F/0x07/0x00 masks the mirror's model was fit at. Result:
+
+    cost/node = 3250.1 + 61.90 × phase        (SOFTA 52001, SOFTB 990, SOFTSCALE 16)
+    in-sample RMS 9.5%, worst 23.3%, pool actual/predicted 0.990
+
+**A bug the measurement caught, worth its own line.** The first build primed the
+accumulator at zero. `NODECNT` starts at 0, so the first poll lands on node 256
+and charges nodes 129-256 — nodes 1-128 were never charged. Every search read
+~0.4 s short: a **−41.0% bias at a 1 s/move budget**, and sub-256-node searches
+estimated a flat ZERO (−100%). Fixed by priming `$BFF4` with one table entry at
+`PHASE` in the entry block. Derivation would not have found this; the harness
+did, immediately.
+
+**Accuracy — the gate (`TestSoftClockAccuracy`).** Budget mode, shipped config,
+harness `$BFF4` read trap DISABLED so the engine runs exactly as a IIe would,
+stopping itself on its own estimate, while `m.Cycles` reports what it really
+spent. **Closed loop**: the estimate is scored against the tree the estimate
+itself produced. 71 positions × 4 budgets = 284 searches, an INDEPENDENT pool
+from the 23 the coefficients were fit on.
+
+*Resolution first, because it dominates the tail.* One poll = 128 nodes =
+**0.41 s (phase 0) to 0.59 s (phase 24)**. 66 of the 284 searches finished
+below 2M cycles (~2 s) — mate-stops and one-legal-move positions — and no
+estimator with this sampling period can score them; they are reported in
+absolute terms (worst **−792k cycles = −0.78 s**, ~1.3 sampling periods) and
+excluded from the percentages.
+
+| resolvable searches (n=218) | bias | RMS | p10 | p50 | p90 | **worst** | pool est/true |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| all | +6.5% | 17.8% | −11.3% | +5.7% | +23.9% | **+52.6%** | 1.052 |
+| budget 1M (~1 s) | −0.5% | 15.6% | −20.3% | +1.4% | +15.3% | −49.3% | 0.974 |
+| budget 4M (~4 s) | +4.9% | 20.3% | −17.9% | +3.4% | +26.2% | +52.6% | 1.060 |
+| budget 15M (~15 s) | +11.9% | 20.9% | −4.2% | +9.6% | +33.7% | +52.6% | 1.091 |
+| budget 60M (~59 s) | +5.6% | **11.8%** | −7.2% | +5.7% | +17.5% | +29.3% | 1.044 |
+| phase 0-3 (pawn/minor) | −0.0% | 12.7% | −17.5% | +1.2% | +13.9% | −41.4% | 1.029 |
+| phase 4-7 | +8.2% | 15.2% | −7.4% | +8.6% | +23.5% | +23.9% | 1.037 |
+| phase 8-13 (n=4) | +4.1% | 9.0% | | | | +16.7% | 0.995 |
+| phase 14-19 (n=3) | −38.2% | 39.7% | | | | −51.7% | 0.698 |
+| phase 20-24 (middlegame) | +8.7% | 18.6% | −8.1% | +8.1% | +29.3% | +52.6% | 1.066 |
+
+**Pool estimate/truth over ALL 284 searches: 1.052.** That is the number that
+governs GAME length, not the worst case: `BankedClock` settles every move in
+ESTIMATED units, so a game's total telescopes to sum(income) in estimated
+cycles and the real-time drift is the estimator's mean BIAS. (`ucibridge` now
+settles the bank on `res.spent` — the engine's own figure when `SoftClock` is
+on — rather than on the harness counter, so a hardware-mode game cannot launder
+the estimator's error out of its own clock.)
+
+**Whole-game check** (`ucibridge.TestBridgeSoftClock`): eleven Ruy Lopez
+positions at 3 s/move with banking, run twice — once entirely on the estimate
+with the harness `$BFF4` trap disabled, once on the exact counter as the
+control. Real cycles burned over the session:
+
+    soft clock      37,108,824   = 1.102 x income
+    harness clock   33,584,114   = 0.997 x income
+
+So **a whole game on the estimated clock runs ~10% long**, against a control
+that lands on its income to 0.3%. That is the honest per-game figure: a
+30-minute game becomes ~33 minutes. It is worse than the 1.052 pool ratio
+because the two arms' banks diverge and the estimate's per-move error feeds
+back into the next move's allocation — small sample (11 moves), and the
+direction is the one to watch on a real tournament clock.
+
+**★ WHERE IT IS WEAKEST — by completed depth, which is the real explanatory
+variable:**
+
+| completed depth | n | bias | RMS | worst | pool |
+|---|---:|---:|---:|---:|---:|
+| 1 | 17 | +2.5% | 15.8% | −49.3% | 0.989 |
+| 2 | 39 | +0.5% | 17.8% | −51.7% | 1.031 |
+| **3** | **64** | **+16.3%** | **24.9%** | **+52.6%** | **1.146** |
+| 4 | 50 | +2.8% | 11.1% | −41.4% | 1.027 |
+| 5 | 23 | +6.8% | 13.3% | +27.3% | 1.085 |
+| 6 | 12 | +4.1% | 12.5% | +24.3% | 1.076 |
+| ≥7 | 13 | −3.1% | 7.8% | −13.5% | 0.977 |
+
+Every one of the twelve worst searches completes at depth 1-3. Restricted to
+the 98 searches that reach depth ≥ 4 the estimator is **RMS 11.5%, pool
+1.040** overall, and **RMS 9.8-11.0% with pool 0.939/1.038/1.042** at budgets
+4M/15M/60M. The weakness is therefore SHALLOW
+searches, not endgames: at depth ≤ 3 the tree is small, quiescence-heavy, and
+its full-width/QS node mix is nothing like the deep searches the coefficients
+were fit on, while the phase term — the only thing the estimator can see — is
+constant across the whole opening. That is also why the 15 s column is the
+worst budget (+9.1% pool): it is the budget that most often lands the engine on
+a depth-3 iteration in an opening position. The 60 s column, where depth ≥ 4
+dominates, is the best (RMS 11.8%).
+
+The `phase 14-19` row (pool 0.698) is n=3 — one tactical position (`1k1r4/…`,
+the Kaufman-style rook sac) at three budgets, where the engine spent 4.4M
+against a 4M budget while believing it had spent 2.1M. It is a real 10%
+overrun, and it is a single position; nothing about the phase bucket is
+implied.
+
+**Cost — measured, not derived.** Fixed-depth ON/OFF A/B over 6 positions
+spanning phase 0 to 24 (`TestSoftClockNoTreeEffect`), on trees proven identical
+in the same run: **+0.0073% overall**, per position +0.0056% … +0.0101%. That
+matches the instruction-level account: 32 cycles per 128 nodes = 0.25 cycles per
+node against ~3.3k. The same test asserts the two-sided property that matters —
+search/make/eval/attacked/ttprobe/generate entry counts, score and move all
+identical with the bit set and clear, which is what would catch `checkclocks`
+clobbering a live register (it takes X, dead at search's entry) even though the
+clobber only happens on 1 node in 128.
+
+**Space.** CODE size $3A59 → $3AD6, **+125 B** (75 B of code, 50 B of table).
+The image did **not** grow — still 31642 B of 32752, headroom 1110 B — but only
+because `TABLES` is `align $100` and CODE ended at $7A59 with 167 B of
+alignment slack before $7B00. **42 B of that slack remain**, so the next CODE
+addition pays full price out of the 1110. No Language Card space was taken; the
+UI's ~4,011 B claim on $E000-$FFEF is untouched.
+
+**Gates.** `TestSoftClockNoTreeEffect` PASS (trees identical, cost 0.0073%).
+`TestSoftClockAccuracy` PASS. `TestBridgeSoftClock` PASS (whole game on the
+estimate). `TestMicroAB` PASS (fingerprints unchanged).
+`TestIDIterationParity`, `TestTTSequenceParity`, `TestFullGameMirrorParity`,
+`TestBudgetModeParity`, `TestSearchMirrorParity`, `TestGenDeferTreeIdentity` all
+PASS — as they must, since every one of them runs the bit CLEAR and therefore
+the identical instruction stream.
+
+**Not enabled anywhere by default, deliberately.** Every screen and SPRT in this
+log was measured against the harness's exact counter; folding a 5%-biased,
+18%-RMS clock into all future numbers silently would be the wrong trade. The
+flag exists so the estimator's error can be priced as Elo when someone wants to
+(`ucibridge.Bridge.SoftClock` runs a whole match on it). What it unblocks
+immediately is the thing it was built for: **budget mode, timed levels and
+`FT2_ADAPT` now run on real hardware.**
+
+**Priced but not built**, in case a blitz level is ever wanted: polling every 32
+nodes instead of 128 quarters the resolution to ~0.10-0.15 s at a cost of ~1.45
+cycles/node ≈ 0.044% (from the same instruction-level account as the measured
+0.0073%). It needs `checkclocks` to rearm `NODECNT` itself and jump past
+`checkclock`'s own rearm — 3 extra bytes, still zero when the bit is clear. At
+the level lengths a 1 MHz machine actually offers (a 1 s move is ~310 nodes),
+128 is the right divider and the 0.41-0.59 s quantum is below the shortest
+sensible level.
+
 ## 2026-07-27 — Deferred move generation SHIPPED (FT2_GENDEFER): **−2.52% cycles**, bit-identical tree, 412 B
 
 The build of the entry below. `snode` no longer generates the move list

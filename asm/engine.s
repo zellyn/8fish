@@ -44,6 +44,43 @@ ldloop: lda (ZPTR),y
         jsr evalinit
         lda #NOSQ
         sta BESTFROM
+        ; FT2_SOFTCLK: run on the ESTIMATED clock. CLOCK_TRAP is a live
+        ; counter only under the harness; on a IIe it is plain RAM, so the
+        ; engine estimates elapsed cycles into it (search.s checkclocks) and
+        ; every existing reader is untouched. Two stores patch the operand of
+        ; the ONE `jsr checkclock` in search over to the accumulating entry
+        ; point `checkclocks` — which is what makes the feature-off path
+        ; not merely equivalent but the identical instruction stream, so an
+        ; A/B against the harness clock measures the estimator and nothing
+        ; else. (CODE is ordinary RAM at $4000; the entry already
+        ; block-copies LCCODE, so the image is not write-protected.)
+        lda FEATURES2
+        and #FT2_SOFTCLK
+        beq scdone
+        lda #<checkclocks
+        sta ccsite+1
+        lda #>checkclocks
+        sta ccsite+2
+        ; Prime the estimate (it is elapsed-since-entry, and on hardware this
+        ; RAM powers up with garbage) with ONE table entry — the 128 nodes
+        ; that run before the FIRST poll. NODECNT starts at 0, so the first
+        ; poll lands on node 256 and charges nodes 129-256; without this,
+        ; nodes 1-128 are never charged and every search reads ~0.4 s short,
+        ; which measured as a −41% bias at a 1 s/move budget (a whole level's
+        ; worth) and left sub-256-node searches estimating a flat ZERO. PHASE
+        ; is live here: evalinit built it from the poked board.
+        lda #0
+        sta CLOCK_TRAP+2
+        lda PHASE
+        cmp #NPCOST
+        bcc scph
+        lda #NPCOST-1
+scph:   tax
+        lda PCOSTLO,x
+        sta CLOCK_TRAP
+        lda PCOSTHI,x
+        sta CLOCK_TRAP+1
+scdone:
         ; depth cap; MAXDEPTH becomes the per-iteration depth
         lda MAXDEPTH
         sta MAXCAP

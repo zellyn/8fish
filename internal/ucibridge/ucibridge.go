@@ -89,6 +89,20 @@ type Bridge struct {
 	// both are set. Byte-identical to Banked when unset.
 	Adaptive bool
 
+	// SoftClock runs the engine on its own ESTIMATED elapsed-cycle clock
+	// (FT2_SOFTCLK) with the harness's $BFF4 read trap DISABLED — i.e.
+	// exactly as it will run on a real Apple IIe, which has no readable clock
+	// at all. The budget still means cycles; the engine simply decides for
+	// itself how many it has spent, from a per-node cost model indexed by
+	// taper phase (asm/search.s checkclocks).
+	//
+	// It is OFF by default and must stay that way for measurement: every
+	// screen and SPRT in docs/results.md was run against the harness's exact
+	// counter, and the point of the flag is to be able to A/B the estimator's
+	// error as an Elo cost rather than to silently fold it into every future
+	// number. Accuracy: internal/chesstest TestSoftClockAccuracy.
+	SoftClock bool
+
 	// Ponder enables pondering: searching during the opponent's turn on the
 	// position we would face if the opponent plays our predicted reply,
 	// letting that search warm the transposition table that already carries
@@ -527,6 +541,13 @@ type engineResult struct {
 	score           int16  // SCORE, side-to-move POV
 	depth           byte   // CURDEPTH, the deepest iterative-deepening iteration reached
 	nodes           uint64 // machine cycles spent (the engine's node/cost proxy)
+	// spent is what the ENGINE believes it spent: identical to nodes in the
+	// normal (harness-clock) mode, and the FT2_SOFTCLK estimate when
+	// SoftClock is on. The bank has to settle on this, because on real
+	// hardware it is the only figure that exists — settling a hardware game
+	// on the harness's exact counter would quietly launder the estimator's
+	// error out of the clock.
+	spent uint64
 }
 
 // runEngine builds a fresh harness machine over pos, restores the carried aux
@@ -577,8 +598,17 @@ func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64
 	if err != nil {
 		return engineResult{}, err
 	}
+	feat2 := byte(b.Defs["FT2_GENDEFER"])
+	if b.SoftClock {
+		// Hardware clock semantics: the engine estimates elapsed cycles into
+		// $BFF4 and reads them back from there. The read trap has to go, or
+		// the harness's exact counter would answer every read and the
+		// estimator would be measuring nothing.
+		feat2 |= byte(b.Defs["FT2_SOFTCLK"])
+		m.Mem.ClockAddr = 0
+	}
 	chesstest.SetFeatures(m, b.Defs, byte(b.Defs["FT_CKEXT"])|0x1F)
-	chesstest.SetFeatures2(m, b.Defs, byte(b.Defs["FT2_GENDEFER"]))
+	chesstest.SetFeatures2(m, b.Defs, feat2)
 	chesstest.SetBudget(m, b.Defs, budget, depth)
 	if adapt != nil {
 		chesstest.SetAdaptive(m, b.Defs, adapt.maxCeiling, adapt.unstTarget, adapt.minSpend)
@@ -606,6 +636,12 @@ func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64
 		b.aux = make([]byte, len(m.Mem.Aux))
 	}
 	copy(b.aux, m.Mem.Aux[:]) // carry the TT forward
+	spent := m.Cycles
+	if b.SoftClock {
+		c := b.Defs["CLOCK_TRAP"]
+		spent = (uint64(m.Mem.Main[c]) | uint64(m.Mem.Main[c+1])<<8 |
+			uint64(m.Mem.Main[c+2])<<16) << 8
+	}
 	return engineResult{
 		code:  int(code),
 		from:  m.Mem.Main[b.Defs["BESTFROM"]],
@@ -615,6 +651,7 @@ func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64
 			uint16(m.Mem.Main[b.Defs["SCORE"]+1])<<8),
 		depth: m.Mem.Main[b.Defs["CURDEPTH"]],
 		nodes: m.Cycles,
+		spent: spent,
 	}, nil
 }
 
@@ -742,7 +779,7 @@ func (b *Bridge) think(args []string) (string, error) {
 	// unpredictable as the keypress itself.
 	b.ditherFold(byte(res.nodes))
 	if b.clock != nil && budget != 0 {
-		b.clock.Settle(res.nodes)
+		b.clock.Settle(res.spent) // == res.nodes unless SoftClock is on
 	}
 	// Time-budget audit: log this move's ACTUAL own-move cycles (res.nodes, the
 	// real search — never the ponder search) against its income, the allocation

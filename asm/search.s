@@ -86,6 +86,60 @@ curincheck:
         jmp attacked
 
 ; ---------------------------------------------------------------
+; checkclocks (FT2_SOFTCLK): the ESTIMATED elapsed-cycle clock.
+;
+; CLOCK_TRAP ($BFF4) is a live cycle counter only under the test harness.
+; On a real Apple IIe it is plain RAM and the machine has NO readable
+; clock at all — no RTC, no readable video counters (that is the IIgs),
+; VBL needs polling by code that is busy searching, and the paddle timer
+; is a 3 ms one-shot. Without a clock the engine cannot run budget mode on
+; hardware, levels must ship as raw plies, and FT2_ADAPT (budget-mode
+; only) cannot run.
+;
+; So the engine ESTIMATES elapsed time instead of measuring it — the same
+; concession Sargon III makes (it counts toggles of its "thinking"
+; asterisk; docs/sargon.md). The estimate is accumulated INTO CLOCK_TRAP
+; itself, which is exactly where every existing reader already looks, so
+; not one clock-read site changes: on hardware those reads see this
+; accumulator, and under the harness (clock trap enabled) they see the
+; real counter. Feature OFF is byte-for-byte today's engine — engine.s
+; patches ccsite's operand only when the bit is set, so an OFF run
+; executes an identical instruction stream at identical cost.
+;
+; WHAT IS ESTIMATED: elapsed CYCLES, not raw nodes. Per-node cost varies
+; ~2.5x by phase (a full-width middlegame node walks far more slider rays
+; and emits far more moves than an endgame one), so a raw node budget
+; would make "30 seconds" mean materially different things by phase. The
+; mirror's calibrated cost model (internal/mirror/cycles.go, 23 positions
+; / 69 searches) prices a node at Node + NodePhase*phase, and phase was
+; chosen over piece count partly BECAUSE it is already maintained
+; incrementally and so is free at runtime. checkclock already fires once
+; per 128 nodes, so the whole estimator is one clamped PHASE index, one
+; 16-bit table fetch and one 24-bit add: 32 cycles per 128 nodes.
+;
+; The poll SAMPLES phase once per 128 nodes rather than averaging over
+; them. That is unbiased, and the sampling error is negligible: phase
+; changes only on a capture or a promotion, and a real search takes
+; thousands of samples. Measured error distribution: docs/results.md.
+; ---------------------------------------------------------------
+checkclocks:
+        lda PHASE               ; clamp: PHASE exceeds 24 after promotions
+        cmp #NPCOST
+        bcc :+
+        lda #NPCOST-1
+:       tax                     ; (X is dead at search's entry — the only
+        clc                     ;  caller — so checkclock may clobber it)
+        lda CLOCK_TRAP          ; 24-bit += 128 nodes x cost(phase)
+        adc PCOSTLO,x
+        sta CLOCK_TRAP
+        lda CLOCK_TRAP+1
+        adc PCOSTHI,x
+        sta CLOCK_TRAP+1
+        bcc checkclock
+        inc CLOCK_TRAP+2
+        ; fall through into the ordinary poll
+
+; ---------------------------------------------------------------
 ; checkclock: poll the harness clock; set ABORT once cycles reach the
 ; hard limit (2x budget). No-op in fixed-depth mode (budget 0).
 ; ---------------------------------------------------------------
@@ -110,13 +164,31 @@ checkclock:
         sta ABORT
 ccout:  rts
 
+; PCOSTLO/PCOSTHI: what 128 nodes at taper phase X cost, in CLOCK_TRAP's
+; 256-cycle units, i.e. 128*(SOFTA + SOFTB*phase)/256 with SOFTA/SOFTB the
+; per-node cost model in defs.inc. 25 entries (phase 0..24); checkclocks
+; clamps. A TABLE rather than a multiply because the lookup is free at
+; runtime and it leaves room for a non-linear refit without touching code.
+; internal/chesstest pokes these entries directly to run the calibration
+; probes (see TestSoftClockCalibrate), so the layout is load-bearing:
+; two parallel 25-byte arrays, low bytes first.
+PCOSTLO:
+        .repeat NPCOST, i
+        .byte <((128 * (SOFTA + SOFTB * i)) / 256 / SOFTSCALE)
+        .endrepeat
+PCOSTHI:
+        .repeat NPCOST, i
+        .byte >((128 * (SOFTA + SOFTB * i)) / 256 / SOFTSCALE)
+        .endrepeat
+
 ; ---------------------------------------------------------------
 ; search
 ; ---------------------------------------------------------------
 search:
         dec NODECNT             ; countdown: poll the clock every 128 nodes
         bne :+                  ;  (checkclock rearms; first poll after 256)
-        jsr checkclock
+ccsite: jsr checkclock          ; operand patched to checkclocks by the
+                                ;  FT2_SOFTCLK setup in engine.s
 :       lda ABORT
         beq :+
         lda #0                  ; aborting: unwind with a dummy score

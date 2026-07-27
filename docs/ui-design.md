@@ -19,8 +19,8 @@ labelled *derived*.
 | display | **40-column text page 1**, inverse-video checkerboard, FEN-case pieces |
 | where the code lives | **Language Card RAM `$E000-$FFEF`** — 8,192 B that cost **zero** of the image's 1,622 B headroom |
 | move input | **typed coordinate** (`e2e4`, optional 5th promotion char), validated against the engine's own generator |
-| levels / time control | **fixed depth** (`BUDGET = 0`). The IIe has no readable clock, so budget mode cannot run on hardware as built |
-| `FT2_ADAPT` | **not exposed.** It is budget-mode-only and its ceilings are host-computed; see §6.3 for the one cheap change that would unlock it |
+| levels / time control | **fixed depth OR timed** — the IIe has no readable clock, but `FT2_SOFTCLK` (shipped 2026-07-27) gives the engine an ESTIMATED one; see §6.2 |
+| `FT2_ADAPT` | **now runnable on device** via `FT2_SOFTCLK`; exposing it is still a UI decision (its ceilings are host-computed). See §6.3 |
 | progress during search | printed **between iterative-deepening iterations**, from the UI's own driver loop. **Zero lines of `search.s` change** |
 | MAIN-RAM cost | **0 bytes permanent** (a run-once 30-byte copier lives in soon-to-be-overwritten RAM) |
 | LC budget | ~4,000 B of 8,176 B used; **~50% headroom** |
@@ -325,32 +325,61 @@ video counters (that is the IIgs), VBL (`$C019`) only tells you *whether* you ar
 in blanking and would have to be polled ~60 times a second by code that is busy
 searching, and the paddle timer is a ~3 ms one-shot.
 
-Therefore the shipped on-device engine runs in **fixed-depth mode**
-(`BUDGET0/1/2 = 0`), which `engine.s` already supports as a first-class path:
-one iteration at `MAXCAP`, no clock read anywhere. Levels 1-9 map to depths
-(≈ 2..8 plus quiescence, with the top level reserved for "as deep as you dare").
-This is also period-honest: fixed-ply levels were standard for 8-bit engines.
+**RESOLVED 2026-07-27 — `FT2_SOFTCLK`.** The engine now ESTIMATES elapsed
+cycles instead of measuring them, exactly as Sargon III does (it counts toggles
+of its thinking asterisk; docs/sargon.md). `checkclock`'s existing once-per-128-
+nodes poll adds `128 × cost(PHASE)` to a 24-bit accumulator kept **at `$BFF4`
+itself**, so every clock READER above is unchanged — on hardware they read the
+estimate, under the harness the real counter. Measured (docs/results.md): cost
+**+0.0073%**, aggregate estimate/truth **1.052** over 284 budget-mode searches,
+RMS 17.8%, worst +52.6%, resolution one poll = 0.41-0.59 s. Feature OFF is the
+identical instruction stream.
 
-### 6.3 `FT2_ADAPT` is not exposed — and what it would take
+So the UI may offer **either** kind of level:
+
+- **fixed depth** (`BUDGET0/1/2 = 0`), which `engine.s` supports as a
+  first-class path — one iteration at `MAXCAP`, no clock read anywhere. Levels
+  1-9 map to depths (≈ 2..8 plus quiescence, top level "as deep as you dare").
+  Period-honest: fixed-ply levels were standard for 8-bit engines.
+- **timed** (`BUDGET` = seconds × 1,020,500 ÷ 256, `FT2_SOFTCLK` set), which is
+  what makes 8fish comparable to Sargon's timed levels and what `FT2_ADAPT`
+  needs.
+
+A timed level is accurate to a few percent on average and ±20-50% on an
+individual move, and it is weakest on SHALLOW searches — the estimator's error
+concentrates at completed depth ≤ 3, i.e. short levels and opening positions.
+Levels below ~4 seconds are not worth offering: one poll is 0.41-0.59 s, and a
+1-second move on a 1 MHz 6502 is only ~310 nodes deep anyway.
+
+**One integration note for §7's UI-supplied ID driver.** `FT2_SOFTCLK` is armed
+by `engine.s`'s ENTRY block, which patches `ccsite`'s operand and primes `$BFF4`
+from `PHASE`. A UI driver that jumps straight to `iterate` skips that. For
+fixed-depth levels this does not matter (nothing reads the clock). For timed
+levels the UI must either enter through `engine.s` or replicate those two steps
+— ~20 B, and `PHASE` is only valid after `evalinit`.
+
+### 6.3 `FT2_ADAPT` — the clock half is solved; the ceiling half is not
 
 `FT2_ADAPT` is budget-mode-only by construction, and its parameters
-(`CEILMAX`/`UNSTCEIL`/`MINSPEND`) are deliberately computed **host-side** because
-the on-device engine has no multiply for the ceiling arithmetic. With no clock
-and no host, both halves are missing. Exposing it on device is not a UI decision;
-it is an engine decision, and it has a cheap, specific price:
+(`CEILMAX`/`UNSTCEIL`/`MINSPEND`) are deliberately computed **host-side**
+because the on-device engine has no multiply for the ceiling arithmetic. With no
+clock and no host, both halves were missing.
 
-> Give the engine a **node** budget instead of a cycle budget. `checkclock`
-> already runs once per 128 nodes; adding a 24-bit increment there
-> (`inc N0 / bne + / inc N1 / bne + / inc N2`) is **13 bytes** and **~8 cycles per
-> 128 nodes = 0.06 cycles/node ≈ 0.004%** *derived*. Replacing the three
-> `CLOCK_TRAP` reads with reads of that counter is byte-neutral. Nodes-per-second
-> on a 1 MHz 6502 is near-constant, so a node budget *is* a time budget, and it is
-> exactly the currency `internal/mirror`'s node-budgeted inner loop already uses.
+**The clock half is done** (§6.2): `FT2_SOFTCLK` gives budget mode a working
+clock on hardware, so `FT2_ADAPT` can run. The engine-side change the earlier
+draft of this section priced — a raw **node** budget — was NOT what shipped: a
+node budget charges every node the same, and per-node cost varies ~2.5× by
+phase, so "30 seconds" would have meant materially different things in an
+opening and an endgame. The shipped estimator costs one extra table lookup over
+that (measured 0.0073%, not the 0.004% derived for the counter) and buys a
+phase-aware answer instead.
 
-That is a `search.s` change on the hot path and therefore **out of scope for this
-design** — it needs the hot-path owner's sign-off and its own fingerprint run. It
-is recorded here priced so the decision can be made on evidence. Until then:
-fixed depth, and the level menu says `LEVEL n` and means plies.
+**The ceiling half remains a UI job.** On device, `CEILMAX`/`UNSTCEIL`/
+`MINSPEND` need `4×`, `3×` and `÷4` of the per-move income plus a signed bank —
+shift-and-add arithmetic on 24-bit values, ~60-80 B in LC, with
+`chesstest.BankedClock` as the reference the port must match. Whether a level
+menu wants adaptive effort at all is a product decision; the engine no longer
+blocks it.
 
 ---
 
@@ -557,14 +586,14 @@ Steps 1-9 need no hardware. Step 10 is the first that does.
 
 ## 11. Risks
 
-1. **Biggest risk — no clock on the target machine (§6.2).** It is not a UI bug;
-   it is a fact about the IIe that the harness has been hiding, and it means the
-   on-device engine ships in fixed-depth mode and `FT2_ADAPT` — a validated,
-   measured feature — cannot run at all. The fix is a 13-byte, ~0.004% node
-   counter in `checkclock`, but that is a hot-path change and belongs to the
-   search owner. **Decide this before shipping**, because "levels are plies" vs
-   "levels are node budgets" changes the level menu, the manual, and how 8fish
-   compares to Sargon's time-based levels in any future match.
+1. ~~**Biggest risk — no clock on the target machine (§6.2).**~~ **CLOSED
+   2026-07-27** by `FT2_SOFTCLK`, an estimated elapsed-cycle clock in
+   `checkclock` (+125 B CODE, +0.0073% cycles, tree-identical when off).
+   Budget mode, timed levels and `FT2_ADAPT` all run on hardware now. What
+   REMAINS a UI decision is which levels to offer: the estimate is aggregate
+   1.052 and RMS 17.8% per move, weakest on shallow (depth ≤ 3) searches, with
+   a 0.41-0.59 s resolution — so timed levels below ~4 s are not worth
+   offering. See docs/results.md for the full error distribution.
 2. **Character-generator verification gap.** goapple2 carries the ][+ 2 KB
    character ROM and does not model `ALTCHARSET`, so inverse lowercase is
    verified as bytes-against-the-documented-encoding, not as pixels. If a real

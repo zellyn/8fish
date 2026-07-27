@@ -339,6 +339,25 @@ FT2_GENDEFER = $10      ; DEFERRED full-width move generation at snode: when
                         ;  over all 128x128 (from,to) pairs per corpus position;
                         ;  the `ca65 -D GDVERIFY` variant traps (exit 102) on a
                         ;  live disagreement.
+FT2_SOFTCLK = $20       ; ESTIMATED elapsed-cycle clock — the feature that
+                        ;  lets budget mode (and therefore FT2_ADAPT and
+                        ;  timed levels) run on real hardware, where
+                        ;  CLOCK_TRAP is plain RAM and nothing on an Apple
+                        ;  IIe reads back a clock. checkclock's poll (once
+                        ;  per 128 nodes) accumulates 128 x cost(PHASE) into
+                        ;  CLOCK_TRAP itself, so every existing clock READER
+                        ;  is unchanged; see the checkclocks comment in
+                        ;  search.s and docs/results.md for the measured
+                        ;  error distribution. Zero cost and zero tree effect
+                        ;  when clear: engine.s patches search's `ccsite: jsr
+                        ;  checkclock` operand to `checkclocks` only when the
+                        ;  bit is set, so an OFF run executes the identical
+                        ;  instruction stream. ON, the estimate REPLACES the
+                        ;  harness clock, so a harness run that wants the real
+                        ;  counter must leave this bit clear (and a run that
+                        ;  wants hardware semantics must also disable the
+                        ;  harness's own $BFF4 read trap — TrapMemory
+                        ;  ClockAddr = 0 — or the trap's answer wins).
 FT2_ADAPT  = $04        ; adaptive time/effort management (mirror.SearchTimed
                         ;  port). Budget mode only. The host pokes BUDGET =
                         ;  the per-move base ceiling and CEILMAX = the hard max
@@ -605,5 +624,33 @@ KBDSTRB    = $C010      ; read: clear the keyboard strobe
 COUT_TRAP   = $BFF0
 IN_TRAP     = $BFF1     ; read: next input byte (0 if none)
 INSTAT_TRAP = $BFF2     ; read: $80 if input waiting
-CLOCK_TRAP  = $BFF4     ; read: cycles/256, 3 bytes LE, latched on low read
+CLOCK_TRAP  = $BFF4     ; read: cycles/256, 3 bytes LE, latched on low read.
+                        ;  On real hardware this is ordinary RAM and, with
+                        ;  FT2_SOFTCLK set, it is the 24-bit ESTIMATED-cycle
+                        ;  accumulator checkclocks maintains (search.s).
+                        ;  engine.s zeroes it at entry in that mode; every
+                        ;  reader is unchanged either way.
 EXIT_TRAP   = $BFFF
+
+; ---- FT2_SOFTCLK per-node cost model (search.s checkclocks) ----
+; Estimated cost of ONE search node, in 6502 cycles:
+;
+;       (SOFTA + SOFTB * phase) / SOFTSCALE
+;
+; SOFTSCALE exists only so SOFTB can carry a fraction with assembly-time
+; integer arithmetic. The form (a linear function of the taper phase) and
+; the phase regressor itself come from the mirror's calibrated cost model
+; — internal/mirror/cycles.go prices a node at Node + NodePhase*phase, and
+; phase beat piece count in that fit while being free at runtime. The
+; VALUES are refit here against the SHIPPED configuration (FEATURES $5F,
+; FEATURES2 FT2_GENDEFER) and against the quantity the engine can actually
+; observe: phase SAMPLED at the 128-node poll. See
+; internal/chesstest TestSoftClockCalibrate, which regenerates them, and
+; docs/results.md for the resulting error distribution.
+; Fit 2026-07-27 over the 23 calibration positions at the shipped config
+; (fixed depth, 46 probe runs): in-sample RMS relative error 9.5%, worst
+; single search 23.3%, pool actual/predicted 0.990.
+SOFTSCALE = 16
+SOFTA     = 52001       ; 3250.1 cycles/node at phase 0
+SOFTB     = 990         ;  +61.9 cycles/node per unit of phase
+NPCOST    = 25          ; cost-table entries: phase 0..24 (checkclocks clamps)

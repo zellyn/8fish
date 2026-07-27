@@ -51,7 +51,7 @@ memory map (D8) so engine tables can never collide with them.
 | `$BFFF` | store (main bank) | exit; stored value becomes the process exit code |
 | `$BFF1` | read (main bank) | pop and return the next input byte (0 if none) |
 | `$BFF2` | read (main bank) | `$80` if input is waiting, else 0; reading with an empty buffer also sets `WaitingForInput`, so a driving process can supply input (`SendInput`) and resume the run |
-| `$BFF4`-`$BFF6` | read (main bank) | cycle count / 256, 24 bits little-endian, latched on the `$BFF4` read |
+| `$BFF4`-`$BFF6` | read (main bank) | cycle count / 256, 24 bits little-endian, latched on the `$BFF4` read. **Disable it** (`m.Mem.ClockAddr = 0`) to get real hardware semantics — plain RAM — which is what `FT2_SOFTCLK` needs: the engine's estimated-cycle accumulator lives at this same address, and with the trap enabled the trap's answer wins. `m.Cycles` still reports the true count either way, which is what makes the estimator measurable (internal/chesstest/softclock_test.go). |
 | `$C019` | read | VBL status derived from the cycle counter (bit 7 low during VBL, IIe sense) — lets the hardware timing path be tested pre-metal |
 
 The `-cout`/`-exit` flags can relocate the traps for experiments, but

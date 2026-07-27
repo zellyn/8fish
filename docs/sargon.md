@@ -179,6 +179,14 @@ changeable on any turn. Times are Sargon's internal per-move budget; the Apple
 has no real-time clock, so Sargon estimates seconds by counting toggles of its
 "thinking" asterisk — these track wall-clock closely on the original 1 MHz Apple.
 
+This is the precedent 8fish followed for `FT2_SOFTCLK` (docs/results.md
+2026-07-27): 8fish also estimates rather than measures, but estimates CYCLES
+from a calibrated per-node cost model indexed by taper phase instead of
+counting a fixed-cost display event, because 8fish's per-node cost varies ~2.5×
+by phase. Note also that Sargon's level table below tops out at 5 s/move at
+level 1, which is roughly where 8fish's estimator stops being useful too (its
+resolution is one 128-node poll = 0.41-0.59 s).
+
 | Level (SHIFT-n) | Avg response | Time control |
 |-----------------|--------------|--------------|
 | 1 | **5 s/move** (blitz) | 60 moves / 5 min |

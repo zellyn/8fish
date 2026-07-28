@@ -3,6 +3,63 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-27 — FT2_SOFTCLK ENABLEMENT DECISION: on-device YES, harness NO
+
+Both controls independently re-verified on main, from source (see the
+stale-binary near-miss below):
+
+| control | soft adherence | exact adherence | spend A/B | Elo |
+|---|---:|---:|---:|---:|
+| 4000 ms, 400 games | 0.9429 | 0.9285 | 1.0149 | **−23 ± 27** |
+| 15000 ms, 80 games | 0.8761 | 0.8859 | 0.9903 | **+30 ± 62** |
+
+At equal compute the estimator is worth **about zero**, in the safe
+direction (it stops early, it never flags). Both intervals contain zero and
+they lean opposite ways.
+
+**The decision, and the reason it is not "enable it everywhere":** the A/B
+compares the estimator against the harness's EXACT clock — a reference that
+does not exist on the target machine. On an Apple IIe there is no readable
+clock at all, so the real choice on device is estimator vs. no time
+management (fixed plies). On the harness the exact counter is available and
+is strictly the better instrument.
+
+So:
+- **On device (the UI build): ENABLE.** It is how budget mode runs at all,
+  and its measured price is ~0.
+- **In the harness / gameplay config (ucibridge): LEAVE OFF.** Every screen
+  and SPRT in this log was measured against the exact counter; switching the
+  measurement rig to an estimator would add noise for no benefit and would
+  fold the estimator's error into every future number. `Bridge.SoftClock`
+  and the sprt `-a2/-b2` path exist precisely so the estimator can be
+  A/B'd deliberately rather than inherited silently.
+
+This also preserves the exact-clock path permanently, which has now caught
+three separate defects nothing else could: the accumulator-priming bug (first
+128 nodes of every search uncharged), the game-vs-pool miscalibration, and
+the stale-binary near-miss below.
+
+**Still weak, recorded not hidden:** the cost MODEL remains budget-dependent
+even though the SPEND no longer is (4 s fits `4715 + 41.4×phase`, 15 s
+`3708 + 47.5×phase`, 22.6% apart at phase 10). The margin absorbs the
+consequence for time management but does not make the model right — a
+per-move estimate is ~5% low at 4 s and ~2% high at 15 s, and anything
+reading it as a cycle count inherits that. Phase 14-19 is still the worst
+bucket and per-move RMS is ~27%, so **a per-move "thinking for N seconds"
+display would be visibly wrong** and should not be built on this. The real
+fix remains the missing regressor the mechanism points at (makes per node,
+priced at ~0.29% of runtime).
+
+**★ A near-miss worth institutionalising.** The first re-run of the 4 s A/B
+reported "+28 ± 26 with 29% more spend" — the original bug's exact
+signature. The cause was a stale compiled `cmd/sprt` binary: built before the
+margin moved, so it linked the old non-scaling `SetBudget` while loading the
+NEW `engine.bin` off disk at runtime, giving margin 100% everywhere. **The Go
+tool and the 6502 image are versioned separately and nothing forces them to
+agree.** Run matches with `go run ./cmd/sprt`, not a cached binary. What
+caught it was the adherence gate, because `go test` always recompiles: it
+said 0.9447 while the stale binary said 1.2012.
+
 ## 2026-07-27 — ★ FT2_SOFTCLK RECALIBRATED under game conditions, and the safety margin MOVED OFF THE COST TABLE: adherence 1.171 → **0.941**, spend parity at **both** 4 s and 15 s, honest Elo **−23 ± 27**
 
 The pool gate was measuring the wrong POSITIONS *and* the wrong QUANTITY.

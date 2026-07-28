@@ -72,11 +72,17 @@ headroom, so the honest answer to "what does the UI cost the engine?" is *nothin
 in MAIN, nothing in the transposition table, nothing in the opening book*. No
 space-reclamation pass is requested.
 
-Loading it costs nothing permanent either. `UI.BIN` is `BLOAD`ed to `$0E00` (the
-move stack, which is garbage until the first search); a 30-byte copier — itself
-`BRUN` at `$0800`, which the engine will later overwrite with `PIECESQ` — latches
-`$C08B`, copies `$0E00`→`$E000`, and jumps there. `asm/uitest.s` is exactly this
-stub and it is proven to work in the emulator.
+Loading it costs nothing permanent either. `UI.BIN` is `BLOAD`ed into engine
+RAM that is garbage until the first search; a small copier — itself `BRUN` at
+`$0800`, which the engine will later overwrite with `PIECESQ` — latches
+`$C08B`, copies the payload to `$E000`, and jumps there. `asm/uitest.s` is
+exactly this stub and it is proven to work in the emulator.
+
+> **Staging address: see §12.2, which supersedes this paragraph.** This
+> section originally said `$0E00`; that is wrong by construction, because
+> `$0E00-$1FFF` is 4,608 bytes against a 5,888-byte LC code budget, so a UI
+> grown past 4,608 B would have been `BLOAD`ed straight over the resident
+> opening book at `$2000`. As built, the payload stages at `$0900`.
 
 > Incidental finding — **resolved 2026-07-28**, see the coexistence note in
 > `docs/book.md`. `defs.inc` used to reserve `$2000-$207F` as move-stack

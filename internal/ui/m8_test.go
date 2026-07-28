@@ -40,6 +40,12 @@ func TestMain(m *testing.M) {
 	if err := asmbuild.BuildStandaloneAs(root, "m8", "m8"); err != nil {
 		panic(err)
 	}
+	// The Standard Delivery layout of the same source: the copier and the
+	// staged payload moved to $0C00/$0D00 so the contiguous disk image fits
+	// (internal/delivery). It emits asm/m8sdboot.bin, which cmd/mkdsk ships.
+	if err := asmbuild.BuildStandaloneAs(root, "m8", "m8sd"); err != nil {
+		panic(err)
+	}
 	os.Exit(m.Run())
 }
 

@@ -3,6 +3,112 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-28 — ★ THERE IS A DISK, AND IT BOOTS: `make dsk` → `asm/8fish.dsk`, booted from `$C600` and played
+
+8fish had a shipping image and no way to hand it to anyone. It now has a
+bootable 5.25" floppy, built by `make dsk`, and the boot is **executed, not
+asserted**: `internal/ui`'s `TestDiskBoots` puts **nothing** in memory, starts
+the CPU at `$C600` — the Disk II controller's own 341-0027 P5 boot ROM — and
+lets the machine do the rest.
+
+```
+$C600  boot ROM        reads track 0 sector 0 to $0800, JMP $0801
+$0801  Standard        reads 176 sectors into $0C00-$BB99, JMP $0C00
+       Delivery
+$0C00  m8sdboot.bin    latch $C08B, lift the UI to $E000, install LCCODE
+                       at $D000, JMP $E000
+$E000  the UI          paints, blocks in entkey's $C000 poll
+```
+
+**RESULT: it paints the start position, and then it plays.** Measured, from
+the emulated IIe's own clock: **6,275,994 cycles (6.15 s) to load 44,954 bytes
+off the disk**, 6,430,240 (6.30 s) to a painted board waiting for a key.
+
+| assertion | result |
+|---|---|
+| the loader delivers the image **byte-identical** into `$0C00-$BB99` | **pass** (44,954 B, 176 sectors) |
+| the UI is executing from LC RAM (`PC $E20A`), `ALTCHARSET` on, `80COL` off, TEXT/NOMIX/PAGE1 | **pass** |
+| the painted screen is **byte-identical** to `BootShipping`'s, all 960 bytes | **pass** |
+| the boot touched no `$C0xx` location the IIe model leaves unimplemented | **pass** (`Unhandled` empty) |
+| `e2e4` typed on the modelled IIe keyboard → book reply `c7c5`, screen names *B90 Sicilian, Najdorf* | **pass** |
+| out of book, the engine **searches** (`D 2 -0.06 g8f6`) and writes the transposition table in **AUX RAM** | **pass** (193 non-zero bytes in aux `$0200-$81FF`) |
+
+That last row is why the machine has to be a IIe. `internal/sargon` boots
+`sargon-iii.dsk` on goapple2's interactive `Apple2`, which is a ][+ with a flat
+64K array and no aux at all; 8fish's TT lives in aux. Rather than retrofit
+`Apple2` (goapple2 "stage 2", still open), `internal/ui/diskboot.go` **bridges
+the two halves that already exist**: goapple2's `iie` 128K memory model — which
+`harness.Machine` has used all along — plus goapple2's real `cards.DiskCard`
+wired into slot 6 at `$C0E0-$C0EF` and `$C600-$C6FF`, driven by go6502. That
+bridge is 244 lines of Go (`internal/ui/diskboot.go`) and **no changes to
+goapple2 at all**. The `$D000-$FFFF` ROM is a genuine Apple IIe image where one
+is installed locally, with the ][+ ROM as a fallback — the boot path reads
+exactly two ROM locations, `$FF58` (RTS) and `$FCA8` (WAIT), identical on both
+machines, and after the copier's `lda $C08B` the ROM is banked out for good.
+
+### CROSS-CHECKED ON MAME, which shares no code with any of the above
+
+goapple2 is our emulator; agreeing with ourselves proves less than agreeing
+with someone else's. The same `asm/8fish.dsk`, unmodified, in
+**MAME's `apple2ee`** (a real Apple IIe with the real 342-0265-a character
+ROM), booted from slot 6 and driven by `-autoboot_command "e2e4\n"` — i.e.
+typed on MAME's emulated IIe keyboard, not injected:
+
+```
+mame64 apple2ee -flop1 8fish.dsk -video none -str 25 \
+       -autoboot_delay 12 -autoboot_command "e2e4\n"
+```
+
+It boots, paints the checkerboard, takes the move and answers from the book
+(`BOOK: B18 Caro-Kann, Classical` — a different book line from goapple2's B90
+Najdorf, which is *correct*: the engine's seed is the arrival time of the
+keystrokes and the two emulators do not type at the same moment). Two
+independent emulators, two character ROMs, one disk.
+
+**And the ALTCHARSET fix is confirmed against a real character ROM.** MAME
+renders the pieces as inverse letters cut out of lit squares — not the
+flashing punctuation the primary character set would have produced. That was
+the defect found earlier today by reasoning; this is the first time a
+character generator other than goapple2's `chargen` has been asked.
+
+### The two margins, and why they are a TEST and not a comment
+
+Standard Delivery loads **one contiguous image**, so the gaps between the four
+pieces cost sectors, and `diskii mksd` refuses anything over **45,056 bytes**.
+The image runs from the staging base to `engine.bin`'s last byte at `$BB99`, so
+the base is the only free variable — and raising it trades disk margin for UI
+staging room, 256 bytes at a time:
+
+| base | image | SD spare | UI growth room |
+|---|---:|---:|---:|
+| `$0800` (the BLOAD layout) | 45,978 | **−922** | 1,666 |
+| **`$0C00` (chosen)** | **44,954** | **102** | **642** |
+| `$0F00` | 44,186 | 870 | −126 |
+
+744 bytes of total slack, split between two budgets that grow from opposite
+ends: the **engine** spends the SD spare, the **UI** spends the growth room.
+`TestDiskLedger` prints both on every run and fails when either goes negative,
+naming which one and by how much. `TestDiskRoundTrip` reads the built `.dsk`
+back sector by sector and requires it to equal the image handed to `mksd`
+(Standard Delivery's interleave is `sector 0, 14, 13 … 1, 15` per track, with
+track 0 sector 0 the boot sector).
+
+### No fork of the UI
+
+The staging address moved out of `asm/m8.s` and into the **linker config**
+(`asm/m8sd.cfg` defines `UIPAYLOAD`), so the disk layout and the BLOAD layout
+are two links of one object file. `TestDiskLayout` asserts the consequence:
+`m8sd.bin` is **byte-identical** to `m8.bin`, and `m8sdboot.bin` differs from
+`m8boot.bin` in **exactly one byte** — the payload's page (`$09` → `$0D`).
+`asm/m8.bin` and `asm/m8boot.bin` are `cmp`-identical to a `git archive HEAD`
+build, and `asm/engine.bin` is still md5 `58ef9645…`.
+
+**Still not de-risked:** nobody has run this on a real Apple IIe. What is new
+is that there is now something to put in the drive, and that everything
+between the drive head and the painted board has been executed rather than
+assumed. Save/load stays deferred and unpriced — Standard Delivery has no file
+system; ProRWTS2 is the successor when it lands.
+
 ## 2026-07-28 — Book WIDENED (3,866 → 7,407 B): coverage transformed, Elo **+3 ± 10**. The null is an INSTRUMENT LIMIT, not a verdict on the book.
 
 zellyn's brief was breadth, not depth: *"Books are more to stop you from

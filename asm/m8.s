@@ -32,12 +32,21 @@
         .include "book.inc"
         .include "engsyms.inc"
 
-; Where m8.bin is BLOADed before the copier runs. $0900-$1FFF is 5,888 bytes
-; of engine RAM (the per-ply undo/search arrays, then MOVESTACK) that holds
-; nothing but garbage until the first search — and 5,888 is exactly the code
-; budget m8.cfg caps the UI at, so the payload can never grow into the
-; resident opening book at $2000. ($0800 itself is the copier's own home.)
-UIPAYLOAD = $0900
+; Where the payload is staged before the copier runs. It is a LINKER symbol,
+; not a constant here, because it is a fact about the DELIVERY LAYOUT and the
+; layout lives in the .cfg alongside the copier's own load address:
+;
+;   m8.cfg / m8t.cfg   copier $0800, payload $0900   (BLOAD/BRUN delivery)
+;   m8sd.cfg           copier $0C00, payload $0D00   (Standard Delivery disk;
+;                                                     see cmd/mkdsk)
+;
+; For the BLOAD layout, $0900-$1FFF is 5,888 bytes of engine RAM (the per-ply
+; undo/search arrays, then MOVESTACK) that holds nothing but garbage until the
+; first search — and 5,888 is exactly the code budget m8.cfg caps the UI at,
+; so the payload can never grow into the resident opening book at $2000. The
+; disk layout has less staging room than code budget, which is why
+; internal/ui's TestDiskLedger asserts the payload still ends below $2000.
+        .import UIPAYLOAD
 
 ; Levels 1-4 are fixed depth (BUDGET = 0, the period-honest "search N plies"
 ; control that needs no clock at all); 5-9 are timed and run on

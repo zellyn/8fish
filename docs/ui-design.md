@@ -730,6 +730,61 @@ runs `engine.s`'s `$4000` entry, so it must **install `LCCODE` itself** or the
 first transposition-table probe reads garbage. That is the second loop in the
 copier (8 bytes).
 
+#### 12.2.1 The bootable disk (`make dsk` → `asm/8fish.dsk`)
+
+BLOAD is how the tests deliver the image; a **disk** is how a person gets it.
+`make dsk` builds one with peterferrie's **Standard Delivery** loader, via
+`diskii mksd` (`~/gh/a2audit/audit/build` is the precedent). Standard Delivery
+is a boot sector plus a fast loader: it reads ONE contiguous span of sectors
+into ONE contiguous span of memory and jumps to it. There is no DOS, no file
+system, and nothing to type.
+
+The consequence is that the gaps between the four pieces are paid for in
+sectors, and `diskii mksd` refuses an image over **45,056 bytes**:
+
+| base | image ($base to `engine.bin`'s last byte, `$BB99`) | SD spare | UI growth room |
+|---|---:|---:|---:|
+| `$0800` (the BLOAD layout) | 45,978 | **−922** | 1,666 |
+| **`$0C00`** | **44,954** | **102** | **642** |
+| `$0D00` | 44,698 | 358 | 386 |
+| `$0F00` | 44,186 | 870 | **−126** (payload lands on the book) |
+
+`internal/delivery`'s `TestBaseTradeoff` **re-derives that table from the real
+file sizes** on every run and fails if `Base` is not the lowest base that fits,
+so the choice stays the choice the sizes justify rather than the one that was
+right in July.
+
+So the disk layout is **copier `$0C00`, payload staged `$0D00`** — the lowest
+base that fits, i.e. the one that leaves the UI the most room. The staging
+address is a **linker symbol** (`asm/m8sd.cfg`), not a constant in `asm/m8.s`,
+so both layouts are built from one source: `m8sd.bin` is byte-identical to
+`m8.bin`, and `m8sdboot.bin` differs from `m8boot.bin` in **exactly one byte**,
+the payload's page. `TestDiskLayout` asserts both.
+
+```
+$0C00  m8sdboot.bin                  57 B   the copier (= --start)
+$0D00  m8.bin                     4,222 B   staged; copied to $E000
+$2000  internal/book/bookblob.bin  7,407 B  the resident opening book
+$4000  engine.bin                31,642 B   the engine
+       ------------------------------------
+       image $0C00-$BB99         44,954 B in 176 sectors
+```
+
+**It boots, and not only in our own emulator.** `TestDiskBoots` starts the CPU
+at `$C600` with nothing in RAM and lets the Disk II boot ROM, the Standard
+Delivery loader and the copier do the rest; the screen it ends up painting is
+byte-identical to the harness boot's. The same disk also boots **MAME's
+`apple2ee`**, which shares no code with goapple2, and plays a move typed on
+MAME's emulated IIe keyboard — with the pieces rendered by the real 342-0265-a
+character ROM, which is the first independent confirmation that the
+`ALTCHARSET` encoding is right.
+
+**Both margins are now gated, not commented.** There are 744 bytes of total
+slack and the two budgets grow from opposite ends — the engine spends the SD
+spare, the UI spends the growth room, and raising the base trades one for the
+other 256 bytes at a time. `internal/ui`'s **`TestDiskLedger`** prints both
+numbers on every run and fails when either goes negative, naming which.
+
 ### 12.3 Measured byte budget
 
 From the linker's segment size and label deltas (`internal/ui`
@@ -770,6 +825,14 @@ All under `internal/ui`, plus the two engine-side ones:
 
 | gate | what it proves |
 |---|---|
+| `TestDiskBoots` | **`asm/8fish.dsk` BOOTS.** Nothing is placed in memory: the CPU starts at `$C600`, the Disk II controller's own boot ROM reads track 0 sector 0 and jumps to it, Standard Delivery reads the other 176 sectors into `$0C00-$BB99`, the copier lifts the UI to `$E000` — and the screen it paints is **byte-identical** to the one `BootShipping` paints under the harness |
+| `TestDiskPlays` | the disk-booted machine is a working program, not a picture: a move typed on the modelled IIe keyboard is answered from the book, and once out of book the engine searches and **writes the transposition table in AUXILIARY RAM** |
+| `TestDiskLedger` | the two delivery margins (§12.2.1), printed every run and failed when either is exhausted |
+| `TestDiskRoundTrip` | the built `.dsk` reads back, sector by sector, as the image handed to `diskii mksd` |
+| `TestDiskLayout` | the disk build is the SAME UI: `m8sd.bin` == `m8.bin`, and the two copiers differ in exactly one byte |
+| `delivery.TestBaseTradeoff` | the staging-base decision table, re-derived from the real file sizes: `Base` must be the lowest one that fits |
+| `delivery.TestMarginsCanFail` | the gate on the gate — both margins really do go negative when the pieces grow |
+| `delivery.TestSectorOffset` | Standard Delivery's interleave is a bijection onto the disk's sectors and never lands on the boot sector |
 | `TestM8Boot` | the shipping boot path runs, the UI executes from `$E000`, and it paints a start position and waits for a key |
 | `TestShippingImageBoots` | the REAL-keyboard build (not the HARNESSKBD one) boots, paints, blocks in `entkey`'s poll loop with `ENTCNT` spinning — the engine's only source of entropy — and has selected the alternate character set |
 | `TestShippingKeyboard` | a key pressed on the modelled IIe keyboard reaches the SHIPPING image through `$C000`/`$C010`: echoed, backspaced, applied, and folded into `ENTROPY` |
@@ -845,8 +908,8 @@ Nothing below is needed to play a game.
 | **`FT2_ADAPT`'s per-GAME bank** | the host bridge banks unspent time across a game; on device each move gets a flat allocation | ~120 B: a signed 24-bit bank, income accrual and `min(4*base, income+bank)` |
 | **Position setup / FEN entry** | two-player mode plus takeback covers replaying a game | ~250 B for a FEN parser, or ~150 B for a cursor-driven piece placer |
 | **Cursor / joystick move entry** | typed entry wins on code, notation, entropy and errors (§5.1) | ~200-260 B on top of the same validator |
-| **A saved game / disk I/O** | needs a DOS or ProDOS MLI interface the rest of the project does not have | unpriced |
-| **Real-hardware validation** | **narrowed 2026-07-28.** The emulator now models the IIe keyboard and `ALTCHARSET`, so the shipping build plays a full game through `$C000`/`$C010` and the checkerboard is verified as dots. What remains is genuinely a hardware question: the real character ROM's glyph shapes, video timing, and Ctrl-Reset | a disk image and a IIe |
+| **A saved game / disk I/O** | Standard Delivery has no file system to save into. ProRWTS2 is the intended successor when this lands; until then the disk is read-only and read-once | unpriced |
+| **Real-hardware validation** | **narrowed again 2026-07-28.** The disk exists and boots (§12.2.1): `TestDiskBoots` runs the real Disk II boot ROM against the real nybblised image on an Apple IIe memory model, `TestDiskPlays` plays a move on it, and MAME's `apple2ee` boots the same disk with the real character ROM. What remains is genuinely a hardware question: video timing, drive speed, and Ctrl-Reset | **`make dsk`**, then a IIe |
 | **80-column / `80STORE`** | goapple2's `iie` deliberately leaves `80STORE` unmodelled (a compare on the hottest path for a switch nobody throws); `m8main` writes `PAGE1`, which pulls `$0400-$07FF` back to MAIN if firmware left it on | an emulator feature, not a UI one |
 | **MouseText glyphs** | `chargen` names MouseText but has no shapes for it; this UI does not use `$40-$5F` | 32 glyph bitmaps in goapple2 |
 | **Ctrl-Reset behaviour** (§11 risk 3) | the UI writes `$FFFA-$FFFF`, but whether a IIe forces ROM back in before the reset vector fetch is a hardware question | nothing to write; a hardware answer |

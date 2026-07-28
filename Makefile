@@ -10,7 +10,9 @@ ifneq ($(CC65_VERSION),$(TESTED_CC65))
 $(warning ca65 is $(CC65_VERSION); this repo was last tested with $(TESTED_CC65))
 endif
 
-.PHONY: all hello perft banktest entropytest uitest m8 engine tables test test-siblings clean
+DISKII := diskii
+
+.PHONY: all hello perft banktest entropytest uitest m8 engine tables dsk test test-siblings clean
 
 all: hello perft engine test
 
@@ -69,6 +71,30 @@ asm/m8.bin: $(M8_SRCS)
 	cd asm && $(CA65) -g m8.s -o m8.o
 	cd asm && $(LD65) -C m8.cfg m8.o -o m8.bin -Ln m8.lbl
 
+# The STANDARD DELIVERY layout of the same object file: the copier at $0C00
+# and the payload staged at $0D00, so the one contiguous image the boot loader
+# delivers ($0C00 to the end of engine.bin) fits diskii mksd's 44 KB cap. The
+# payload is byte-identical to m8.bin -- nothing in it depends on where it was
+# staged -- and internal/ui's TestDiskLayout asserts that.
+# Its own object file, not m8.o: two links of one source must not share
+# intermediates (see internal/asmbuild's withBuildLock on why that matters).
+asm/m8sdboot.bin: $(M8_SRCS) asm/m8sd.cfg
+	cd asm && $(CA65) -g m8.s -o m8sd.o
+	cd asm && $(LD65) -C m8sd.cfg m8sd.o -o m8sd.bin -Ln m8sd.lbl
+
+# The bootable disk. `diskii mksd` (bit.ly/a2diskii) writes peterferrie's
+# Standard Delivery boot loader; without it there is no disk, so say so
+# instead of producing nothing and exiting 0.
+dsk: asm/8fish.dsk
+
+asm/8fish.dsk: asm/m8sdboot.bin asm/m8.bin asm/engine.bin internal/book/bookblob.bin \
+               cmd/mkdsk/main.go internal/delivery/delivery.go
+	@command -v $(DISKII) >/dev/null 2>&1 || { \
+	  echo "$(DISKII) not found on PATH: it builds the Standard Delivery boot disk." >&2; \
+	  echo "  go install github.com/zellyn/diskii@latest" >&2; \
+	  exit 1; }
+	go run ./cmd/mkdsk
+
 asm/tables.s: cmd/gentables/main.go cmd/gentables/pesto.go
 	go run ./cmd/gentables
 
@@ -95,4 +121,4 @@ test-siblings:
 	@if [ -d ../go6502 ]; then (cd ../go6502 && go test ./...); fi
 
 clean:
-	rm -f hello/hello.o hello/hello.bin asm/*.o asm/*.bin asm/*.lbl
+	rm -f hello/hello.o hello/hello.bin asm/*.o asm/*.bin asm/*.lbl asm/*.dsk asm/*.img

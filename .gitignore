@@ -7,3 +7,5 @@
 /runs/
 # internal/asmbuild's cross-process build lock (see withBuildLock).
 .asmbuild.lock
+*.dsk
+*.img

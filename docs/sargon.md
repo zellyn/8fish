@@ -185,7 +185,7 @@ from a calibrated per-node cost model indexed by taper phase instead of
 counting a fixed-cost display event, because 8fish's per-node cost varies ~2.5×
 by phase. Note also that Sargon's level table below tops out at 5 s/move at
 level 1, which is roughly where 8fish's estimator stops being useful too (its
-resolution is one 128-node poll = 0.41-0.59 s).
+resolution is one 128-node poll = 0.45-0.57 s).
 
 | Level (SHIFT-n) | Avg response | Time control |
 |-----------------|--------------|--------------|

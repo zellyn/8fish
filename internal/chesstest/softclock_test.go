@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,16 +32,27 @@ import (
 // hardware semantics — while m.Cycles still reports the TRUE emulated cycle
 // count. Estimate and ground truth, on the same run.
 //
-// Three tests:
+// ★ WHICH OF THESE IS THE ACCEPTANCE GATE — READ THIS BEFORE TRUSTING A
+// NUMBER FROM THIS FILE. Not TestSoftClockAccuracy. That test passed this
+// feature at aggregate estimate/truth = 1.052 ("the engine over-reports
+// elapsed time, so it stops early") while the SAME BUILD overran its clock by
+// 17% in real games — the error was backwards in SIGN, and the +29 Elo the
+// feature appeared to win was 26% more compute (docs/results.md 2026-07-27).
+// The gate is now sprt.TestSoftClockAdherence: in-game adherence (own true
+// cycles / own intended cycles) against an exact-clock control, measured the
+// way cmd/sprt measures it. Everything here is a diagnostic.
 //
-//	TestSoftClockNoTreeEffect  gate: fixed-depth trees are IDENTICAL with the
-//	                           feature on and off, and the estimator's own
-//	                           cycle cost, measured as a percentage.
-//	TestSoftClockCalibrate     diagnostic: refits SOFTA/SOFTB in defs.inc
-//	                           against the shipped configuration.
-//	TestSoftClockAccuracy      gate: the error distribution of estimated vs
-//	                           true elapsed cycles in BUDGET mode, across
-//	                           phases and across level lengths.
+//	TestSoftClockNoTreeEffect  GATE (still): fixed-depth trees are IDENTICAL
+//	                           with the feature on and off, and the
+//	                           estimator's own cycle cost as a percentage.
+//	TestSoftClockCalibrate     DIAGNOSTIC ONLY, and the procedure that
+//	                           produced the failure — see its own comment.
+//	                           The shipped constants come from
+//	                           cmd/softclkdiag -fit, over real games.
+//	TestSoftClockAccuracy      DIAGNOSTIC: the error distribution over a
+//	                           position pool. Useful for seeing HOW the error
+//	                           is shaped; not evidence that the estimator
+//	                           manages time correctly.
 // ---------------------------------------------------------------------------
 
 // shipFeatures / shipFeatures2 are the configuration ucibridge.runEngine
@@ -337,7 +350,25 @@ func fitSoft(polls, phase, cyc []float64) softFit {
 	}
 }
 
-// TestSoftClockCalibrate refits the SOFTA/SOFTB constants in defs.inc.
+// TestSoftClockCalibrate is a FIXED-DEPTH, POOL-POSITION diagnostic, and it
+// is retained as the record of a procedure that failed — do NOT paste its
+// output into defs.inc.
+//
+// It fit SOFTA/SOFTB over 23 hand-built calibration positions, each searched
+// once at a fixed depth from a cold TT. Those positions are quiet,
+// near-balanced and mostly full-material, and they make ~1.21 moves per
+// search node. Positions the engine actually reaches in play make ~1.58 and
+// cost ~18% more per node AT THE SAME TAPER PHASE — which is the one thing
+// the estimator's single regressor cannot see. The result was a cost model
+// ~24% too cheap in games, an engine that overran its clock by 17%, and a
+// pool gate that reported the bias with the wrong sign.
+//
+// The shipped constants are now fit by cmd/softclkdiag -fit, over moves from
+// real self-play games (warm TT, real per-move allocation), against the exact
+// vector of cost-table lookups each move made. This test is still useful for
+// one thing: it is the cleanest way to see the per-node cost of a SINGLE
+// iteration at a known depth, with no iterative-deepening or budget-abort
+// structure on top.
 //
 // It does NOT reuse the mirror's fitted NodePhase coefficient directly. That
 // coefficient is one term of a five-regressor model (node, node*phase, make,
@@ -500,28 +531,90 @@ func (s softAcc) absErr() float64 { return float64(s.estimate) - float64(s.truth
 
 // softQuantum is the estimator's RESOLUTION, in cycles: one poll charges 128
 // nodes at once, so no search can be estimated to better than a single table
-// entry — 128*(3250 + 61.9*phase) cycles, i.e. 0.41 s at phase 0 rising to
-// 0.59 s at phase 24 on a 1.02 MHz IIe. This is not model error, it is the
-// sampling period, and it is what dominates every short search: a mate-in-1
-// that really costs 0.07 s is charged one whole quantum and reads "+547%",
-// which is a true statement about a meaningless quantity.
+// entry. This is not model error, it is the sampling period, and it is what
+// dominates every short search: a mate-in-1 that really costs 0.07 s is
+// charged one whole quantum and reads "+547%", which is a true statement about
+// a meaningless quantity.
 //
 // So the relative-error distribution is reported over the searches a LEVEL is
 // actually made of — those costing at least softResolvable — while everything
 // below it is scored in ABSOLUTE terms, where the honest claim (and the
 // assertion) is that it is bounded by about one quantum.
-const (
-	softQuantumMin = 128 * 3250           // phase 0:  ~0.41 s
-	softQuantumMax = 128 * (3250 + 62*24) // phase 24: ~0.59 s
-)
+//
+// The quantum is DERIVED from defs.inc rather than hardcoded, because it moves
+// with every recalibration and a hardcoded copy silently went stale once
+// already. chesstest.ParseDefs cannot supply it: the estimator's constants are
+// decimal magnitudes, not $hex addresses, so it skips them.
+func softQuanta(t testing.TB) (lo, hi uint64) {
+	t.Helper()
+	c := softCostConsts(t)
+	return uint64(128 * c(0)), uint64(128 * c(nPCost-1))
+}
+
+// softCostConsts returns cost(phase) in cycles/node, exactly as search.s builds
+// PCOSTLO/PCOSTHI at assembly time from defs.inc.
+func softCostConsts(t testing.TB) func(p int) int {
+	t.Helper()
+	src, err := os.ReadFile("../../asm/defs.inc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := map[string]int{}
+	re := regexp.MustCompile(`(?m)^(SOFT[A-Z]+)\s*=\s*(-?\d+)`)
+	for _, m := range re.FindAllStringSubmatch(string(src), -1) {
+		n, err := strconv.Atoi(m[2])
+		if err != nil {
+			t.Fatalf("bad %s in defs.inc: %v", m[1], err)
+		}
+		v[m[1]] = n
+	}
+	for _, k := range []string{"SOFTA", "SOFTB", "SOFTC", "SOFTK", "SOFTSCALE", "SOFTMARGIN"} {
+		if _, ok := v[k]; !ok {
+			t.Fatalf("%s missing from asm/defs.inc", k)
+		}
+	}
+	return func(p int) int {
+		raw := v["SOFTA"] + v["SOFTB"]*min(p, v["SOFTK"]) + v["SOFTC"]*max(p-v["SOFTK"], 0)
+		return raw * v["SOFTMARGIN"] / (100 * v["SOFTSCALE"])
+	}
+}
 
 // softResolvable is the true-cost floor for relative-error reporting: 2M
 // cycles, ~2 seconds, ~5 quanta. Below this the ±1-quantum resolution alone
 // permits ±20% no matter how good the cost model is.
 const softResolvable = 2_000_000
 
-// TestSoftClockAccuracy is the gate the estimator exists to pass: how wrong is
-// the engine about how long it has been thinking?
+// TestSoftClockAccuracy asks how wrong the engine is about how long it has
+// been thinking, over a pool of positions.
+//
+// ★ IT IS NOT THE GATE, AND IT MUST NOT BE USED AS ONE. It was, and it
+// certified a build whose error ran the other way. Two independent reasons:
+//
+//  1. WRONG POSITIONS. `starts` is 40 opening-pool starts plus 31 curated
+//     endgames/tacticals, all with the halfmove clock forced to 0. 47 of the
+//     71 sit at taper phase 20-24 — exactly the full-material shape the cost
+//     model was fit on, and the one place it is accurate. Games are played
+//     somewhere else: the mean SAMPLED phase over real game moves is ~10, and
+//     at any given phase a game position costs ~18% more per node than a pool
+//     one (makes per node 1.58 vs 1.21).
+//
+//  2. WRONG QUANTITY. Even over the right positions, aggregate estimate/truth
+//     does not predict time management, because the estimate is consumed by a
+//     THRESHOLD: idloop starts another iteration only if now + 2*cost(last)
+//     fits the budget. Symmetric clock noise there produces ASYMMETRIC spend
+//     — an extra iteration costs 2-6x what stopping early saves. Measured: a
+//     table with in-game estimate/truth 0.99 still overran its budget by 12%,
+//     taking an extra iteration on 86 of 525 paired positions against 16 that
+//     took one fewer.
+//
+// The gate is sprt.TestSoftClockAdherence. What this test is still good for
+// is SHAPE: which budgets, phases and depths the estimate is worst at, which
+// is how the game-condition refit found its knee.
+//
+// Because the shipped table is deliberately biased high (SOFTMARGIN in
+// defs.inc), the pool ratio here is EXPECTED to sit well above 1. A pool
+// ratio at or below 1 is the alarm: the pool is the easy case, and an
+// estimator that already reads low here reads much lower in a game.
 //
 // BUDGET mode, shipped configuration, harness clock trap OFF — so the engine
 // runs exactly as it would on a IIe, stopping itself on its own estimate —
@@ -652,13 +745,14 @@ func TestSoftClockAccuracy(t *testing.T) {
 		return out
 	}
 
+	quantumMin, quantumMax := softQuanta(t)
 	t.Logf("resolution: one poll = 128 nodes = %d..%d cycles (%.2f..%.2f s, phase 0..24); "+
 		"%d of %d searches cost < %d cycles and are scored in absolute terms below",
-		softQuantumMin, softQuantumMax, float64(softQuantumMin)/1_020_500,
-		float64(softQuantumMax)/1_020_500, len(sub), len(all), softResolvable)
+		quantumMin, quantumMax, float64(quantumMin)/1_020_500,
+		float64(quantumMax)/1_020_500, len(sub), len(all), softResolvable)
 
 	t.Log("--- resolvable searches (true cost >= 2M cycles ~ 2 s) ---")
-	overall := report("all resolvable", res)
+	report("all resolvable", res)
 	t.Log("--- by level length (budget) ---")
 	for _, b := range budgets {
 		rows := pick(func(a softAcc) bool { return a.budget == b })
@@ -705,7 +799,7 @@ func TestSoftClockAccuracy(t *testing.T) {
 	}
 	if len(sub) > 0 {
 		t.Logf("--- %d sub-resolution searches: worst absolute error %+.0f cycles (%+.2f max-quanta, %+.2f s) on %s",
-			len(sub), worstSub, worstSub/softQuantumMax, worstSub/1_020_500, worstSubRow.fen)
+			len(sub), worstSub, worstSub/float64(quantumMax), worstSub/1_020_500, worstSubRow.fen)
 	}
 
 	// Whole-pool ratio over EVERY search including the sub-resolution ones:
@@ -716,44 +810,59 @@ func TestSoftClockAccuracy(t *testing.T) {
 
 	// ---- assertions ----
 	//
-	// Loose in the per-search tail and tight in the aggregate, because that is
-	// what chess time management needs: a move that takes 1.3x its allocation
-	// is invisible, but a GAME that runs 1.3x long forfeits.
-	if math.Abs(overall.mean) > 15 {
-		t.Errorf("mean bias %.1f%% exceeds 15%%: recalibrate SOFTA/SOFTB (TestSoftClockCalibrate)", overall.mean)
+	// DELIBERATELY ONE-SIDED AND LOOSE, because this is a diagnostic and the
+	// shipped calibration is deliberately biased high. What is asserted is
+	// only the direction: on the EASIEST position set the estimator has, it
+	// must not read low. Everything about how well it manages a clock is
+	// asserted by sprt.TestSoftClockAdherence, which measures games.
+	if poolAll < 1.00 {
+		t.Errorf("pool estimate/truth %.3f < 1.00: the estimator reads LOW on the "+
+			"pool, which is the easy case — in games it will read far lower and "+
+			"the engine will overrun its clock (sprt.TestSoftClockAdherence)", poolAll)
 	}
-	if poolAll < 0.85 || poolAll > 1.15 {
-		t.Errorf("pool estimate/truth %.3f outside [0.85, 1.15]: a game would run that much long or short", poolAll)
-	}
-	if overall.rms > 25 {
-		t.Errorf("RMS relative error %.1f%% exceeds 25%%", overall.rms)
-	}
-	if math.Abs(overall.worst) > 60 {
-		t.Errorf("worst resolvable-search error %.1f%% exceeds 60%%", overall.worst)
+	if poolAll > 1.80 {
+		t.Errorf("pool estimate/truth %.3f > 1.80: the safety margin has become a "+
+			"strength tax; check SOFTMARGIN against the in-game adherence gate", poolAll)
 	}
 	// Sub-resolution searches cannot be estimated at all; the claim is only
-	// that they are wrong by no more than the sampling period plus the cost
-	// model's own relative error — which is exactly the bound below, and is
-	// what would catch the entry pre-charge being missing (the estimate would
-	// fall a whole quantum short and read a flat zero on the shortest
-	// searches) or doubled.
-	subBound := float64(softQuantumMax) + 0.30*float64(worstSubRow.truth)
-	if math.Abs(worstSub) > subBound {
-		t.Errorf("sub-resolution search off by %.0f cycles (%s), more than one sampling period (%d) plus 30%% model error",
-			worstSub, worstSubRow.fen, softQuantumMax)
+	// that they land within one sampling period of what the calibration says
+	// they should. This is what would catch the entry pre-charge being missing
+	// (the estimate falls a whole quantum short and reads a flat zero on the
+	// shortest searches) or doubled.
+	//
+	// It is measured against poolAll * truth, NOT against truth: the shipped
+	// table is deliberately biased high (SOFTMARGIN), so "estimate == truth"
+	// is not the target and a bound written around it fails on a correct
+	// build — which is exactly what happened when the margin went in.
+	var worstDev float64
+	var worstDevRow softAcc
+	for _, a := range sub {
+		d := float64(a.estimate) - poolAll*float64(a.truth)
+		if math.Abs(d) > math.Abs(worstDev) {
+			worstDev, worstDevRow = d, a
+		}
+	}
+	devBound := float64(quantumMax) + 0.30*poolAll*float64(worstDevRow.truth)
+	if math.Abs(worstDev) > devBound {
+		t.Errorf("sub-resolution search deviates %+.0f cycles from the calibration's own "+
+			"expectation (%s): more than one sampling period (%d) plus 30%% model error — "+
+			"suspect the entry prime",
+			worstDev, worstDevRow.fen, quantumMax)
 	}
 	// Per-phase bias is the failure mode that would make a level mean
 	// different things in different parts of a game — exactly the defect the
-	// mirror's constant-per-node cost had before the phase term went in.
+	// mirror's constant-per-node cost had before the phase term went in. It is
+	// checked RELATIVE to the overall pool ratio, not against 1.0, so the
+	// deliberate global margin neither masks it nor trips it.
 	for _, bk := range buckets {
 		rows := pick(func(a softAcc) bool { return a.phase >= bk.lo && a.phase <= bk.hi })
 		if len(rows) < 10 {
 			continue
 		}
 		s := summarize(rows)
-		if s.poolRatio < 0.80 || s.poolRatio > 1.20 {
-			t.Errorf("%s: pool estimate/truth %.3f outside [0.80, 1.20] — the estimate is phase-biased",
-				bk.name, s.poolRatio)
+		if r := s.poolRatio / poolAll; r < 0.75 || r > 1.30 {
+			t.Errorf("%s: estimate/truth %.3f is %.2fx the pool's %.3f — the estimate is phase-biased",
+				bk.name, s.poolRatio, r, poolAll)
 		}
 	}
 }

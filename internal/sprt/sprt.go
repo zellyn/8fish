@@ -74,7 +74,58 @@ type Config struct {
 	// AdaptiveB=false — adaptive vs flat.
 	AdaptiveA bool
 	AdaptiveB bool
+
+	// MoveTrace, if non-nil, is called once per engine move with that move's
+	// measurement. It exists for the FT2_SOFTCLK calibration and its gate:
+	// the estimator has to be fit and judged under GAME conditions (warm TT
+	// carried in the aux bank, the real per-move allocation, the phase
+	// distribution games actually visit), and the only way to see those is
+	// from inside this loop. Nil in every ordinary match, and the loop is
+	// byte-identical when it is nil.
+	//
+	// GAMES RUN IN PARALLEL: the callback must be goroutine-safe.
+	MoveTrace func(MoveInfo)
+
+	// ProbeAddrs, when MoveTrace is set, switches the per-move run to
+	// harness.RunProfile and counts entries to each named address (2-3x
+	// slower). The name "checkclocks" is special: at each entry the trace also
+	// samples PHASE, which — with the poll count — reconstructs EXACTLY the
+	// two regressors the on-device estimator forms, without perturbing the
+	// tree the way poking the cost table would.
+	ProbeAddrs map[string]uint16
+
+	// ColdTT is a DIAGNOSTIC knob: drop the aux-bank transposition table
+	// between moves so every search starts from an empty TT, the way a
+	// position-pool test does. It exists to isolate how much of the
+	// soft-clock estimator's game-vs-pool disagreement is TT warmth. Never
+	// set in a real match — it makes the engine materially weaker.
+	ColdTT bool
 }
+
+// MoveInfo is one engine move as the soft-clock work needs to see it.
+type MoveInfo struct {
+	FEN      string
+	SideA    bool   // the move was played by side A
+	Ply      int    // halfmove index within the game (0 = first out-of-book)
+	Phase    int    // engine taper phase at the root
+	Budget   uint64 // this move's soft budget, in cycles
+	Cycles   uint64 // TRUE emulated cycles the move cost
+	Estimate uint64 // the engine's own estimate (0 unless FT2_SOFTCLK is on)
+	Depth    int    // completed ID depth
+	Polls    uint64 // checkclocks entries (ProbeAddrs only)
+	PhaseSum uint64 // sum of PHASE sampled at those polls (ProbeAddrs only)
+	// PhaseHist counts the polls at each CLAMPED phase, exactly as
+	// checkclocks indexes the cost table. With the root phase counted once
+	// more for the entry prime, this is the complete set of table lookups the
+	// move made — so a fit against it reproduces the on-device estimate to
+	// the byte, instead of approximating it through a per-move mean.
+	PhaseHist [NPCost]uint32
+	Counts    map[string]uint64
+}
+
+// NPCost is the cost table's entry count (phase 0..24), mirroring NPCOST in
+// asm/defs.inc; checkclocks clamps PHASE into that range.
+const NPCost = 25
 
 // effortBank is a per-game cycle bank (host-side; the engine's zero page does
 // NOT persist across the harness's fresh-machine-per-move, so the bank must
@@ -336,7 +387,7 @@ func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCy
 		true:  {income: cfg.BudgetCycles},
 		false: {income: cfg.BudgetCycles},
 	}
-	for range 400 {
+	for ply := range 400 {
 		if ref.HalfmoveClock() >= 100 || ref.InsufficientMaterial() {
 			return 0, aCyc, bCyc, aMv, bMv, nil
 		}
@@ -398,12 +449,68 @@ func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCy
 			chesstest.SetBudget(m, defs, cfg.BudgetCycles, 24)
 		}
 		m.Mem.Main[defs["HALFMOVE"]] = byte(min(ref.HalfmoveClock(), 255))
-		if aux := auxes[aTurn]; aux != nil {
+		if aux := auxes[aTurn]; aux != nil && !cfg.ColdTT {
 			copy(m.Mem.Aux[:], aux)
 		}
-		exited, code, err := m.Run(runCap)
+		var exited bool
+		var code byte
+		var counts map[string]uint64
+		var polls, phaseSum uint64
+		var hist [NPCost]uint32
+		if cfg.MoveTrace != nil && len(cfg.ProbeAddrs) > 0 {
+			// Diagnostic path: count probe entries and sample PHASE at each
+			// clock poll. Non-perturbing — RunProfile only observes.
+			ccAddr := cfg.ProbeAddrs["checkclocks"]
+			phaseAddr := defs["PHASE"]
+			counts = make(map[string]uint64, len(cfg.ProbeAddrs))
+			names := make([]string, 0, len(cfg.ProbeAddrs))
+			addrs := make([]uint16, 0, len(cfg.ProbeAddrs))
+			for n, a := range cfg.ProbeAddrs {
+				names = append(names, n)
+				addrs = append(addrs, a)
+			}
+			hits := make([]uint64, len(addrs))
+			exited, code, err = m.RunProfile(runCap, func(pc uint16, _ uint8) {
+				for i, a := range addrs {
+					if pc == a {
+						hits[i]++
+					}
+				}
+				if ccAddr != 0 && pc == ccAddr {
+					polls++
+					ph := int(m.Mem.Main[phaseAddr])
+					phaseSum += uint64(ph)
+					if ph >= NPCost {
+						ph = NPCost - 1 // the clamp checkclocks applies
+					}
+					hist[ph]++
+				}
+			})
+			for i, n := range names {
+				counts[n] = hits[i]
+			}
+		} else {
+			exited, code, err = m.Run(runCap)
+		}
 		if err != nil || !exited {
 			return 0, aCyc, bCyc, aMv, bMv, fmt.Errorf("engine run: exited=%v err=%v (fen %q)", exited, err, ref.FEN())
+		}
+		if cfg.MoveTrace != nil {
+			budget := uint64(m.Mem.Main[defs["BUDGET0"]]) |
+				uint64(m.Mem.Main[defs["BUDGET1"]])<<8 |
+				uint64(m.Mem.Main[defs["BUDGET2"]])<<16
+			var est uint64
+			if m.Mem.ClockAddr == 0 {
+				ca := defs["CLOCK_TRAP"]
+				est = (uint64(m.Mem.Main[ca]) | uint64(m.Mem.Main[ca+1])<<8 |
+					uint64(m.Mem.Main[ca+2])<<16) << 8
+			}
+			cfg.MoveTrace(MoveInfo{
+				FEN: ref.FEN(), SideA: aTurn, Ply: ply, Phase: int(m.Mem.Main[defs["PHASE"]]),
+				Budget: budget << 8, Cycles: m.Cycles, Estimate: est,
+				Depth: int(m.Mem.Main[defs["CURDEPTH"]]),
+				Polls: polls, PhaseSum: phaseSum, PhaseHist: hist, Counts: counts,
+			})
 		}
 		// Tally actual cycles + own-move count to the side that moved.
 		if aTurn {

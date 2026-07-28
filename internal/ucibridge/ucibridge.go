@@ -100,7 +100,12 @@ type Bridge struct {
 	// screen and SPRT in docs/results.md was run against the harness's exact
 	// counter, and the point of the flag is to be able to A/B the estimator's
 	// error as an Elo cost rather than to silently fold it into every future
-	// number. Accuracy: internal/chesstest TestSoftClockAccuracy.
+	// number.
+	//
+	// How well it manages a clock: sprt.TestSoftClockAdherence (in-game
+	// adherence, the acceptance gate). NOT internal/chesstest
+	// TestSoftClockAccuracy — that pool test certified this feature with the
+	// bias backwards; see its own comment and docs/results.md 2026-07-27.
 	SoftClock bool
 
 	// Ponder enables pondering: searching during the opponent's turn on the

@@ -331,9 +331,20 @@ of its thinking asterisk; docs/sargon.md). `checkclock`'s existing once-per-128-
 nodes poll adds `128 × cost(PHASE)` to a 24-bit accumulator kept **at `$BFF4`
 itself**, so every clock READER above is unchanged — on hardware they read the
 estimate, under the harness the real counter. Measured (docs/results.md): cost
-**+0.0073%**, aggregate estimate/truth **1.052** over 284 budget-mode searches,
-RMS 17.8%, worst +52.6%, resolution one poll = 0.41-0.59 s. Feature OFF is the
-identical instruction stream.
+**+0.0073%**, resolution one poll = 0.45-0.57 s. Feature OFF is the identical
+instruction stream.
+
+**RECALIBRATED the same day** — the first cost table was fit on quiet
+calibration positions and gated on a position pool, both of which said it
+over-estimated by 5%; in real games it under-estimated and the engine overran
+its clock by 17%. The table is now fit on moves from real games and
+deliberately biased high. What a UI can promise, measured in games: at a
+**4 s** level the engine spends **0.94** of its allocation (the exact clock
+spends 0.92, so the two are within 2%); at a **15 s** level it spends **0.68**
+against the exact clock's 0.86, i.e. it is ~20% CONSERVATIVE at long levels.
+That is the safe direction — it never flags — but it is a real strength cost
+at long time controls, and the level menu should not advertise more precision
+than that.
 
 So the UI may offer **either** kind of level:
 
@@ -345,10 +356,12 @@ So the UI may offer **either** kind of level:
   what makes 8fish comparable to Sargon's timed levels and what `FT2_ADAPT`
   needs.
 
-A timed level is accurate to a few percent on average and ±20-50% on an
-individual move, and it is weakest on SHALLOW searches — the estimator's error
-concentrates at completed depth ≤ 3, i.e. short levels and opening positions.
-Levels below ~4 seconds are not worth offering: one poll is 0.41-0.59 s, and a
+A timed level is DELIBERATELY conservative: the engine believes it has spent
+~20-30% more than it really has, because the estimate is read by a threshold
+(the `idloop` predictive gate) where symmetric clock noise turns into
+asymmetric overspending. Per move the error is ±30-50%; per GAME the engine
+lands at 0.94 of its allocation at a 4 s level and 0.68 at a 15 s one. Levels
+below ~4 seconds are not worth offering: one poll is 0.45-0.57 s, and a
 1-second move on a 1 MHz 6502 is only ~310 nodes deep anyway.
 
 **One integration note for §7's UI-supplied ID driver.** `FT2_SOFTCLK` is armed
@@ -590,10 +603,14 @@ Steps 1-9 need no hardware. Step 10 is the first that does.
    2026-07-27** by `FT2_SOFTCLK`, an estimated elapsed-cycle clock in
    `checkclock` (+125 B CODE, +0.0073% cycles, tree-identical when off).
    Budget mode, timed levels and `FT2_ADAPT` all run on hardware now. What
-   REMAINS a UI decision is which levels to offer: the estimate is aggregate
-   1.052 and RMS 17.8% per move, weakest on shallow (depth ≤ 3) searches, with
-   a 0.41-0.59 s resolution — so timed levels below ~4 s are not worth
-   offering. See docs/results.md for the full error distribution.
+   REMAINS a UI decision is which levels to offer. The estimator was
+   RECALIBRATED under game conditions the same day (its first calibration had
+   the bias backwards and the engine overran its clock by 17%); it is now
+   deliberately biased high and lands at 0.94 of its allocation over a game at
+   a 4 s level, 0.68 at a 15 s one, with a 0.45-0.57 s resolution — so timed
+   levels below ~4 s are not worth offering, and long levels are conservative
+   rather than dangerous. See docs/results.md for the error distribution and
+   the residual budget dependence.
 2. **Character-generator verification gap.** goapple2 carries the ][+ 2 KB
    character ROM and does not model `ALTCHARSET`, so inverse lowercase is
    verified as bytes-against-the-documented-encoding, not as pixels. If a real

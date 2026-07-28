@@ -18,14 +18,18 @@ import (
 // sees the true counter.
 //
 // The assertion is the one that matters for a real game: the TRUE cycles the
-// engine burns over the session still track the time control. The estimator is
-// biased a few percent and noisy per move (internal/chesstest
-// TestSoftClockAccuracy: aggregate 1.052, RMS 17.8%), and the banked clock
-// conserves total time in ESTIMATED units — so the real-time drift over a game
-// is the estimator's mean bias, not its per-move error. This test is what would
-// catch that reasoning being wrong: a systematically under-reporting clock
-// makes each move overrun, the bank never notices, and the session's real spend
-// runs away from its income.
+// engine burns over the session still track the time control. This test is
+// what would catch a systematically UNDER-reporting clock — every move
+// overruns, the bank settles in estimated units and never notices, and the
+// session's real spend runs away from its income. That is exactly the failure
+// the 2026-07-27 refit fixed, and this test was too small (eleven moves) and
+// too loose (1.35x) to have caught it on its own; the gate is
+// sprt.TestSoftClockAdherence, over real games.
+//
+// The estimator is now deliberately biased HIGH (SOFTMARGIN in asm/defs.inc),
+// because the estimate is read by a threshold — idloop's predictive gate —
+// where symmetric noise produces asymmetric SPEND. So the soft arm here is
+// expected to come in at or below the harness-clock control, not above it.
 //
 // It also covers the plumbing that unit tests cannot: the entry-time operand
 // patch surviving a fresh machine every move, and the estimate surviving the

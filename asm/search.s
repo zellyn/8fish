@@ -129,14 +129,29 @@ checkclocks:
         lda #NPCOST-1
 :       tax                     ; (X is dead at search's entry — the only
         clc                     ;  caller — so checkclock may clobber it)
-        lda CLOCK_TRAP          ; 24-bit += 128 nodes x cost(phase)
-        adc PCOSTLO,x
-        sta CLOCK_TRAP
-        lda CLOCK_TRAP+1
-        adc PCOSTHI,x
-        sta CLOCK_TRAP+1
-        bcc checkclock
+        lda CLOCK_TRAP          ; += PCOST[phase], a 17-BIT add: two ADCs and
+        adc PCOSTLO,x           ;  one carry propagation, never a 3-byte ADC
+        sta CLOCK_TRAP          ;  chain. The "x 128 nodes" and the conversion
+        lda CLOCK_TRAP+1        ;  to CLOCK_TRAP's units are BOTH folded into
+        adc PCOSTHI,x           ;  the table at assembly time (see PCOSTLO
+        sta CLOCK_TRAP+1        ;  above), so nothing is multiplied or shifted
+        bcc checkclock          ;  here.
         inc CLOCK_TRAP+2
+        ; ASKED AND ANSWERED (2026-07-27): "don't multiply by 128 and do a
+        ; 24-bit add; keep the accumulator in units of 128 cycles and do a
+        ; 17-bit add." That is exactly the code above, and it already is —
+        ; there is no runtime multiply to remove and the third byte is already
+        ; a bcc/inc rather than an adc. Rescaling the accumulator from
+        ; CLOCK_TRAP's native 256-cycle units to 128-cycle ones assembles to
+        ; the IDENTICAL instruction stream; it would only double the table
+        ; entries (2320..2927 -> 4640..5854, still 16-bit) and halve ABORTL.
+        ; It was not taken because it buys one bit of table rounding — worth
+        ; ~0.04% against an estimator whose relative RMS is 17% — and costs a
+        ; dual-units rule for BUDGET: $BFF4 is the harness's REAL 256-cycle
+        ; counter when FT2_SOFTCLK is clear, so every host-side poke
+        ; (chesstest.SetBudget, SetAdaptive, sprt.pokeAlloc, ucibridge's bank)
+        ; would have to scale by the feature bit. Messier at five call sites
+        ; for no cycles.
         ; fall through into the ordinary poll
 
 ; ---------------------------------------------------------------
@@ -165,20 +180,32 @@ checkclock:
 ccout:  rts
 
 ; PCOSTLO/PCOSTHI: what 128 nodes at taper phase X cost, in CLOCK_TRAP's
-; 256-cycle units, i.e. 128*(SOFTA + SOFTB*phase)/256 with SOFTA/SOFTB the
-; per-node cost model in defs.inc. 25 entries (phase 0..24); checkclocks
-; clamps. A TABLE rather than a multiply because the lookup is free at
-; runtime and it leaves room for a non-linear refit without touching code.
+; 256-cycle units, i.e. 128*cost(phase)/256 with cost() the two-segment
+; per-node model in defs.inc. 25 entries (phase 0..24); checkclocks clamps.
+; A TABLE rather than a multiply because the lookup is free at runtime and
+; it leaves room for a non-linear refit without touching code — which is
+; exactly what the 2026-07-27 game-condition refit spent: the knee at SOFTK
+; costs nothing here, it is all assembly-time arithmetic.
 ; internal/chesstest pokes these entries directly to run the calibration
 ; probes (see TestSoftClockCalibrate), so the layout is load-bearing:
 ; two parallel 25-byte arrays, low bytes first.
+.define PCOST(p) ((128 * (SOFTA + SOFTB * p) * SOFTMARGIN) / (256 * 100 * SOFTSCALE))
+.define PCOSTF(p) ((128 * (SOFTA + SOFTB * SOFTK + SOFTC * (p - SOFTK)) * SOFTMARGIN) / (256 * 100 * SOFTSCALE))
 PCOSTLO:
         .repeat NPCOST, i
-        .byte <((128 * (SOFTA + SOFTB * i)) / 256 / SOFTSCALE)
+        .if i <= SOFTK
+        .byte <PCOST(i)
+        .else
+        .byte <PCOSTF(i)
+        .endif
         .endrepeat
 PCOSTHI:
         .repeat NPCOST, i
-        .byte >((128 * (SOFTA + SOFTB * i)) / 256 / SOFTSCALE)
+        .if i <= SOFTK
+        .byte >PCOST(i)
+        .else
+        .byte >PCOSTF(i)
+        .endif
         .endrepeat
 
 ; ---------------------------------------------------------------

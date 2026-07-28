@@ -3,7 +3,261 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
-## 2026-07-27 — ★ FT2_SOFTCLK Elo A/B: **DO NOT ENABLE.** It "wins" +29 ± 26 by OVERRUNNING its clock 17%, and the static accuracy test had the bias BACKWARDS
+## 2026-07-27 — ★ FT2_SOFTCLK RECALIBRATED under game conditions: adherence 1.171 → **0.943**, equal-total-spend 1.260 → **1.015**, and the honest Elo is **−23 ± 27**
+
+The pool gate was measuring the wrong POSITIONS *and* the wrong QUANTITY.
+
+Fixes the entry below. Three things came out of it: a mechanism (with the
+leading hypothesis falsified), a recalibration, and a replacement gate.
+
+### 1. The mechanism — measured, not assumed
+
+Every isolation below is at the shipped config, 4000 ms/move, with the
+ORIGINAL cost table, so the numbers are comparable to the failure.
+
+**(a) The transposition table is NOT the cause.** The leading hypothesis was
+that pool searches start from a cold TT while a game carries a warm one
+across moves in the aux bank. Ran the game loop with the TT DELIBERATELY
+DROPPED between moves (`sprt.Config.ColdTT`), which turns a game into a
+sequence of pool-like cold searches and changes nothing else:
+
+| arm | estimate/truth | adherence |
+|---|---:|---:|
+| games, warm TT (as shipped) | 0.871 | 1.188 |
+| games, TT dropped every move | **0.856** | 1.169 |
+
+TT warmth is worth **−1.5%** — and it is the *wrong sign* to explain a
+21-point gap. Hypothesis falsified.
+
+**(b) It is the POSITIONS, and it is nearly all of it.** Same protocol on
+both sides — one budgeted search per FEN, cold TT, no game context, i.e.
+exactly what `TestSoftClockAccuracy` does — run over the pool's own 71 FENs
+and over 525 FENs the engine actually visited in self-play:
+
+| position set (identical protocol) | estimate/truth | adherence | cycles/node | makes/node |
+|---|---:|---:|---:|---:|
+| the pool's own 71 starts | **1.071** | 0.942 | 3819 | **1.211** |
+| 525 game-visited positions | **0.844** | 1.171 | 4291 | **1.576** |
+
+The pool is 40 opening starts plus 31 curated endgames, 47 of them at taper
+phase 20-24 — the full-material shape the cost model was fit on, and the one
+place it is right. A position the engine actually reaches makes **30% more
+moves per node**, and cycles-per-node tracks makes-per-node almost exactly.
+At MATCHED sampled phase 20-23 it is pool 4065 vs game 4729 cycles/node
+(makes/node 1.202 vs 1.336); at phase 0-3, 3230 vs 3659 (1.177 vs 1.418). So
+this is **not a phase-distribution artifact** — it is the same 18-20% at
+every phase, and the phase regressor cannot see it. The extra makes are check
+evasions and illegal-move rejections, which quiet balanced positions do not
+have.
+
+**(c) Ruled out, quantified anyway.** The halfmove clock (game positions have
+a live repetition scan; every pool FEN is forced to `0 1`): forcing game FENs
+to halfmove 0 moves estimate/truth 0.844 → 0.850, and pool FENs to halfmove
+30 moves 1.071 → 1.059 — **~1%**. The banked income: both sides of the
+failing A/B were FLAT (non-adaptive), so `pokeAlloc` gave every move exactly
+`income` and the bank never fed back — **0%**. Book moves: the harness enters
+at `$4000` and never reaches `bookentry` — **0%**.
+
+**(d) The entry prime is 12-13% of every estimate**, because a 4 s move is
+only ~7 polls. That is why the pool reads 1.071 while its cost model is
+really ~0.95 of truth at its own phases. Correct — it charges the 128 nodes
+before the first poll — but it means short searches are dominated by a
+constant.
+
+**★ (e) The SECOND cause, and the one that makes estimate/truth the wrong
+quantity entirely.** Refit the table on game data so that in-game
+estimate/truth = **0.9873** — a very nearly perfect clock — and the engine
+STILL overran, adherence **1.119** against the exact clock's 0.921. Paired on
+525 identical positions, soft clock vs exact clock:
+
+    soft/exact total cycles 1.2213
+    mean completed depth    2.752 vs 2.615
+    took an extra iteration 86 positions;  one fewer  16 positions
+
+The estimate is consumed by a THRESHOLD — `idloop` starts iteration d+1 only
+if `now + 2*cost(d)` fits the budget — and a threshold converts symmetric
+clock noise into ASYMMETRIC SPEND, because an extra iteration costs 2-6x what
+stopping early saves. Quantifying it as
+`amp = adherence_soft / (adherence_exact / (estimate/truth))`, i.e. spend
+beyond what a perfectly-proportional clock would produce:
+
+| budget | amp |
+|---|---:|
+| 4000 ms (typical completed depth 2-3) | **1.24** |
+| 15000 ms (typical completed depth 4-5) | **1.00** |
+
+It is a short-budget effect because the payoff asymmetry is depth-dependent:
+at depth 2→3 the next iteration is 3-6x the last, at depth 4→5 nearer 2-3x.
+**No unbiased cost model can fix this.** The clock has to be biased.
+
+### 2. The recalibration
+
+Same structure — `128 × cost(PHASE)` into the 24-bit accumulator at
+`checkclocks`, one indexed fetch, table built at assembly time. Nothing new
+in the hot path. Two changes to what the table contains:
+
+**Fit on real games, both level lengths.** 3120 moves played through the SPRT
+match loop (warm TT, real per-move allocation) at 4 s AND 15 s, fit against
+the exact vector of cost-table lookups each move made — the per-move phase
+HISTOGRAM plus the root-phase prime — so the fit reproduces the on-device
+estimate to the byte instead of approximating it through a per-move mean.
+Relative least squares, the loss a budget cares about.
+
+    raw fit: cost/node = 3437.3 + 79.7 x min(phase, 14)     (flat above 14)
+    relative RMS 16.5% over 3120 moves
+
+Two segments, not a line, because the game-condition curve is concave —
+cycles/node climbs steeply to about phase 14-15 and then flattens (the free
+25-entry fit agrees; a straight line is ~10% wrong at both ends). The knee
+costs nothing: `.repeat`/`.if` at assembly time.
+
+**A deliberate margin, kept separate from the fit.** `SOFTMARGIN = 127%`
+(percent, applied in the table expression) is POLICY, not physics: it is the
+correction for (e), and it is calibrated on ADHERENCE, not on estimate/truth.
+Measured at 4000 ms, 40 games per point:
+
+| margin | in-game adherence | estimate/truth |
+|---|---:|---:|
+| 100% | 1.119 | 0.99 |
+| 115% | 0.993 | 1.10 |
+| 130% | 0.936 | 1.26 |
+| 145% | 0.887 | 1.42 |
+| *exact clock* | *0.921* | — |
+
+### 3. The result
+
+| control | soft adherence | exact adherence | soft/exact spend |
+|---|---:|---:|---:|
+| **4000 ms** (2 × 3400 moves) | **0.9413** | 0.9228 | **1.020** |
+| 15000 ms (2 × 1700 moves) | 0.6836 | 0.8603 | 0.795 |
+
+At the 4 s control the estimator now lands just under its allocation and
+within 2% of what the exact clock spends — which is the only setting at which
+an Elo A/B measures the estimator instead of a compute advantage.
+
+**The A/B, re-run. SPEND FIRST, because that is the whole lesson:**
+
+    -a 0x5f -a2 0x30 -b 0x5f -b2 0x10 -pergame -budget 4000 -pairs 200
+    A(soft) adherence 0.9429   B(exact) adherence 0.9285
+    equal-total-spend A/B = 1.0149   (A used 1.49% more)
+    +109 =156 -135   score 46.8%   elo -23 +/- 27   llr(0,10) -1.51
+
+Compare with the run this supersedes: A/B spend **1.2601** and "+29 ± 26".
+Now that the two sides spend the same compute to within 1.5%, the Elo is
+readable, and it reads **−23 ± 27** — i.e. the estimator costs somewhere
+between nothing and about 25 Elo, and certainly does not WIN anything. That
+is the expected sign: at equal total spend, a clock with 40% per-move RMS
+allocates its time worse than a perfect one. The 1.5% residual spend
+advantage is worth ~+2 Elo, so the bias-corrected figure is nearer −25.
+
+**This is what the feature actually costs.** The earlier +29 was 26% extra
+compute (~+43 Elo of expected gain) with the estimator contributing nothing.
+
+**Note what "adherence 0.95-1.00" can and cannot mean here.** The EXACT clock
+only reaches 0.921: the predictive gate leaves ~8% of the budget unspent by
+design. So "adherence 1.00 with equal spend" is not a reachable pair, and the
+target that matters is parity with the exact clock.
+
+### 4. ★ Where it is still weakest — the 15 s deficit is REAL and is not fixed
+
+**Long levels are ~20% conservative.** The true cost per node is *not* the
+same function of phase at every budget: fit separately, 4 s data gives
+`4715 + 41.4×phase` and 15 s data gives `3708 + 47.5×phase` — a **22.6%
+difference at phase 10**. Deeper trees take far more TT cutoffs and a
+TT-cutoff node is counted but nearly free. The estimator has no depth or
+budget regressor, so one table cannot serve both; fitting jointly (which is
+what shipped) splits the difference, and the 4 s-safe margin then leaves 15 s
+spending 0.68 of its allocation against the exact clock's 0.86. That is the
+SAFE direction — it never flags — but it is a real strength cost at long time
+controls, and long levels are the ones a UI would actually offer.
+Not fixable by refitting a phase-indexed table. Priced alternatives, none
+taken here: a depth- or budget-scaled margin (needs a multiply or a second
+table plus a runtime select), or reducing the estimator's variance so the
+margin can shrink (a make counter was priced at ~0.29% of runtime and refused
+— but note the make count is exactly the regressor the mechanism in (b) says
+is missing).
+
+**Taper phase 14-19 is the worst bucket, and the pool's n=3 warning was
+right.** With real samples (n=406 at 4 s, not 3) it is the only phase bucket
+whose adherence exceeds 1.0:
+
+| root phase | n | estimate/truth | adherence | cycles/node |
+|---|---:|---:|---:|---:|
+| 0-3 | 148 | 1.212 | 0.802 | 4777 |
+| 4-7 | 324 | 1.252 | 0.832 | 4799 |
+| 8-13 | 366 | 1.209 | 0.993 | 5158 |
+| **14-19** | **406** | **1.122** | **1.075** | **6060** |
+| 20-24 | 592 | 1.247 | 0.942 | 5556 |
+
+Cycles/node PEAKS at phase 14-19 and falls again at full material, so the
+monotone-non-decreasing table under-prices exactly there. An unconstrained
+fit does pick that shape up (knee 18, then falling) but buys only 0.12 points
+of RMS over 3120 moves, so it was not taken; the bucket stays the known weak
+spot. The single pool position that produced the original −51.7% (the
+Kaufman-style rook sac) turns out not to be a phase story at all: it makes
+**3.5 moves per node** against the pool's 1.21.
+
+**Per-move error is large and that is by design.** Bias +21%, RMS 40%, p10
+−9%, p90 +48% at 4 s. A single move is a bad estimate; the GAME total is the
+guarantee. Anything that reads the estimate per move (a "thinking for N
+seconds" display) will be visibly wrong.
+
+### 5. The gate changed
+
+`sprt.TestSoftClockAdherence` — in-game adherence against an exact-clock
+control, measured the way `cmd/sprt` measures it. It asserts adherence ≤ 1.00
+(the forfeit test the pool test could not make), ≥ 0.85, and soft/exact spend
+in [0.90, 1.10]. Running it (12 games/arm, 4000 ms, ~35 s):
+
+    SOFT  clock: adherence 0.9447
+    EXACT clock: adherence 0.9107
+    equal-total-spend soft/exact = 1.0373
+
+`ucibridge.TestBridgeSoftClock`, the eleven-move banked session at 3 s/move,
+moves from **1.102 x income to 0.870 x income** against a harness-clock
+control at 0.997 — i.e. from running 10% long to running 13% short, which is
+the whole point of the sign change.
+
+`chesstest.TestSoftClockAccuracy` is DEMOTED to a diagnostic and says so in
+its own comment; its assertion is now one-sided (the pool is the easy case,
+so the estimator must not read LOW there) and its phase-bucket check is
+relative to the pool ratio rather than to 1.0, so the deliberate margin
+neither trips nor masks it. `TestSoftClockCalibrate` is kept as the record of
+the procedure that failed, labelled as such.
+
+New: `cmd/softclkdiag` (the game-condition measurement rig: per-move traces,
+the TT/halfmove/position isolations above, and `-fit`), plus
+`sprt.Config.MoveTrace`/`ProbeAddrs`/`ColdTT`, all inert when unset.
+
+**Unchanged:** estimator cost **+0.0073%** (`TestSoftClockNoTreeEffect`,
+trees bit-identical on/off), image size 31642 B, feature-OFF is still the
+identical instruction stream. `TestMicroAB`, `TestIDIterationParity`,
+`TestTTSequenceParity`, `TestFullGameMirrorParity`, `TestBudgetModeParity`,
+`TestSearchMirrorParity`, `TestGenDeferTreeIdentity` all PASS.
+
+One diagnostic assertion had to be repaired rather than merely re-aimed: the
+sub-resolution bound in `TestSoftClockAccuracy` compared the estimate against
+TRUTH, so a deliberately biased-high table failed it by construction. It now
+compares against the run's own pool ratio (one sampling period of slack), so
+it still catches the entry prime going missing or doubled — the bug it was
+written for — without asserting a bias the calibration no longer has. Its
+hardcoded quantum (`128 × 3250`) was stale too; it is now derived from the
+SOFT* constants in defs.inc, which `chesstest.ParseDefs` cannot see because
+they are decimal rather than `$hex`.
+
+**Asked and answered, separately from the calibration: "don't multiply by 128
+and do a 24-bit add; keep the accumulator in 128-cycle units and do a 17-bit
+add."** That is already the code. There is no runtime multiply — the ×128 and
+the conversion to CLOCK_TRAP's units are both folded into the table by
+`.repeat` at assembly time — and the third byte is already `bcc`/`inc`, not an
+`adc`. Rescaling the accumulator from 256-cycle to 128-cycle units assembles
+to the IDENTICAL instruction stream: **0 cycles, 0 bytes.** It would buy one
+bit of table rounding (~0.04% against a 17% RMS) and cost a dual-units rule
+for BUDGET at five host call sites, because $BFF4 is the harness's REAL
+256-cycle counter whenever FT2_SOFTCLK is clear. Not taken; the reasoning is
+recorded at the instruction in `search.s` so it is not re-proposed.
+
+## 2026-07-27 — FT2_SOFTCLK Elo A/B: **DO NOT ENABLE.** It "wins" +29 ± 26 by OVERRUNNING its clock 17%, and the static accuracy test had the bias BACKWARDS (superseded above)
 
 The deciding measurement for the entry below. Soft clock vs exact clock,
 both sides otherwise the shipped config, **per-GAME banked** mode (the

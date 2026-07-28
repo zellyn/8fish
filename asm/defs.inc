@@ -633,24 +633,87 @@ CLOCK_TRAP  = $BFF4     ; read: cycles/256, 3 bytes LE, latched on low read.
 EXIT_TRAP   = $BFFF
 
 ; ---- FT2_SOFTCLK per-node cost model (search.s checkclocks) ----
-; Estimated cost of ONE search node, in 6502 cycles:
+; Estimated cost of ONE search node, in 6502 cycles: a two-segment function
+; of the taper phase, times a deliberate safety margin.
 ;
-;       (SOFTA + SOFTB * phase) / SOFTSCALE
+;   raw(phase) = (SOFTA + SOFTB*min(phase,SOFTK) + SOFTC*max(phase-SOFTK,0))
+;                / SOFTSCALE
+;   cost(phase) = raw(phase) * SOFTMARGIN / 100
 ;
-; SOFTSCALE exists only so SOFTB can carry a fraction with assembly-time
-; integer arithmetic. The form (a linear function of the taper phase) and
-; the phase regressor itself come from the mirror's calibrated cost model
-; — internal/mirror/cycles.go prices a node at Node + NodePhase*phase, and
-; phase beat piece count in that fit while being free at runtime. The
-; VALUES are refit here against the SHIPPED configuration (FEATURES $5F,
-; FEATURES2 FT2_GENDEFER) and against the quantity the engine can actually
-; observe: phase SAMPLED at the 128-node poll. See
-; internal/chesstest TestSoftClockCalibrate, which regenerates them, and
-; docs/results.md for the resulting error distribution.
-; Fit 2026-07-27 over the 23 calibration positions at the shipped config
-; (fixed depth, 46 probe runs): in-sample RMS relative error 9.5%, worst
-; single search 23.3%, pool actual/predicted 0.990.
-SOFTSCALE = 16
-SOFTA     = 52001       ; 3250.1 cycles/node at phase 0
-SOFTB     = 990         ;  +61.9 cycles/node per unit of phase
+; SOFTSCALE exists only so the slopes can carry a fraction with
+; assembly-time integer arithmetic; it is 8 rather than 16 so SOFTA stays
+; inside the 16 bits chesstest.ParseDefs reads. The regressor is still the
+; taper phase — the only cost signal the engine maintains for free — and the
+; table is still built at assembly time and read with one indexed fetch, so
+; neither the knee nor the margin costs anything at runtime.
+;
+; ★ REFIT 2026-07-27 UNDER GAME CONDITIONS. The first fit was taken over 23
+; hand-built calibration positions at FIXED DEPTH and gated by a 284-search
+; pool of opening starts. Both are quiet, near-balanced, mostly
+; full-material positions; both said the estimator ran 5% HIGH. In actual
+; self-play the same estimator ran 12% LOW and the engine overran its clock
+; by 17-19% — the two measurements disagreed in SIGN (docs/results.md
+; 2026-07-27). The cause is neither the transposition table (a cold-TT
+; control moves the ratio 1.5%) nor the halfmove clock (1%) nor the phase
+; MIX: at MATCHED phase, a position the engine actually reaches in play
+; costs ~18% more per node than a pool opening, because it makes ~1.58 moves
+; per node against the pool's ~1.21 — check evasions and illegal-move
+; rejections that the phase term cannot see.
+;
+; So SOFTA/SOFTB/SOFTK are fit against MOVES FROM REAL GAMES, played through
+; the SPRT match loop with a warm TT and the real per-move allocation,
+; against the exact vector of cost-table lookups each move made, entry prime
+; included (cmd/softclkdiag -fit). The straight line was dropped because the
+; game-condition cost curve is concave — it climbs steeply to about phase 15
+; and is then flat — so one line is ~10% wrong at both ends however drawn.
+; Raw fit: 3437.3 + 79.7*min(phase,14) cycles/node, relative RMS 16.5% over
+; 3150 game moves drawn from BOTH a 4 s/move and a 15 s/move control, because
+; the true per-node cost is ~20% lower in the longer searches (deeper trees
+; take far more TT cutoffs, and a TT-cutoff node is counted but nearly free)
+; and the phase regressor cannot see which it is looking at.
+SOFTSCALE = 8
+SOFTA     = 27498       ; 3437.3 cycles/node at phase 0  (raw game fit)
+SOFTB     = 637         ;  +79.7 cycles/node per unit of phase, up to SOFTK
+SOFTC     = 0           ;  flat above SOFTK: past ~15 the measured curve is
+                        ;  level, and an unconstrained fit only reads noise
+                        ;  out of it (a falling tail would under-price the
+                        ;  full-material middlegames with the biggest trees)
+SOFTK     = 14          ; the knee, in taper phase
 NPCOST    = 25          ; cost-table entries: phase 0..24 (checkclocks clamps)
+
+; SOFTMARGIN is POLICY, not physics, and is kept separate from the fit above
+; so the two can be reasoned about independently.
+;
+; An UNBIASED clock does not produce unbiased time management here, because
+; the estimate is read by a THRESHOLD: idloop starts iteration d+1 only if
+; now + 2*cost(d) fits in the budget. Getting that comparison wrong in the
+; permissive direction buys a whole extra iteration (2-6x the last one);
+; getting it wrong the other way costs only the iteration not taken. So a
+; noisy-but-unbiased clock systematically OVERSPENDS: measured, the raw fit
+; (in-game pool estimate/truth 0.99) still overran its budget by 12%, and
+; ~86 of 525 paired positions took one extra iteration against only 16 that
+; took one fewer.
+;
+; The margin is therefore calibrated on the quantity that matters — in-game
+; ADHERENCE (own true cycles / own intended cycles) — not on estimate/truth.
+; Measured at 4000 ms/move, 40 games each (docs/results.md 2026-07-27):
+;
+;      margin   adherence   estimate/truth
+;       100%      1.119          0.99
+;       115%      0.993          1.10
+;       126%      (target ~0.95)
+;       130%      0.936          1.26
+;       145%      0.887          1.42
+;   exact clock   0.921            —
+;
+; 126% lands adherence just under 1.0 and within a few percent of what the
+; EXACT clock spends, which is the only setting at which an A/B against the
+; exact clock measures the estimator rather than a compute advantage. Note
+; the exact clock's own adherence is 0.921 — the predictive gate leaves ~8%
+; of the budget unspent by design — so "adherence 1.00" is not reachable
+; without outspending the exact-clock control.
+;
+; The margin's SIZE is a function of the estimator's VARIANCE, not its bias:
+; a future regressor that cuts the 17% relative RMS (a make counter was
+; priced at ~0.29% of runtime and refused) should be able to cut this too.
+SOFTMARGIN = 127        ; percent

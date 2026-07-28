@@ -179,7 +179,7 @@ func pokeAlloc(m *harness.Machine, defs chesstest.Defs, income uint64, bank int6
 		unstTarget = maxCeiling
 	}
 	chesstest.SetBudget(m, defs, uint64(baseCeiling), 24)
-	chesstest.SetAdaptive(m, defs, uint64(maxCeiling), uint64(unstTarget), income/4)
+	chesstest.SetAdaptive(m, defs, uint64(baseCeiling), uint64(maxCeiling), uint64(unstTarget), income/4)
 	// Hard abort is 2*maxCeiling on device; allow generous slack + fixed cost.
 	return uint64(maxCeiling)*3 + 2_000_000_000
 }

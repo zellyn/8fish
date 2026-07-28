@@ -149,8 +149,16 @@ func runSoft(bin []byte, fen string, budget uint64, depth byte, feat, feat2 byte
 	// running total, which is not a thing any IIe does.
 	m.Mem.ClockAddr = 0
 	SetFeatures(m, defs, feat)
-	SetFeatures2(m, defs, feat2|softBit)
+	// Poke the budget with FT2_SOFTCLK still CLEAR, then arm it. SetBudget
+	// divides by the soft-clock safety margin when the bit is set (that is
+	// where the margin lives now — see chesstest.SoftClockMargin), and these
+	// diagnostics want to control the engine's ACTUAL limit: "budget 4M" here
+	// has to mean the estimate really stops at 4M, or the by-budget breakdown
+	// is measuring a number nobody chose. The GAME path (sprt, ucibridge) goes
+	// through the margin, which is what the adherence gate measures.
+	SetFeatures2(m, defs, feat2)
 	SetBudget(m, defs, budget, depth)
+	SetFeatures2(m, defs, feat2|softBit)
 	m.Mem.Main[defs["HALFMOVE"]] = pos.Halfmove
 	if table != nil {
 		ct.poke(m, *table)
@@ -311,6 +319,127 @@ func TestSoftClockNoTreeEffect(t *testing.T) {
 	if cost < 0 {
 		t.Errorf("estimator cost is negative (%.4f%%): the A/B is not measuring what it thinks", cost)
 	}
+}
+
+// TestSoftClockMarginEquivalence is the proof that the safety margin can live
+// on the BUDGET instead of in the cost table — the change that let the margin
+// become a function of the level length at zero engine cost.
+//
+// The claim is algebraic: every use of the estimate is `estimate >= limit`,
+// the estimate is a plain sum of cost-table entries, so
+//
+//	m * raw_estimate >= limit    <=>    raw_estimate >= limit / m
+//
+// and the two must produce not merely similar timing but the IDENTICAL SEARCH.
+// This runs both arms and demands exactly that: same nodes, same makes, same
+// evals, same completed depth, same move, same score.
+//
+// m = 2 is used because it makes both sides exact in integer arithmetic (the
+// doubled table entries and the halved budget are both representable), so a
+// failure here is a real disagreement and not a rounding artifact. The shipped
+// margins (127/113/100%) are not exact in that sense and are worth a fraction
+// of a percent of drift; that is priced and accepted, and it is why this test
+// pins the PRINCIPLE rather than the shipped constants.
+func TestSoftClockMarginEquivalence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: budgeted 6502 searches")
+	}
+	bin := loadEngine(t)
+	labels, err := ParseLabelFile("../../asm/engine.lbl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct := loadCostTable(t, labels)
+	softBit := softClockBit(t)
+	feat, feat2 := shipFeatures(t)
+
+	// The image's own table, read back so the doubled arm is exactly 2x it.
+	var raw, doubled [nPCost]uint16
+	m0, err := NewMachine(bin, defs, mustFEN(t, "8/8/8/8/8/8/8/K6k w - - 0 1"), 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range raw {
+		raw[i] = uint16(m0.Mem.Main[ct.lo+uint16(i)]) | uint16(m0.Mem.Main[ct.hi+uint16(i)])<<8
+		doubled[i] = 2 * raw[i]
+	}
+
+	cases := []string{
+		"r1b1k2r/ppp2ppp/2nqpn2/3p4/3P4/P1P1BN2/2P1PPPP/2RQKB1R w Kkq - 2 8",
+		"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+		"2r3k1/5pp1/p6p/1p2p3/4P3/1P3P2/P5PP/2R3K1 w - - 0 1",
+		"8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+	}
+	const budget = 8_000_000 // even, so budget/2 is exact
+
+	for _, fen := range cases {
+		// Arm A: raw table, HALVED budget — what SetBudget now does.
+		a, err := runSoft(bin, fen, budget/2, 24, feat, feat2, softBit, &ct, &raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Arm B: DOUBLED table, full budget — what folding the margin in did.
+		b, err := runSoft(bin, fen, budget, 24, feat, feat2, softBit, &ct, &doubled)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.depth != b.depth || a.move != b.move || a.score != b.score {
+			t.Errorf("%s: budget/2 gave d%d %s %d, table*2 gave d%d %s %d — "+
+				"scaling the budget is NOT equivalent to scaling the table",
+				fen, a.depth, a.move, a.score, b.depth, b.move, b.score)
+		}
+		// The estimate itself must come out exactly doubled: same tree, same
+		// polls, entries twice as big.
+		if b.estimate != 2*a.estimate {
+			t.Errorf("%s: estimate %d (raw) vs %d (doubled), want exactly 2x — "+
+				"the two arms searched different trees",
+				fen, a.estimate, b.estimate)
+		}
+		if a.truth != b.truth {
+			t.Errorf("%s: true cycles %d vs %d — the trees differ", fen, a.truth, b.truth)
+		}
+	}
+}
+
+// TestSoftClockMarginRule pins the margin rule itself: the octave breakpoints
+// the on-device UI has to reimplement. If these move, docs/ui-design.md and
+// the comment in chesstest.go move with them.
+func TestSoftClockMarginRule(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cycles uint64
+		want   uint64
+	}{
+		{"1 s", 1_020_000, 127},
+		{"4 s", 4_080_000, 127},
+		{"8 s", 8_160_000, 113},
+		{"15 s", 15_300_000, 100},
+		{"30 s", 30_600_000, 100},
+		{"60 s", 61_200_000, 100},
+	} {
+		if got := SoftClockMargin(tc.cycles); got != tc.want {
+			t.Errorf("SoftClockMargin(%s = %d) = %d, want %d", tc.name, tc.cycles, got, tc.want)
+		}
+	}
+	// Monotone non-increasing: a longer level must never be charged a LARGER
+	// margin than a shorter one, or the adaptive ceilings stop nesting.
+	prev := uint64(1000)
+	for c := uint64(1 << 16); c < 1<<32; c <<= 1 {
+		got := SoftClockMargin(c)
+		if got > prev {
+			t.Errorf("margin rose from %d to %d at %d cycles: not monotone", prev, got, c)
+		}
+		prev = got
+	}
+}
+
+func mustFEN(t testing.TB, fen string) *Position {
+	t.Helper()
+	p, err := ParseFEN(fen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // ---------------------------------------------------------------------------
@@ -611,10 +740,10 @@ const softResolvable = 2_000_000
 // is SHAPE: which budgets, phases and depths the estimate is worst at, which
 // is how the game-condition refit found its knee.
 //
-// Because the shipped table is deliberately biased high (SOFTMARGIN in
-// defs.inc), the pool ratio here is EXPECTED to sit well above 1. A pool
-// ratio at or below 1 is the alarm: the pool is the easy case, and an
-// estimator that already reads low here reads much lower in a game.
+// The cost table is the RAW measured cost per node — the deliberate safety
+// bias lives on the BUDGET now (chesstest.SoftClockMargin), not in the table —
+// so the pool ratio here should sit near 1. It is a check on the cost MODEL,
+// not on time management.
 //
 // BUDGET mode, shipped configuration, harness clock trap OFF — so the engine
 // runs exactly as it would on a IIe, stopping itself on its own estimate —
@@ -810,19 +939,23 @@ func TestSoftClockAccuracy(t *testing.T) {
 
 	// ---- assertions ----
 	//
-	// DELIBERATELY ONE-SIDED AND LOOSE, because this is a diagnostic and the
-	// shipped calibration is deliberately biased high. What is asserted is
-	// only the direction: on the EASIEST position set the estimator has, it
-	// must not read low. Everything about how well it manages a clock is
-	// asserted by sprt.TestSoftClockAdherence, which measures games.
-	if poolAll < 1.00 {
-		t.Errorf("pool estimate/truth %.3f < 1.00: the estimator reads LOW on the "+
-			"pool, which is the easy case — in games it will read far lower and "+
-			"the engine will overrun its clock (sprt.TestSoftClockAdherence)", poolAll)
-	}
-	if poolAll > 1.80 {
-		t.Errorf("pool estimate/truth %.3f > 1.80: the safety margin has become a "+
-			"strength tax; check SOFTMARGIN against the in-game adherence gate", poolAll)
+	// TWO-SIDED AND LOOSE. The safety margin no longer lives in the cost table
+	// — it is applied to the BUDGET at move setup (chesstest.SoftClockMargin),
+	// so the table is the raw measured cost and the estimator is supposed to
+	// be HONEST here, not biased. This checks that it is roughly so on the
+	// easiest position set it will ever see, and nothing more: whether the
+	// engine manages a clock safely is asserted by sprt.TestSoftClockAdherence
+	// over real games, which is the only place it can be asserted.
+	//
+	// Read a failure here as "the cost model drifted", not "time management
+	// broke" — and note the band is wide because the pool is unrepresentative
+	// by construction (see the header): it is 47/71 full-material openings,
+	// which is where the model is most accurate, so this is a floor on the
+	// error rather than an estimate of it.
+	if poolAll < 0.85 || poolAll > 1.25 {
+		t.Errorf("pool estimate/truth %.3f outside [0.85, 1.25]: the raw cost model "+
+			"has drifted — refit with cmd/softclkdiag -fit over real games "+
+			"(the safety margin is NOT in this number; it is on the budget)", poolAll)
 	}
 	// Sub-resolution searches cannot be estimated at all; the claim is only
 	// that they land within one sampling period of what the calibration says
@@ -830,10 +963,10 @@ func TestSoftClockAccuracy(t *testing.T) {
 	// (the estimate falls a whole quantum short and reads a flat zero on the
 	// shortest searches) or doubled.
 	//
-	// It is measured against poolAll * truth, NOT against truth: the shipped
-	// table is deliberately biased high (SOFTMARGIN), so "estimate == truth"
-	// is not the target and a bound written around it fails on a correct
-	// build — which is exactly what happened when the margin went in.
+	// It is measured against poolAll * truth rather than truth so the bound
+	// survives whatever aggregate bias the cost model happens to carry; a
+	// bound written around "estimate == truth" failed on a correct build once
+	// already, when the safety margin was still folded into the table.
 	var worstDev float64
 	var worstDevRow softAcc
 	for _, a := range sub {

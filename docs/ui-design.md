@@ -338,13 +338,28 @@ instruction stream.
 calibration positions and gated on a position pool, both of which said it
 over-estimated by 5%; in real games it under-estimated and the engine overran
 its clock by 17%. The table is now fit on moves from real games and
-deliberately biased high. What a UI can promise, measured in games: at a
-**4 s** level the engine spends **0.94** of its allocation (the exact clock
-spends 0.92, so the two are within 2%); at a **15 s** level it spends **0.68**
-against the exact clock's 0.86, i.e. it is ~20% CONSERVATIVE at long levels.
-That is the safe direction — it never flags — but it is a real strength cost
-at long time controls, and the level menu should not advertise more precision
-than that.
+deliberately biased. What a UI can promise, measured in games: at a **4 s**
+level the engine spends **0.94** of its allocation and at a **15 s** level
+**0.88**, against an exact clock's 0.92 and 0.86 — within 2.3% at both, and
+under 1.0 at both, so it never flags.
+
+**★ The UI must implement one rule.** The safety bias is NOT in the engine: the
+cost table holds the raw measured cost, and the bias is applied by whoever
+installs the per-move limits. Before poking BUDGET (and, with `FT2_ADAPT`,
+CEILMAX / UNSTCEIL / MINSPEND — all four, sharing ONE margin taken from the
+base allocation), scale by the octave of the budget:
+
+| budget | poked value |
+|---|---|
+| ≤ ~8 s | `BUDGET × 202 >> 8` (margin 127%) |
+| ~8-16 s | `BUDGET × 227 >> 8` (margin 113%) |
+| > ~16 s | unchanged (margin 100%) |
+
+A shift loop to find the top set bit of BUDGET, a table read, one 24×8
+shift-and-add multiply — once per move, no division. Skip it entirely for
+fixed-depth levels (BUDGET = 0). The reference implementation and the reason
+the rule exists are in `internal/chesstest` `SoftClockMargin`; get it wrong in
+the permissive direction and the engine overruns its clock by ~17%.
 
 So the UI may offer **either** kind of level:
 
@@ -360,7 +375,7 @@ A timed level is DELIBERATELY conservative: the engine believes it has spent
 ~20-30% more than it really has, because the estimate is read by a threshold
 (the `idloop` predictive gate) where symmetric clock noise turns into
 asymmetric overspending. Per move the error is ±30-50%; per GAME the engine
-lands at 0.94 of its allocation at a 4 s level and 0.68 at a 15 s one. Levels
+lands at 0.94 of its allocation at a 4 s level and 0.88 at a 15 s one. Levels
 below ~4 seconds are not worth offering: one poll is 0.45-0.57 s, and a
 1-second move on a 1 MHz 6502 is only ~310 nodes deep anyway.
 
@@ -606,10 +621,10 @@ Steps 1-9 need no hardware. Step 10 is the first that does.
    REMAINS a UI decision is which levels to offer. The estimator was
    RECALIBRATED under game conditions the same day (its first calibration had
    the bias backwards and the engine overran its clock by 17%); it is now
-   deliberately biased high and lands at 0.94 of its allocation over a game at
-   a 4 s level, 0.68 at a 15 s one, with a 0.45-0.57 s resolution — so timed
-   levels below ~4 s are not worth offering, and long levels are conservative
-   rather than dangerous. See docs/results.md for the error distribution and
+   lands at 0.94 of its allocation over a game at a 4 s level and 0.88 at a
+   15 s one, with a 0.45-0.57 s resolution — so timed levels below ~4 s are not
+   worth offering. NOTE the UI owns the safety margin (§6.2): the engine's cost
+   table is raw, and the per-move limits must be scaled before they are poked. See docs/results.md for the error distribution and
    the residual budget dependence.
 2. **Character-generator verification gap.** goapple2 carries the ][+ 2 KB
    character ROM and does not model `ALTCHARSET`, so inverse lowercase is

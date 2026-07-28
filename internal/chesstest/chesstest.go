@@ -203,10 +203,128 @@ func SetFeatures2(m *harness.Machine, defs Defs, bits byte) {
 	m.Mem.Main[defs["FEATURES2"]] = bits
 }
 
+// ---------------------------------------------------------------------------
+// FT2_SOFTCLK's safety margin, applied to the BUDGET rather than to the clock.
+//
+// The estimator has to be biased HIGH: it is read by a threshold (idloop's
+// `now + 2*cost <= BUDGET`), and a threshold turns symmetric clock noise into
+// asymmetric SPEND, because starting one more iteration costs 2-6x what
+// stopping early saves. Measured, an unbiased-on-average table still overran
+// its budget by 12% (docs/results.md 2026-07-27).
+//
+// ★ WHERE THE BIAS LIVES, AND WHY IT MOVED. It used to be folded into the cost
+// table at assembly time. But every use of the estimate is a comparison of the
+// form `estimate >= limit`, the estimate is a plain sum of table entries, and
+// the limits are all host-poked — so scaling the table by m and dividing the
+// limits by m are algebraically the SAME COMPARISON:
+//
+//	m * raw_estimate >= limit    <=>    raw_estimate >= limit / m
+//
+// Doing it on the limit side is free: the limits are poked once per move,
+// outside the hot path, so the margin can be any function of the budget at
+// zero engine cycles and zero engine bytes. Folded into the table it had to be
+// one constant for every level length. That mattered: the true cost per node
+// is ~20% LOWER in a 15 s search than in a 4 s one (deeper trees take far more
+// TT cutoffs, and a cutoff node is counted but nearly free), so one constant
+// over-charged long searches and left a 15 s level spending 0.68 of its
+// allocation against the exact clock's 0.86.
+//
+// It also makes the estimate HONEST again: with a raw table the engine's own
+// `spent` figure approximates true elapsed cycles, so a banked clock on
+// hardware settles in real units instead of inflated ones.
+//
+// ALL FIVE limits must be scaled, not just BUDGET — the engine compares
+// CLOCK_TRAP against BUDGET, ABORTL (= 2*BUDGET or 2*CEILMAX, derived on
+// device), CEILMAX, UNSTCEIL and MINSPEND. That is why the scaling lives in
+// SetBudget and SetAdaptive, the only two functions that write them, rather
+// than at ~50 call sites.
+//
+// ORDERING: both read the FT2_SOFTCLK bit out of FEATURES2, so SetFeatures2
+// must be called BEFORE them. That is the same "derive it from the bit so the
+// two cannot disagree" rule the $BFF4 trap follows in sprt.
+//
+// THE RULE, for the on-device UI to reimplement. Margin as a percentage,
+// indexed by the OCTAVE of the budget — the position of the top set bit of the
+// budget in 256-cycle units — so a 6502 needs a shift loop to find the bit, a
+// table read, and one 24x8 multiply, all once per move:
+//
+//	budget <= ~8 s   : 127%
+//	~8 s .. ~16 s    : 113%
+//	budget >  ~16 s  : 100%
+//
+// and then BUDGET' = BUDGET * 100 / margin, which for a 6502 is better written
+// as BUDGET' = (BUDGET * K) >> 8 with K = 25600/margin (202, 227, 256) — a
+// shift-and-add multiply, no division.
+//
+// The two anchors are MEASURED (4 s and 15 s, adherence against an exact-clock
+// control); the 8-16 s entry is interpolated between them and the entries
+// outside that range are held flat. Short budgets are floor-dominated — below
+// ~2 s the engine cannot spend less than its first two iterations, so the
+// margin is powerless there and the safe direction is to leave it high.
+// ---------------------------------------------------------------------------
+
+// softMarginPct is indexed by the budget's octave: index t is a budget whose
+// top set bit (in 256-cycle units) is bit t. 4 s = 15938 units = octave 13;
+// 15 s = 59766 = octave 15. Extend this table, not the code, when a longer
+// level is measured.
+var softMarginPct = [24]uint16{
+	// octave: 0..12 (<= ~4 s)      13 (~4-8 s)  14 (~8-16 s)  15+ (> ~16 s)
+	127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
+	127,
+	113,
+	100, 100, 100, 100, 100, 100, 100, 100, 100,
+}
+
+// SoftClockMargin returns the safety margin, in percent, for a per-move
+// allocation of budgetCycles. See the comment above for the rule and for why
+// it is a function of the budget at all.
+func SoftClockMargin(budgetCycles uint64) uint64 {
+	u := budgetCycles >> 8
+	t := 0
+	for v := u >> 1; v != 0; v >>= 1 {
+		t++
+	}
+	if t >= len(softMarginPct) {
+		t = len(softMarginPct) - 1
+	}
+	return uint64(softMarginPct[t])
+}
+
+// softClockLimit converts a limit in real cycles into the limit to poke when
+// the engine is running on its own estimate. margin is taken from the move's
+// BASE allocation so that every limit for one move is scaled identically —
+// scaling each one by its own octave would let CEILMAX (up to 4x base) drift
+// into a different margin and quietly loosen the adaptive ceiling.
+func softClockLimit(cycles, marginPct uint64) uint64 {
+	if cycles == 0 || marginPct == 0 {
+		return cycles
+	}
+	v := cycles * 100 / marginPct
+	if v == 0 {
+		v = 1 // never let a nonzero budget round to 0: that means fixed depth
+	}
+	return v
+}
+
+// softClockOn reports whether FT2_SOFTCLK is set in the machine's FEATURES2.
+func softClockOn(m *harness.Machine, defs Defs) bool {
+	bit := defs["FT2_SOFTCLK"]
+	if bit == 0 {
+		return false
+	}
+	return m.Mem.Main[defs["FEATURES2"]]&byte(bit) != 0
+}
+
 // SetBudget pokes the engine's soft time budget (in cycles, converted
 // to its 24-bit 256-cycle units, rounding up so a tiny nonzero budget
 // never degrades to fixed-depth mode) and the depth cap.
+//
+// With FT2_SOFTCLK set it pokes budgetCycles / margin instead — see the
+// comment above. Call SetFeatures2 first.
 func SetBudget(m *harness.Machine, defs Defs, budgetCycles uint64, maxDepth byte) {
+	if budgetCycles != 0 && softClockOn(m, defs) {
+		budgetCycles = softClockLimit(budgetCycles, SoftClockMargin(budgetCycles))
+	}
 	b := (budgetCycles + 255) >> 8
 	if b > 0xFFFFFF {
 		b = 0xFFFFFF
@@ -243,7 +361,20 @@ func poke24(m *harness.Machine, defs Defs, sym string, cycles uint64) {
 // The host (which runs the per-game bank) computes these; on device the engine
 // only compares and raises the movable ceiling. Leaves FEATURES2's other bits
 // untouched (OR in FT2_ADAPT). ftAdapt must be the FT2_ADAPT defs value.
-func SetAdaptive(m *harness.Machine, defs Defs, ceilMax, unstCeil, minSpend uint64) {
+//
+// baseCycles is the move's BASE allocation — the same value handed to
+// SetBudget, BEFORE any soft-clock scaling. It is taken explicitly rather than
+// read back from BUDGET because all four limits for a move must share ONE
+// margin: they are compared against the same accumulator, and letting CEILMAX
+// (up to 4x base) pick its own octave would silently loosen the ceiling
+// relative to the budget. Call SetFeatures2 and SetBudget first.
+func SetAdaptive(m *harness.Machine, defs Defs, baseCycles, ceilMax, unstCeil, minSpend uint64) {
+	if softClockOn(m, defs) {
+		pct := SoftClockMargin(baseCycles)
+		ceilMax = softClockLimit(ceilMax, pct)
+		unstCeil = softClockLimit(unstCeil, pct)
+		minSpend = softClockLimit(minSpend, pct)
+	}
 	poke24(m, defs, "CEILMAX0", ceilMax)
 	poke24(m, defs, "UNSTCEIL0", unstCeil)
 	poke24(m, defs, "MINSPEND0", minSpend)

@@ -56,7 +56,7 @@ func runOne(t *testing.T, bin []byte, pos *Position, base uint64, adaptive bool,
 	}
 	SetBudget(m, defs, base, 24)
 	if adaptive {
-		SetAdaptive(m, defs, ceilMax, unst, minSpend)
+		SetAdaptive(m, defs, base, ceilMax, unst, minSpend)
 	}
 	m.Mem.Main[defs["HALFMOVE"]] = pos.Halfmove
 	cap := base*8*3 + 2_000_000_000

@@ -616,7 +616,7 @@ func (b *Bridge) runEngine(pos *chesstest.Position, halfmove byte, budget uint64
 	chesstest.SetFeatures2(m, b.Defs, feat2)
 	chesstest.SetBudget(m, b.Defs, budget, depth)
 	if adapt != nil {
-		chesstest.SetAdaptive(m, b.Defs, adapt.maxCeiling, adapt.unstTarget, adapt.minSpend)
+		chesstest.SetAdaptive(m, b.Defs, budget, adapt.maxCeiling, adapt.unstTarget, adapt.minSpend)
 	}
 	m.Mem.Main[b.Defs["HALFMOVE"]] = halfmove
 	if seed >= 0 {

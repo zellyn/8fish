@@ -3,7 +3,7 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
-## 2026-07-27 — ★ FT2_SOFTCLK RECALIBRATED under game conditions: adherence 1.171 → **0.943**, equal-total-spend 1.260 → **1.015**, and the honest Elo is **−23 ± 27**
+## 2026-07-27 — ★ FT2_SOFTCLK RECALIBRATED under game conditions, and the safety margin MOVED OFF THE COST TABLE: adherence 1.171 → **0.941**, spend parity at **both** 4 s and 15 s, honest Elo **−23 ± 27**
 
 The pool gate was measuring the wrong POSITIONS *and* the wrong QUANTITY.
 
@@ -129,7 +129,11 @@ Measured at 4000 ms, 40 games per point:
 | control | soft adherence | exact adherence | soft/exact spend |
 |---|---:|---:|---:|
 | **4000 ms** (2 × 3400 moves) | **0.9413** | 0.9228 | **1.020** |
-| 15000 ms (2 × 1700 moves) | 0.6836 | 0.8603 | 0.795 |
+| **15000 ms** (2 × 3300 moves) | **0.8805** | 0.8603 | **1.023** |
+
+(The 15 s row was 0.6836 / **0.795** until the margin moved off the cost
+table — see §4a. That fix is the difference between "20% of a long level's
+allocation thrown away" and spend parity.)
 
 At the 4 s control the estimator now lands just under its allocation and
 within 2% of what the exact clock spends — which is the only setting at which
@@ -150,6 +154,23 @@ is the expected sign: at equal total spend, a clock with 40% per-move RMS
 allocates its time worse than a perfect one. The 1.5% residual spend
 advantage is worth ~+2 Elo, so the bias-corrected figure is nearer −25.
 
+**And the same A/B at the 15 s control**, which the budget-indexed margin
+(§4a) is what made worth running at all — before it, side A was handicapped
+20% on compute and the Elo would have been meaningless:
+
+    -budget 15000 -pairs 40 (80 games)
+    A(soft) adherence 0.8761   B(exact) adherence 0.8859
+    equal-total-spend A/B = 0.9903   (A used 0.97% LESS)
+    +29 =29 -22   score 54.4%   elo +30 +/- 62
+
+Spend within 1%. The Elo is not significant at 80 games (the interval spans
+−32 to +92) and is quoted only to show it is not a disaster; the point of the
+run is the spend column.
+
+**Taken together: at equal compute the estimator is worth about zero** — −23 ±
+27 at 4 s, +30 ± 62 at 15 s. It is a way to run budget mode on hardware at all,
+not a source of strength.
+
 **This is what the feature actually costs.** The earlier +29 was 26% extra
 compute (~+43 Elo of expected gain) with the estimator contributing nothing.
 
@@ -158,24 +179,97 @@ only reaches 0.921: the predictive gate leaves ~8% of the budget unspent by
 design. So "adherence 1.00 with equal spend" is not a reachable pair, and the
 target that matters is parity with the exact clock.
 
-### 4. ★ Where it is still weakest — the 15 s deficit is REAL and is not fixed
+### 4a. ★ The margin moved OFF the cost table — which is what fixed 15 s
 
-**Long levels are ~20% conservative.** The true cost per node is *not* the
-same function of phase at every budget: fit separately, 4 s data gives
-`4715 + 41.4×phase` and 15 s data gives `3708 + 47.5×phase` — a **22.6%
-difference at phase 10**. Deeper trees take far more TT cutoffs and a
-TT-cutoff node is counted but nearly free. The estimator has no depth or
-budget regressor, so one table cannot serve both; fitting jointly (which is
-what shipped) splits the difference, and the 4 s-safe margin then leaves 15 s
-spending 0.68 of its allocation against the exact clock's 0.86. That is the
-SAFE direction — it never flags — but it is a real strength cost at long time
-controls, and long levels are the ones a UI would actually offer.
-Not fixable by refitting a phase-indexed table. Priced alternatives, none
-taken here: a depth- or budget-scaled margin (needs a multiply or a second
-table plus a runtime select), or reducing the estimator's variance so the
-margin can shrink (a make counter was priced at ~0.29% of runtime and refused
-— but note the make count is exactly the regressor the mechanism in (b) says
-is missing).
+The first cut of this recalibration folded the safety margin into the cost
+table at assembly time and reported the 15 s deficit as unfixable: "the
+estimator has no depth or budget regressor, so one table cannot serve both."
+That was true of the table. It was not true of the FEATURE, and the reason is
+one line of algebra.
+
+Every use of the estimate is a comparison `estimate >= limit`. The estimate is
+a plain sum of cost-table entries, and every limit (BUDGET, ABORTL, CEILMAX,
+UNSTCEIL, MINSPEND) is host-poked once per move. So
+
+    m * raw_estimate >= limit      <=>      raw_estimate >= limit / m
+
+is the SAME COMPARISON, and doing it on the limit side is free: the limits are
+installed at move setup, outside the hot path. Folded into the table, m had to
+be one constant for every level length. On the budget side it can be any
+function of the budget at **zero engine cycles and zero engine bytes**.
+
+**Verified as an identity, not asserted.** `TestSoftClockMarginEquivalence`
+runs the same positions two ways — raw table with a halved budget, and a
+doubled table with the full budget — and requires the SEARCHES to be identical:
+same completed depth, same move, same score, same true cycle count, and an
+estimate exactly 2x. It uses m = 2 so both sides are exact in integer
+arithmetic; the shipped margins are worth a fraction of a percent of rounding
+drift, which is priced and accepted.
+
+**Confirmed end to end, three times.** At 4 s the margin is unchanged (127%),
+so every game-level measurement had to reproduce — and each did, to the last
+digit:
+
+| measurement | before | after |
+|---|---|---|
+| diag adherence, 4 s | 0.9413 / 3468 moves | **0.9413 / 3468 moves** |
+| `TestSoftClockAdherence` | 0.9447 / 0.9107 / 1.0373 | **0.9447 / 0.9107 / 1.0373** |
+| A/B, 4000 ms, 400 games | +109 =156 -135, −23 ± 27, spend 1.0149 | **identical** |
+
+400 complete games, same result, with the margin living somewhere else.
+
+**Also: the cost model is honest again.** With the margin out of the table,
+`TestSoftClockAccuracy` reads pool estimate/truth **1.050** (it was 1.332), so
+the number that test reports is once more a statement about the cost model
+rather than about a policy knob folded into it. Its assertion is correspondingly
+two-sided again.
+
+**THE RULE**, stated for the on-device UI to reimplement, indexed by the
+OCTAVE of the budget (the top set bit of the budget in 256-cycle units):
+
+| budget | margin | poked BUDGET |
+|---|---:|---|
+| ≤ ~8 s | 127% | `BUDGET × 202 >> 8` |
+| ~8-16 s | 113% | `BUDGET × 227 >> 8` |
+| > ~16 s | 100% | unchanged |
+
+A 6502 needs a shift loop to find the top bit, one table read and one 24×8
+shift-and-add multiply, once per move. **No division on device.** The two
+anchors are measured (4 s and 15 s, against an exact-clock control); the
+8-16 s entry is interpolated and the ends are held flat. Below ~2 s the engine
+cannot spend less than its first two iterations, so the margin is powerless
+there and the safe direction is to leave it high.
+
+Two things had to be got right and are worth flagging for anyone touching
+this. **All five limits scale, not just BUDGET** — the engine compares
+CLOCK_TRAP against BUDGET, ABORTL (derived on device as 2×BUDGET or 2×CEILMAX)
+and the three FT2_ADAPT ceilings, so the scaling lives inside
+`chesstest.SetBudget` and `SetAdaptive`, the only two functions that write
+them, rather than at ~50 call sites. And **all limits for one move must share
+ONE margin**, which is why `SetAdaptive` now takes the move's base allocation
+explicitly: letting CEILMAX (up to 4× base) pick its own octave would quietly
+loosen the adaptive ceiling relative to the budget.
+
+**A side benefit worth having:** with a raw table the engine's own `spent`
+figure is an honest estimate of true elapsed cycles again (in-game
+estimate/truth 0.935 at 4 s, 0.976 at 15 s, against 1.19/1.26 before). A
+banked clock on hardware — which can only settle on the engine's own opinion —
+now settles in approximately real units instead of inflated ones.
+
+### 4. ★ Where it is still weakest
+
+**The cost MODEL is still budget-dependent, even though the spend no longer
+is.** Fit separately, 4 s data gives `4715 + 41.4×phase` and 15 s data gives
+`3708 + 47.5×phase` — a **22.6% difference at phase 10**, because deeper trees
+take far more TT cutoffs and a TT-cutoff node is counted but nearly free. The
+estimator has no depth or budget regressor, so one table cannot serve both;
+the shipped table is the joint fit and splits the difference. §4a's
+budget-indexed margin absorbs the consequence for time management — spend is
+now within 2.3% of the exact clock at both controls — but it does not make the
+model right. A per-move estimate is still ~5% low at 4 s and ~2% high at 15 s,
+and anything that reads the estimate as a cycle count inherits that. The real
+fix is the regressor the mechanism in (b) points at: makes per node, priced at
+~0.29% of runtime and refused.
 
 **Taper phase 14-19 is the worst bucket, and the pool's n=3 warning was
 right.** With real samples (n=406 at 4 s, not 3) it is the only phase bucket
@@ -228,6 +322,21 @@ the procedure that failed, labelled as such.
 New: `cmd/softclkdiag` (the game-condition measurement rig: per-move traces,
 the TT/halfmove/position isolations above, and `-fit`), plus
 `sprt.Config.MoveTrace`/`ProbeAddrs`/`ColdTT`, all inert when unset.
+`TestSoftClockMarginEquivalence` and `TestSoftClockMarginRule` pin §4a.
+
+**★ A near-miss worth writing down.** The first re-run of the 4 s A/B after
+§4a reported "+28 ± 26 with 29% more spend" — the original bug's signature,
+exactly. The cause was a STALE TOOL BINARY: `cmd/sprt` had been compiled
+before the margin moved, so it linked the old (no-scaling) `SetBudget` while
+loading the NEW raw `engine.bin` off disk at runtime, giving margin 100% at
+every budget. The Go tool and the 6502 image are versioned separately and
+nothing forces them to agree. Rebuilt, it reproduced the previous result
+digit-for-digit. Two lessons: run these from source (`go run ./cmd/sprt`)
+rather than from a cached binary, and note that the thing which caught it was
+the adherence gate — `go test` always recompiles, so it said 0.9447 while the
+stale binary said 1.2012. The 15 s A/B was unaffected and did not need
+re-running: the rule prescribes margin 100% there, which is byte-for-byte what
+an unscaled poke does.
 
 **Unchanged:** estimator cost **+0.0073%** (`TestSoftClockNoTreeEffect`,
 trees bit-identical on/off), image size 31642 B, feature-OFF is still the

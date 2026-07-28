@@ -681,39 +681,44 @@ SOFTC     = 0           ;  flat above SOFTK: past ~15 the measured curve is
 SOFTK     = 14          ; the knee, in taper phase
 NPCOST    = 25          ; cost-table entries: phase 0..24 (checkclocks clamps)
 
-; SOFTMARGIN is POLICY, not physics, and is kept separate from the fit above
-; so the two can be reasoned about independently.
+; SOFTMARGIN is the ASSEMBLY-TIME scale on the cost table, and it is now 100:
+; the table holds the RAW measured cost per node and the safety bias lives on
+; the other side of the comparison, in the BUDGET.
 ;
-; An UNBIASED clock does not produce unbiased time management here, because
-; the estimate is read by a THRESHOLD: idloop starts iteration d+1 only if
-; now + 2*cost(d) fits in the budget. Getting that comparison wrong in the
-; permissive direction buys a whole extra iteration (2-6x the last one);
-; getting it wrong the other way costs only the iteration not taken. So a
-; noisy-but-unbiased clock systematically OVERSPENDS: measured, the raw fit
-; (in-game pool estimate/truth 0.99) still overran its budget by 12%, and
-; ~86 of 525 paired positions took one extra iteration against only 16 that
-; took one fewer.
+; WHY THERE IS A BIAS AT ALL. An unbiased clock does not produce unbiased time
+; management here, because the estimate is read by a THRESHOLD: idloop starts
+; iteration d+1 only if now + 2*cost(d) fits in the budget. Getting that
+; comparison wrong in the permissive direction buys a whole extra iteration
+; (2-6x the last one); getting it wrong the other way costs only the iteration
+; not taken. Measured: the raw fit (in-game estimate/truth 0.99) still overran
+; its budget by 12%, taking an extra iteration on 86 of 525 paired positions
+; against 16 that took one fewer.
 ;
-; The margin is therefore calibrated on the quantity that matters — in-game
-; ADHERENCE (own true cycles / own intended cycles) — not on estimate/truth.
-; Measured at 4000 ms/move, 40 games each (docs/results.md 2026-07-27):
+; WHY IT IS NOT HERE. Every use of the estimate is `estimate >= limit`, the
+; estimate is a plain sum of table entries, and all five limits (BUDGET,
+; ABORTL, CEILMAX, UNSTCEIL, MINSPEND) are host-poked once per move. So
 ;
-;      margin   adherence   estimate/truth
-;       100%      1.119          0.99
-;       115%      0.993          1.10
-;       126%      (target ~0.95)
-;       130%      0.936          1.26
-;       145%      0.887          1.42
-;   exact clock   0.921            —
+;       m * raw_estimate >= limit    <=>    raw_estimate >= limit / m
 ;
-; 126% lands adherence just under 1.0 and within a few percent of what the
-; EXACT clock spends, which is the only setting at which an A/B against the
-; exact clock measures the estimator rather than a compute advantage. Note
-; the exact clock's own adherence is 0.921 — the predictive gate leaves ~8%
-; of the budget unspent by design — so "adherence 1.00" is not reachable
-; without outspending the exact-clock control.
+; is the same comparison, and dividing the limits costs ZERO engine cycles and
+; ZERO engine bytes because it happens at move setup. Folded in here, the
+; margin had to be ONE constant for every level length — and it cannot be,
+; because the true cost per node is ~20% lower in a 15 s search than in a 4 s
+; one (deeper trees take far more TT cutoffs; a cutoff node is counted but
+; nearly free). One constant left a 15 s level spending 0.68 of its allocation
+; against the exact clock's 0.86. On the budget side the margin can vary with
+; the budget, which is the degree of freedom that fixes it.
 ;
-; The margin's SIZE is a function of the estimator's VARIANCE, not its bias:
-; a future regressor that cuts the 17% relative RMS (a make counter was
-; priced at ~0.29% of runtime and refused) should be able to cut this too.
-SOFTMARGIN = 127        ; percent
+; Keeping the table raw also makes the engine's own `spent` figure an honest
+; estimate of true elapsed cycles, so a banked clock on hardware settles in
+; real units rather than inflated ones.
+;
+; THE MARGIN RULE now lives with the code that pokes the limits, and is stated
+; for the on-device UI to reimplement, in internal/chesstest SoftClockMargin.
+; The margin's SIZE is a function of the estimator's VARIANCE, not its bias: a
+; future regressor that cuts the 17% relative RMS (a make counter was priced at
+; ~0.29% of runtime and refused) should be able to cut it.
+;
+; Leave this at 100 unless you want a scale that is genuinely constant across
+; every level length; SOFTC/SOFTK above are still the shape of the cost curve.
+SOFTMARGIN = 100        ; percent; see above — the bias lives on the BUDGET now

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -20,6 +21,44 @@ import (
 // Callers generally want to treat this as a clean skip, not a failure:
 // the assembler toolchain is an optional dev dependency.
 var ErrCA65NotInstalled = errors.New("ca65 not installed")
+
+// lockName is the advisory lockfile, created inside asm/ (gitignored).
+const lockName = ".asmbuild.lock"
+
+// buildMu serializes builds within one process.
+var buildMu sync.Mutex
+
+// withBuildLock serializes an asm/ build against every other build, in
+// this process and in any other.
+//
+// Every build function here writes its intermediates and outputs to FIXED
+// paths under asm/ (engine.o, engine.bin, engine.lbl, ...), because the
+// tests that consume them expect them there. `go test ./...` runs packages
+// in PARALLEL, and internal/chesstest, internal/ucibridge and others each
+// build on startup — so without this, two ca65/ld65 invocations write the
+// same object file at once and produce corruption such as
+// "ld65: Read error at position 40960".
+//
+// That mattered more than a flaky build: a half-written object file can in
+// principle yield a spurious PASS as easily as a spurious FAIL, and this
+// project's entire method rests on trusting its gates. A gate that is
+// quietly re-run until green is how a real defect gets through.
+//
+// A per-process temp directory would remove the shared resource outright,
+// but the outputs are the interface — callers read asm/engine.bin — so the
+// contention is inherent and serializing is the honest fix. BuildVariant
+// writes distinct names, yet still needs the lock: Build regenerates the
+// generated .s tables that BuildVariant's ca65 reads.
+func withBuildLock(root string, fn func() error) error {
+	buildMu.Lock()
+	defer buildMu.Unlock()
+	unlock, err := lockDir(filepath.Join(root, "asm"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return fn()
+}
 
 // Build regenerates the generated tables and assembles/links
 // perft.bin, banktest.bin, and engine.bin from the asm/ source. root is
@@ -57,12 +96,14 @@ func Build(root string) error {
 		{asm, "ca65", []string{"-g", "engine.s", "-o", "engine.o"}},
 		{asm, "ld65", []string{"-C", "engine.cfg", "engine.o", "-o", "engine.bin", "-Ln", "engine.lbl"}},
 	}
-	for _, s := range steps {
-		if err := run(s.dir, s.name, s.args...); err != nil {
-			return err
+	return withBuildLock(root, func() error {
+		for _, s := range steps {
+			if err := run(s.dir, s.name, s.args...); err != nil {
+				return err
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // BuildStandalone assembles and links a standalone asm/<name>.s image
@@ -87,10 +128,12 @@ func BuildStandalone(root, name string) error {
 		}
 		return nil
 	}
-	if err := run("ca65", name+".s", "-o", name+".o"); err != nil {
-		return err
-	}
-	return run("ld65", "-C", name+".cfg", name+".o", "-o", name+".bin")
+	return withBuildLock(root, func() error {
+		if err := run("ca65", name+".s", "-o", name+".o"); err != nil {
+			return err
+		}
+		return run("ld65", "-C", name+".cfg", name+".o", "-o", name+".bin")
+	})
 }
 
 // BuildVariant assembles engine.s with extra ca65 -D defines into a
@@ -124,10 +167,12 @@ func BuildVariant(root, out string, defines ...string) error {
 		ca65 = append(ca65, "-D", d)
 	}
 	ca65 = append(ca65, "engine.s", "-o", obj)
-	if err := run("ca65", ca65...); err != nil {
-		return err
-	}
-	return run("ld65", "-C", "engine.cfg", obj, "-o", out+".bin", "-Ln", out+".lbl")
+	return withBuildLock(root, func() error {
+		if err := run("ca65", ca65...); err != nil {
+			return err
+		}
+		return run("ld65", "-C", "engine.cfg", obj, "-o", out+".bin", "-Ln", out+".lbl")
+	})
 }
 
 // BuildT is a testing.TB convenience wrapper around Build: it skips the

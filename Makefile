@@ -110,6 +110,26 @@ asm/engine.bin: $(ENGINE_SRCS)
 	cd asm && $(CA65) -g engine.s -o engine.o
 	cd asm && $(LD65) -C engine.cfg engine.o -o engine.bin -Ln engine.lbl
 
+# Agent worktrees live under .claude/worktrees/, which is INSIDE the repo but
+# OUTSIDE the workspace that the root go.work declares (`use (.)` means the
+# root, not any worktree of it). So in a worktree every Go command fails with
+#
+#   pattern ./...: directory prefix . does not contain modules listed in go.work
+#
+# which reads like a build error rather than a missing config, and made `make
+# test` impossible to run for any agent working in a worktree -- another gate
+# that could not pass. Generate a worktree-local go.work instead of expecting
+# each agent to discover this. --git-common-dir resolves to the MAIN repo's
+# .git from inside a worktree, so the sibling checkouts are derivable.
+#
+# go.work is gitignored, and this rule only fires when the file is absent, so
+# it never touches the root workspace.
+go.work:
+	@root="$$(dirname "$$(git rev-parse --path-format=absolute --git-common-dir)")"; \
+	 sibs="$$(dirname "$$root")"; \
+	 printf 'go 1.26.2\n\nuse (\n\t.\n\t%s/go6502\n\t%s/goapple2\n)\n' "$$sibs" "$$sibs" > go.work; \
+	 echo "generated a worktree-local go.work (the root workspace does not cover worktrees)"
+
 # `test` is the gate you can actually run on every change: -short skips the
 # long diagnostics and finishes in about a minute.
 #
@@ -120,14 +140,14 @@ asm/engine.bin: $(ENGINE_SRCS)
 # trains you to ignore it, and this project's whole method rests on trusting
 # its gates (see the asmbuild build race, which could turn a corrupt object
 # file into a spurious PASS).
-test:
+test: go.work
 	go build ./...
 	go test -short ./...
 
 # The complete suite, including the ~50-minute parity and cycle-model
 # diagnostics. This is the pre-merge gate. The timeout is per PACKAGE, and
 # the two slow ones need ~49 min each, so 90 min leaves real headroom.
-test-full:
+test-full: go.work
 	go build ./...
 	go test -timeout 5400s ./...
 

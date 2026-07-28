@@ -3,6 +3,89 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-28 — ADVERSARIAL RULES REVIEW of the UI's own referee: the chess is CLEAN, two GAME-RESULT bugs were not
+
+The on-device UI (`asm/m8.s`) is a second, independent implementation of the
+rules — legality, check, and game termination — because on hardware there is
+no Go referee. This pass hunted it differentially against `internal/refchess`.
+
+**The chess itself came back clean.** New gates in `internal/ui/rulesdiff_test.go`:
+
+| gate | what it swept | result |
+|---|---|---|
+| `TestRulesCorpus` | 28 hand-built castling / en-passant / promotion / mate corners: every transit square of all four castles, castling out of and into check, the horizontal-pin en passant, promotion with capture, smothered mate, double check | legal-move count, in-check flag and termination code all agree with refchess |
+| `TestRulesRandomSweep` | ~800 random positions | no disagreement |
+| `TestRulesPlaythrough` | 12 random games TYPED IN, whole position compared every ply | rights lost to a rook CAPTURED on its home square, ep set/expiry, and the halfmove clock all exact |
+| `TestThreefoldExactPly` | a knight shuffle | draw fires on the third occurrence, not the second |
+| `TestThreefoldRespectsCastlingRights` | `Ra1b1 Ra8b8 Rb1a1 Rb8a8` x3 | the repetition hash is POSITION-based: identical placement with different castling rights is **not** a repetition, so the draw comes at ply 12 and not ply 8 |
+| `TestFiftyMoveBoundary` | 99/98/capture/pawn-move/mate-on-the-100th | halfmoves not fullmoves, resets correct, and **mate beats the 50-move rule** |
+| `TestEnPassantExpiry`, `TestUnderpromotionThroughThePrompt`, `TestNoMoveAfterGameOver`, `TestTakebackAgainstTheEngine`, `TestTakebackAcrossABookMove`, `TestSideSwapBookkeeping` | the paths the two-player gates could not reach | all clean |
+
+Notably the two-plies-at-a-time takeback branch had never been exercised: in
+referee mode `UIHUMAN` is `$FF`, so `cmd_take` always stepped back one.
+
+### The two real bugs, both about the RESULT rather than the moves
+
+**1. In TWO-PLAYER mode, resigning always announced "BLACK WINS."**
+`cmd_resign` derived the winner from `UIHUMAN ^ COLORMASK`, and in referee
+mode `UIHUMAN` is the sentinel `$FF`, not a colour — `$FF ^ $08` is nonzero,
+which reads as Black. Two people playing each other got the wrong result
+printed whichever of them resigned. Fixed by deriving it from `SIDE`, which
+is the resigning side in EVERY mode (`R` is only reachable while `UIRESULT`
+is 0, i.e. on the side to move's own turn) and is the same expression
+`uisync` already uses for a mate. **One byte smaller** — `SIDE` is zero page.
+
+**2. `D` could be answered from a search of a position the player had just
+withdrawn.** `cmd_draw` accepts iff `UILSC` — the last completed search score
+— is below −150 cp, and `cmd_take` did not clear it. Takebacks stack, so the
+score could be arbitrarily many plies away from the position being offered a
+draw in: search at ply N says −900, take back ten times, offer a draw at ply
+N−20 where the engine is fine, and it agrees. Fixed by retracting `UILSC`
+(and the think line) in `cmd_take` — the same rule `m8engine` already applies
+after a book move, where "the previous move's depth/score readout would be a
+lie." 9 bytes.
+
+Net **+8 B** of UI: 4,222 → 4,230, free 1,898 of 8,176. `engine.bin` md5
+unchanged (`58ef9645…`); no engine source touched.
+
+### Confirmed limits, not bugs
+
+- **`RES_LONG`: at 250 plies the UI declares "DRAW: TOO LONG" in any
+  position.** `TestHistoryCapEndsALiveGameInADraw` builds a legal 250-ply
+  game that meets NO draw rule (halfmove clock and repetitions both kept
+  clear) and shows the UI drawing it with White up a bishop, a knight and two
+  pawns against a bare king. It is a hard stop, not a wrap — no further move
+  is accepted and the one-page arrays are never written past their last byte
+  — but it IS a result the rules do not license. 125 moves is not a draw and
+  the FIDE ceiling is the 75-move rule. Raising it costs 4 bytes of LC RAM
+  per extra ply of hash history (1,898 free ⇒ room for ~470 more plies).
+- **Insufficient material stays a MISSING draw, never a wrong one.** In KK /
+  KNK / KBK the side to move always has legal moves, so it is never
+  mis-called stalemate, and neither a capture nor a pawn move is available,
+  so the halfmove clock runs to 100 and `RES_50` draws the game. The cost is
+  up to 50 moves of shuffling, not a wrong result.
+- **The en-passant square is hashed on every double push**, whether or not a
+  capture is possible — the usual over-strict convention, which can only miss
+  a repetition. Here it cannot even do that: any position with a live ep
+  square has `HALFMOVE == 0`, so `uireps`' lower bound equals `UIHCNT` and the
+  scan does not run at all.
+- **Move numbers ≥ 100 render as garbage in the side panel** (`;3`, `<0`):
+  `uidec2` is a two-digit routine and the 250-ply cap allows move 125. Purely
+  cosmetic, and fixing it widens the panel's move-number field from 2 columns
+  to 3, which moves every panel string the existing screen gates assert. Left
+  alone deliberately; see the `TestHistoryCapEndsALiveGameInADraw` screen.
+
+### Where the hunt found nothing
+
+`ttmovevalid`'s promotion/castling rejections (already gated by
+`TestTTMoveValidExhaustive` and `TestTTMoveValidRejectsPromoAndCastle`); the
+`uifind` promotion match (`FL_PROMO` is `$07` and holds the piece type, so
+`MVFLAGS & FL_PROMO` compares directly against `UIMPROM`); `uireps`' bounds
+and 2-ply stride; the LC variable map (`$F700-$FEFF` fully accounted, buffers
+all terminated within their extents); the engine moving in a terminal
+position (`mloop` syncs before it ever calls `m8engine`); and `uiapply`'s
+history-array indices, which the `RES_LONG` guard keeps below 251.
+
 ## 2026-07-28 — ★ 8fish BOOTS FROM A DISK. Not built — booted, on two unrelated emulators.
 
 `make dsk` → `asm/8fish.dsk` (143,360 B), a Standard Delivery disk built with

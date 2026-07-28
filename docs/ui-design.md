@@ -26,7 +26,7 @@ labelled *derived*.
 | `FT2_ADAPT` | **now runnable on device** via `FT2_SOFTCLK`; exposing it is still a UI decision (its ceilings are host-computed). See §6.3 |
 | progress during search | printed **between iterative-deepening iterations**, from the UI's own driver loop. **Zero lines of `search.s` change** |
 | MAIN-RAM cost | **0 bytes permanent** (a run-once 57-byte copier lives in soon-to-be-overwritten RAM) |
-| LC budget | **6,270 B of 8,176 B measured** (4,222 B code+data, 2,048 B RAM arrays, 256 B variables); **1,906 B free** |
+| LC budget | **6,278 B of 8,176 B measured** (4,230 B code+data, 2,048 B RAM arrays, 256 B variables); **1,898 B free** |
 
 The single most important finding is in §2: this project has never used its
 Language Card. The UI does not have to compete for the 1,622 bytes.
@@ -710,7 +710,7 @@ Two BLOADable files, essentially as designed:
 m8boot.bin   57 B   BRUN at $0800   latch $C08B, copy $0900 -> $E000,
                                     install the engine's LC aux primitives
                                     at $D000, JMP $E000
-m8.bin    4,222 B   BLOAD at $0900  the UI payload
+m8.bin    4,230 B   BLOAD at $0900  the UI payload
 ```
 
 `$0800` is `PIECESQ` and `$0900-$1FFF` is the per-ply undo/search arrays and
@@ -744,10 +744,10 @@ sectors, and `diskii mksd` refuses an image over **45,056 bytes**:
 
 | base | image ($base to `engine.bin`'s last byte, `$BB99`) | SD spare | UI growth room |
 |---|---:|---:|---:|
-| `$0800` (the BLOAD layout) | 45,978 | **−922** | 1,666 |
-| **`$0C00`** | **44,954** | **102** | **642** |
-| `$0D00` | 44,698 | 358 | 386 |
-| `$0F00` | 44,186 | 870 | **−126** (payload lands on the book) |
+| `$0800` (the BLOAD layout) | 45,978 | **−922** | 1,658 |
+| **`$0C00`** | **44,954** | **102** | **634** |
+| `$0D00` | 44,698 | 358 | 378 |
+| `$0F00` | 44,186 | 870 | **−134** (payload lands on the book) |
 
 `internal/delivery`'s `TestBaseTradeoff` **re-derives that table from the real
 file sizes** on every run and fails if `Base` is not the lowest base that fits,
@@ -771,7 +771,7 @@ the payload's page. `TestDiskLayout` asserts both.
 
 ```
 $0C00  m8sdboot.bin                  57 B   the copier (= --start)
-$0D00  m8.bin                     4,222 B   staged; copied to $E000
+$0D00  m8.bin                     4,230 B   staged; copied to $E000
 $2000  internal/book/bookblob.bin  7,407 B  the resident opening book
 $4000  engine.bin                31,642 B   the engine
        ------------------------------------
@@ -787,7 +787,7 @@ MAME's emulated IIe keyboard — with the pieces rendered by the real 342-0265-a
 character ROM, which is the first independent confirmation that the
 `ALTCHARSET` encoding is right.
 
-**Both margins are gated, not commented.** There are 744 bytes of slack in
+**Both margins are gated, not commented.** There are 736 bytes of slack in
 this layout and the two budgets grow from opposite ends — the engine spends the
 SD spare, the UI spends the growth room, and raising the base trades one for
 the other 256 bytes at a time. `internal/ui`'s **`TestDiskLedger`** prints both
@@ -812,19 +812,19 @@ From the linker's segment size and label deltas (`internal/ui`
 | level table + the soft-clock margin rule | 296 |
 | the UI's own iterative-deepening driver | 267 |
 | line editor, move parsing, promotion prompt | 349 |
-| commands | 230 |
+| commands | 238 |
 | painting | 470 |
 | think line + signed centipawn formatting | 280 |
 | tables and strings | 888 |
-| **UICODE total (measured)** | **4,222** |
+| **UICODE total (measured)** | **4,230** |
 | UI variables + screen buffers (`$F700`) | 256 |
 | game history from/to/flags (`$F800-$FAFF`) | 768 |
 | game hash history (`$FB00-$FEFF`) | 1,024 |
-| **TOTAL** | **6,270 of 8,176 (77%)** |
-| **FREE** | **1,906** |
+| **TOTAL** | **6,278 of 8,176 (77%)** |
+| **FREE** | **1,898** |
 
 **MAIN cost 0 B. TT cost 0 B. Book unmoved.** The design's estimate was
-~4,011 B; the real thing is 6,270 B, the difference being almost entirely
+~4,011 B; the real thing is 6,278 B, the difference being almost entirely
 strings, the level/limit arithmetic and the ID driver coming in heavier than
 their *derived* rows.
 
@@ -858,6 +858,12 @@ All under `internal/ui`, plus the two engine-side ones:
 | `TestBadInput` | garbage is named, not swallowed, and never touches the game |
 | `TestTerminations` | checkmate (two ways), stalemate, the 50-move rule and threefold repetition, each with the screen text it produces, and a move typed afterwards refused |
 | `TestTakeback` | replaying from the start position restores the exact prior FEN, all the way back to move 1 |
+| `TestRulesCorpus` / `TestRulesRandomSweep` / `TestRulesPlaythrough` | the UI's own referee **differentially against refchess**: 28 hand-built castling / en-passant / promotion / mate corners, ~800 random positions, and 12 random games TYPED IN with the whole position — rights, ep square, halfmove clock — compared every ply |
+| `TestThreefoldExactPly` / `TestThreefoldRespectsCastlingRights` | the draw fires on the THIRD occurrence, and the repetition hash is position-based: identical placement with different castling rights is not a repetition |
+| `TestFiftyMoveBoundary` | halfmoves not fullmoves, reset on capture and on a pawn move, and **checkmate on the hundredth halfmove is a mate, not a draw** |
+| `TestHistoryCapEndsALiveGameInADraw` | the `RES_LONG` boundary (§12.6): a legal 250-ply game that meets no draw rule is nonetheless drawn, and the cap is a hard stop rather than a wrap |
+| `TestTakebackAgainstTheEngine` / `TestTakebackAcrossABookMove` | the two-plies-at-a-time branch of `cmd_take`, which referee mode cannot reach (`UIHUMAN` is `$FF` there, so it always steps back one) |
+| `TestResignAwardsTheRightSide` / `TestDrawOfferIsNotAnsweredFromARetractedSearch` | the two result-reporting bugs found by that pass, in all three side modes |
 | `TestCommands` | N / T / R / L / S / ? |
 | `TestDrawOffer` | the engine accepts a draw only when its last search said it was losing |
 | `TestEngineParity` | **the UI-driven engine plays the move the `$4000`-entry engine plays**, at four positions and depths 2-5 |
@@ -910,9 +916,10 @@ Nothing below is needed to play a game.
 | deferred | why | price to add |
 |---|---|---|
 | **Board flip when the human plays Black** | `uiboard` walks `a8` downward with a fixed square-colour phase | ~40 B: a direction byte and a phase seed in `uiboard`, plus reversing `uicoords` |
-| **Hi-res board** (§3.1) | costs information, not bytes: mixed mode leaves 4 text rows and the panel/status/prompt no longer fit at once | ~1,850 B, fits in the 1,906 B free; book moves to LC bank 2 |
+| **Hi-res board** (§3.1) | costs information, not bytes: mixed mode leaves 4 text rows and the panel/status/prompt no longer fit at once | ~1,850 B, fits in the 1,898 B free; book moves to LC bank 2 |
 | **Insufficient-material draw** (KK, KNK, KBK) | the engine detects it *inside* the search; at the root the UI does not | ~50 B: the same piece-list scan `search.s` already has, hoisted |
 | **Fivefold / 75-move automatic ends** | threefold and 50 already adjudicate | ~15 B (two constants) |
+| **Games longer than 250 plies** | the history and hash arrays are one page each, so `uisync` declares `RES_LONG` ("DRAW: TOO LONG") at ply 250 **in any position**, winning or not. It is a hard stop, not a wrap — no further move is accepted — but 125 moves is not a draw under any rule, and `TestHistoryCapEndsALiveGameInADraw` builds a legal game that reaches it with White up a bishop, a knight and two pawns | 4 B of LC RAM per extra ply (1 history byte is already spare in each of three pages; the four hash pages are the cost). The 1,898 free bytes are room for ~470 more plies, but the arrays stop being page-indexable — that is the real price, not the RAM |
 | **Mate distance in the think line** | shows `+MATE` / `-MATE`, not `#4` | ~40 B: one subtract from `MATE` and a halve |
 | **`FT2_ADAPT`'s per-GAME bank** | the host bridge banks unspent time across a game; on device each move gets a flat allocation | ~120 B: a signed 24-bit bank, income accrual and `min(4*base, income+bank)` |
 | **Position setup / FEN entry** | two-player mode plus takeback covers replaying a game | ~250 B for a FEN parser, or ~150 B for a cursor-driven piece placer |

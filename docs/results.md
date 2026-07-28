@@ -3,6 +3,86 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-28 — ★ 8fish BOOTS FROM A DISK. Not built — booted, on two unrelated emulators.
+
+`make dsk` → `asm/8fish.dsk` (143,360 B), a Standard Delivery disk built with
+`diskii mksd`. Independently re-verified on main:
+
+```
+machine: Apple IIe (goapple2/iie 128K) + Disk II in slot 6,
+         ROM = genuine Apple IIe (MAME apple2e: 342-0134-a + 342-0135-b)
+entry:   $C600  — the Disk II controller's own 341-0027 P5 boot ROM (i.e. PR#6)
+LOADED:  44,954 B ($0C00-$BB99, 176 sectors) in 6,275,994 cycles (6.15 s),
+         byte-identical to the image
+BOOTED:  painted board at 6,430,240 cycles (6.30 s), PC $E20A
+```
+
+**Nothing is placed in RAM by the harness.** The CPU starts at `$C600`, the
+boot ROM reads T0S0 to `$0800`, Standard Delivery reads 176 sectors, and the
+copier lifts the UI to `$E000`. `TestDiskPlays` goes further: `e2e4` typed on
+the modelled keyboard → book reply, then offbeat moves leave the book, the
+engine searches, and **193 non-zero bytes appear in the aux-RAM TT at
+`$0200-$81FF`** — proof the aux bank is live under a real disk boot.
+
+Asserted: delivered bytes byte-identical to the image; ALTCHARSET on, 80COL
+off, TEXT/NOMIX/PAGE1; **no unimplemented `$C0xx` touched**; and the screen
+**byte-identical to the in-memory shipping build's, all 960 bytes**.
+
+**MAME cross-check.** The same disk boots in `apple2ee`, and typing `e2e4`
+produces a *different* book reply (correct — the dither seed is keystroke
+arrival time). Pieces render as inverse letters through the real
+342-0265-a character ROM: **the first independent confirmation of the
+ALTCHARSET fix**, on an emulator with no shared code with ours.
+
+**No fork of the UI.** `UIPAYLOAD` moved out of `asm/m8.s` into the linker
+config, so the disk layout (`asm/m8sd.cfg`: copier `$0C00`, payload `$0D00`)
+and the BLOAD layout are two links of one object file. `m8sd.bin` is
+byte-identical to `m8.bin`; the two copiers are 57 B each and differ in
+**exactly one byte** (`$09`→`$0D`). `engine.bin` md5 unchanged.
+
+**The goapple2 bridge was small, not large** — 244 non-comment lines wiring
+`cards.DiskCard` into slot 6 in front of the existing `iie` memory model, and
+**zero goapple2 changes**. A fixed-point check on `$FF58`/`$FCA8` caught the
+ROM halves being swapped, which would otherwise have surfaced as "unknown
+opcode $04 at $FF59".
+
+**Layout note.** zellyn: *"It's our disk. We can do whatever we want."* The
+44 KB `mksd` cap and the contiguous span are therefore **not** hard limits —
+`$0C00` single-shot is chosen because it works today, not because it is
+forced. `TestDiskLedger` gates both margins (**SD spare 102 B, UI growth room
+642 B**) but is framed as a **tripwire**: its failure text says "the one-shot
+path no longer fits — chain-load or ProRWTS2", not "make 8fish smaller".
+`TestMarginsCanFail` proves the ledger can actually go negative, and
+`TestBaseTradeoff` re-derives the whole base/span/margin table from real file
+sizes. `TestDiskRoundTrip`/`TestSectorOffset` verify the interleave against
+all 176 pages.
+
+**Boot speed is a design goal, not an accident** (zellyn: *"everyone likes it
+when software boots really fast"*). Standard Delivery reads sequential tracks
+with no directory parse and nothing resident — 6.15 s for 44 KB.
+
+### ProRWTS2 recon (read, not run) — for when save games are designed
+
+Standard Delivery is **read-only**, so saves need write routines. Boot path
+and save path are separable, though: it is our disk, so SD can keep the fast
+sequential boot while reserved tracks hold saves. Findings:
+
+- ACME, not ca65 — a toolchain cost (a2audit already uses ACME).
+- Driver `one_page`/**`two_pages` (default)**/`three_pages` ≈ 512 B, plus
+  `dirbuf`/`encbuf`/`treebuf` at 512 B each, independently placeable.
+- Default `reloc = $D000, lc_bank = 1` **collides with 8fish** (LCCODE at
+  `$D000`, UI at `$E000`) — but `lc_bank = 2` is supported and 8fish leaves
+  all **4,096 B of LC bank 2 free**. That is the obvious home.
+- `enable_write` requires a **pre-existing fixed-size file**, written in block
+  multiples. A saved game must ship as a placeholder overwritten in place —
+  that shapes the UI feature before it is designed.
+- `allow_aux` is likely unnecessary (the TT is scratch and never saved),
+  dodging its `load_high`/`swap_scrn` complications.
+- `init` unhooks ProDOS, so ProDOS need not be resident — no `$BF00` clash.
+- Open: whether a ProRWTS2 chain still delivers the engine as cheaply as
+  6.15 s. **Do not hand-roll a sector writer** — 6-and-2 nibble encoding and
+  write-splice timing corrupt the disk when wrong rather than failing clean.
+
 ## 2026-07-28 — ★ THERE IS A DISK, AND IT BOOTS: `make dsk` → `asm/8fish.dsk`, booted from `$C600` and played
 
 8fish had a shipping image and no way to hand it to anyone. It now has a

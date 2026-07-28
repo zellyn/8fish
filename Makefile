@@ -12,7 +12,7 @@ endif
 
 DISKII := diskii
 
-.PHONY: all hello perft banktest entropytest uitest m8 engine tables dsk test test-siblings clean
+.PHONY: all hello perft banktest entropytest uitest m8 engine tables dsk test test-full test-siblings clean
 
 all: hello perft engine test
 
@@ -110,9 +110,26 @@ asm/engine.bin: $(ENGINE_SRCS)
 	cd asm && $(CA65) -g engine.s -o engine.o
 	cd asm && $(LD65) -C engine.cfg engine.o -o engine.bin -Ln engine.lbl
 
+# `test` is the gate you can actually run on every change: -short skips the
+# long diagnostics and finishes in about a minute.
+#
+# It is split from `test-full` because plain `go test ./...` COULD NOT PASS.
+# internal/chesstest and internal/mirror take ~49 and ~47 minutes, and Go's
+# per-package timeout defaults to 10 minutes, so the target failed every time
+# regardless of the code. A gate that always fails is worse than no gate: it
+# trains you to ignore it, and this project's whole method rests on trusting
+# its gates (see the asmbuild build race, which could turn a corrupt object
+# file into a spurious PASS).
 test:
 	go build ./...
-	go test ./...
+	go test -short ./...
+
+# The complete suite, including the ~50-minute parity and cycle-model
+# diagnostics. This is the pre-merge gate. The timeout is per PACKAGE, and
+# the two slow ones need ~49 min each, so 90 min leaves real headroom.
+test-full:
+	go build ./...
+	go test -timeout 5400s ./...
 
 # The sibling checkouts (go6502, goapple2) have their own test suites;
 # run them too when present.

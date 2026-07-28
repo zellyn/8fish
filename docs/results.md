@@ -3,6 +3,283 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-28 — the opening book, MEASURED and then WIDENED: coverage 4/20 → 20/20 first moves, and no Elo to show for it
+
+The last strength lever on the list, deferred until everything else was
+done. Three separate things happened: a memory-map contradiction was
+settled, the existing book was measured for the first time, and it was
+widened. The first two are unambiguous wins. The third is a large,
+verifiable improvement in what the book COVERS and a **null result** in
+what it is worth over the board, and the null is reported first because it
+is the part that would otherwise get lost.
+
+### 1. `$2000`: `defs.inc` and `book.inc` disagreed, and `defs.inc` was wrong
+
+`defs.inc` reserved `$2000-$207F` as move-stack overflow guard slack that
+"must stay unallocated". `book.inc` has always had `BOOK_BASE = $2000`. The
+reservation was the wrong comment and has been deleted.
+
+**The premise that this blocked growing the book was itself false.** The
+exposed window is fixed at `$2000-$207F` by `MOVESTACKTOP`; it does not get
+larger when the book does. A 3,866-byte book and an 8,192-byte book expose
+exactly the same 128 bytes.
+
+**The slack would not have worked in either environment.**
+
+- Under the harness the store to `EXIT_TRAP` ends the run *on that
+  instruction*, so the ≤124 bytes already written are the entire blast
+  radius and nothing runs afterwards to observe them.
+- On real hardware `$BFFF` is plain RAM (`cmd_quit`, `asm/m8.s`), so the
+  trap is a **no-op**: the generator returns and keeps emitting past `$2000`
+  for the rest of that ply and every deeper one. The overrun is unbounded
+  there. 128 bytes could not contain it.
+
+**What actually keeps the book safe is distance, and that is now measured
+and enforced.** `chesstest.TestMoveStackWatermark` samples `MSP` (`$10-$11`)
+**once per executed instruction** across tactical, maximum-mobility (3
+queens + 2 rooks) and depth-10 endgame searches:
+
+| position | depth | peak MSP | slots used | % of 1,152 |
+|---|---|---|---|---|
+| kiwipete | 6 | `$159C` | 487 | 42.3% |
+| open middlegame | 7 | `$14FC` | 447 | 38.8% |
+| max mobility | 6 | `$14EC` | 443 | 38.5% |
+| pawn endgame | 10 | `$12BC` | 303 | 26.3% |
+| start position | 7 | `$129C` | 295 | 25.6% |
+
+Overflow needs 1,152 slots. The worst case is 487. The test **fails** if
+that ever passes half of capacity — which is the point at which the
+argument stops holding. A comment was replaced with a tripwire.
+
+### 2. The book, measured before touching it
+
+Nobody had ever measured this book. Three instruments, all new:
+
+**Structural (`TestBookOpponentCoverage`).** Walk every position the book's
+own lines reach; at each node where the OPPONENT moves, count how many of
+its legal moves leave us still in book. A book move of ours never ends the
+book — we always have a reply to our own line — so opponent nodes are the
+only thing that matters.
+
+**Against the engine itself (`TestBookExitAgainstEngineOpponent`).** Play
+the book out with the asm-matched mirror at depth 6 as the opponent, and
+record the ply at which the book runs out and the engine's own evaluation
+of the position it leaves us in.
+
+**Against real recorded games (`TestBookCoverageAgainstPGN`, `BOOKPGN=…`).**
+Replay an actual match archive and report where the book would have ended.
+
+The verdict was blunt. **The book was 10 plies deep and one to three moves
+wide.**
+
+| | before |
+|---|---|
+| as Black, White first moves answered | **4 of 20** (e4, d4, c4, Nf3) |
+| as White, Black replies answered after 1.e4 | 8 of 20 |
+| … after 1.d4 / 1.c4 / 1.Nf3 | 3 / 2 / 1 of 20 |
+| opponent replies covered at ply 1 (as White) | 14 of 80 (17.5%) |
+| mean exit ply vs mirror @ d6, book as White | **2.50** |
+| mean exit ply vs mirror @ d6, book as Black | **3.00** |
+| eval at exit (our POV) | +9 cp White, −29 cp Black |
+| mean exit ply over 40 recorded Sargon III games | 4.30 |
+
+A 48-line, 10-ply-deep book was being abandoned on **move 2**. The mirror
+answers 1.e4, 1.c4 and 1.Nf3 all with `1...Nc6`, which the book had never
+heard of, and plays `2.Nc3` as White, which it had also never heard of. Of
+40 recorded Sargon games, 4 left the book at **ply 1** — Sargon plays
+`1.Nc3`.
+
+The eval column is the useful negative: the positions the book left us in
+were **fine** (+9 / −29 cp). The book was not leaving us badly placed. It
+was just leaving. That is what made breadth, and not repair, the right
+lever — exactly as the design brief predicted.
+
+### 3. What was added
+
+`openings.txt` goes from 48 lines to 179; the 48 main lines are untouched.
+Two changes to the compiler made breadth affordable and safe:
+
+**`/w` and `/b` — whose moves a line speaks for.** The book is a set of
+positions, so a line written out in full teaches the engine both to play the
+moves and to answer them. `A00: 1. g4 d5 2. Bg2 c6` would put the Grob in
+the engine's own first-move lottery. `A00/b:` compiles only Black's moves.
+Our own first-move repertoire is therefore still exactly e4/d4/c4/Nf3 while
+the book answers all twenty legal first moves. `/w` does the mirror image
+for junk defences we want to punish but never play.
+
+**Name deduplication.** Lines whose `ECO Name` text matches share one name
+ID and one stored string, so a dozen four-ply answers to junk first moves
+can all honestly be `A00 Irregular Opening` for ~22 bytes once. Without it
+the name table alone was 2,760 B of an 8,192 B budget; with it, 1,702 B.
+
+**Transposition was the cheapest breadth in the file.** Because the book is
+keyed on the position, a short line that reaches a position an earlier line
+already established inherits its whole depth free. **41 of the 179 lines do
+this** (`TestBookTranspositions` enumerates them from source, so the claim
+cannot go stale). `B07: 1. d4 d6 2. e4 Nf6 3. Nc3 g6 4. Nf3 Bg7` costs four
+plies and joins the Pirc.
+
+### 4. The defect the measurement caught, and the tripwire that replaces it
+
+The first draft of the breadth section measured **worse than the book it
+replaced**: `+7 ± 12` Elo against a bookless opponent where the *old* book
+scored `+35 ± 12`. Same engine, same budget, same 2,000 games. Widening the
+book had cost 28 Elo.
+
+The cause was not the new lines. It was the **weights**. A weight is only
+"how many curated lines played this move from this position", so a four-ply
+line added purely to have an answer ready for `1...h5` still bumped the
+weight of its own first move, `1.e4`. Thirty such lines, and:
+
+| our first move | before | first draft |
+|---|---|---|
+| 1.e4 | **65%** | **44%** |
+| 1.d4 | 25% | 37% |
+| 1.c4 | 6% | 10% |
+| 1.Nf3 | 4% | 10% |
+
+Nobody chose that. The engine's opening repertoire had been re-rolled as a
+side effect of adding coverage, and it cost more than the coverage was
+worth. Two rules now make it structurally impossible:
+
+1. **A perspective-marked line is weightless** — it never increments an
+   entry an earlier line established.
+2. **`Build` REFUSES a marked line that would add a second move at a
+   position the main lines already answer**, naming the line and the ply.
+   Adding an alternative is a repertoire decision; it has to be made by
+   dropping the suffix, deliberately and visibly.
+
+With both in place the repertoire is **byte-identical to the old book** at
+every node (`TestBookRepertoire` prints it), and the same match returns
+`+37 ± 12`. Breadth lines answer; they do not advocate.
+
+### 5. The coverage result
+
+| | before | after |
+|---|---|---|
+| lines / entries / distinct positions | 48 / 312 / 264 | **179 / 633 / 585** |
+| blob | 3,866 B (47.2%) | **7,407 B (90.4%), 785 B free** |
+| our own repertoire (first move, replies) | — | **unchanged, verified** |
+| as Black, White first moves answered | 4 of 20 | **20 of 20** |
+| as White, Black replies after 1.e4 | 8 of 20 | **20 of 20** |
+| … after 1.d4 | 3 of 20 | **20 of 20** |
+| … after 1.c4 / 1.Nf3 | 2 / 1 of 20 | 10 / 8 of 20 |
+| opponent replies covered at ply 1 (as White) | 14/80 (17.5%) | **58/80 (72.5%)** |
+| mean exit ply vs mirror @ d6, as White | 2.50 | **5.00** |
+| mean exit ply vs mirror @ d6, as Black | 3.00 | **9.00** |
+| eval at exit (our POV) | +9 / −29 cp | +18 / −33 cp |
+| mean exit ply over 40 recorded Sargon games | 4.30 | 4.80 |
+| book moves played per 2,000 self-play games | 2,948 | **4,275 (+45%)** |
+
+### 6. The Elo: measurement design first, number second
+
+**An ordinary self-play SPRT cannot see a book change.** Both sides would
+share one book, play identical opening moves, and the book would cancel
+exactly. Worse, `internal/sprt` forces a 6-ply opening prefix, which plays
+straight *through* the region the book is supposed to be choosing — a book
+match run that way returns a beautiful null having measured nothing. Three
+things were added to `internal/sprt` for this, and `Run` now **refuses** a
+book match without the third:
+
+| added | why |
+|---|---|
+| `BookA` / `BookB` (+ `BookEntry`, `BookSeed`) | per-side resident blobs, probed **on device** via `chesstest.AsmBookProbe` before any search, exactly as `ucibridge` does — one PRNG draw per probe hit or miss, and the probe's cycles are settled so the unspent allocation banks toward the first real search, which is part of what a book buys |
+| `NoOpening` | start from the standard position; the books choose everything |
+| `Dither` | fresh `SEED` per search, as the bridge does. Without it the engine is deterministic and a match whose only variety is the book's weighted pick replays a handful of games and reports a confidence interval it has not earned |
+| `Result.ABookMoves` / `BBookMoves` | printed **before** the Elo. A book match where the two counts are zero, or where they are equal because neither book ever engaged, has measured nothing — and that failure is otherwise indistinguishable from a true null |
+
+`cmd/sprt` gains `-bookA`, `-bookB`, `-book-seed`, `-lbl`, `-dither`
+(`-bookA default` uses the embedded blob). `cmd/sargon-symmatch` gains
+`-bookfile` for the same reason.
+
+**Instrument validated before use.** Against a bookless opponent the new
+book plays 4,275 book moves per 2,000 games where the old plays 2,948
+(+45%) — the width is real and the rig can see it.
+
+**The numbers** (self-play, 300 ms/move emulated, `0x5f`/`0x10`, per-game
+bank, both sides adaptive, colours swapped):
+
+| match | games | result |
+|---|---|---|
+| **new book vs old book (paired)** | **3,000** | **+3 ± 10 Elo**, LLR(0,10) −0.79 |
+| new book vs no book | 2,000 | +37 ± 12 Elo, LLR(0,10) **+8.72 (accepts +10)** |
+| old book vs no book | 2,000 | +35 ± 12 Elo, LLR(0,10) +8.17 (accepts +10) |
+| first-draft book vs no book | 2,000 | +7 ± 12 Elo — the repertoire defect |
+
+**The book is worth about +36 Elo. Widening it is worth +3 ± 10 — nothing
+measurable.** The two independent bookless comparisons (37 and 35) agree
+with the paired estimate (+3) to well inside their error bars, so this is
+not one noisy run; it is the answer.
+
+**Why no Sargon gauntlet.** It is the other honest instrument, and it was
+deliberately not used for the *number*: at ~5 minutes a game a gauntlet
+would need thousands of games to resolve a ±10 Elo effect, and a gauntlet is
+unpaired on top of that. Sargon was used for **coverage** instead, where it
+is decisive and cheap. `cmd/sargon-symmatch -bookfile` now exists for the
+A/B if it is ever worth the days. Two things came out of it:
+
+- Replaying the 40 surviving Sargon III games (`TestBookCoverageAgainstPGN`,
+  `BOOKPGN=…`) and extracting **Sargon's own moves**: as White it opened
+  `1.e4` in 20 of 20 games; as Black it answered `1.Nf3` with `1...d5`
+  (11/11), `1.Nc3` with `1...d5` (4/4) and `1.d4` with `1...Nf6` (5/5). Four
+  of those games left the old book at **ply 1** — Sargon plays `1.Nc3`,
+  which the book had no answer to at all.
+- A live standard-start game with the new book: 8fish played `1.d4`, Sargon
+  answered `1...d6`, and the new breadth line `B07/w: 1. d4 d6 2. e4 Nf6
+  3. Nc3 g6 4. Nf3 Bg7` — four plies that transpose into the Pirc main line
+  already present under `1.e4 d6` — kept it in book for `d4`, `e4` and
+  `Nc3`. With the old book `1...d6` was uncovered and the game left book on
+  move 2. That is the mechanism working, on the real opponent, for four
+  bytes of new line and no new depth.
+
+### 7. Why the null, and what it does not say
+
+Head to head, both sides played **exactly 15,594 book moves**. That is not
+a coincidence: the book is a property of the *position*, so the moment
+either side plays a searched move the resulting position is almost always
+outside both books. Book-versus-book, the two leave together, and the extra
+width is rarely exercised. The +45% only appears against a bookless
+opponent — which is also the realistic case, and there the difference is
+still only 37 vs 35.
+
+**The honest reading is that breadth did not move the needle in self-play,
+and that the ceiling was low to begin with**: the entire book is worth ~36
+Elo, so no amount of widening could have shown more than a few. This is a
+negative result and it is reported as one. The book was **not** widened for
+free — it went from 47% to 90% of the resident hole — and the return on
+those 3,541 bytes is, in self-play, statistically indistinguishable from
+zero.
+
+What the measurement **cannot** say is what the book is for. Self-play's
+opponent is our own engine, which never plays `1.Nc3`, `1.b4` or `1...h5`;
+against it the book's old four-move repertoire was never really tested. The
+brief for this work was "stop you from doing something dumb and leave you
+reasonably set up" against whatever turns up — a human on an Apple IIe,
+Sargon III, an engine with its own ideas. The coverage numbers say that job
+is now done (4 of 20 first moves answered → 20 of 20; the book survives to
+ply 5.0/9.0 against the engine instead of 2.5/3.0). The Elo number says
+self-play cannot tell the difference. Both are true.
+
+**Recommendation: keep it.** It costs nothing the engine wanted (the
+`$2000-$3FFF` hole has no other claimant, and the engine image is
+byte-identical), it is not a regression (+3 ± 10, and +37 vs +35 against a
+bookless opponent), the repertoire is provably unchanged, and it removes a
+class of embarrassment — losing the thread on move one to `1.Nc3` — that
+self-play was structurally unable to charge us for.
+
+### 8. Gates
+
+| gate | result |
+|---|---|
+| `TestBookProbeParityASMvsGo` (264 → 585 in-book positions) | **PASS** |
+| `TestBookProbeWeightedDistribution` / `TestBookProbeOutOfBook` | PASS |
+| `TestBookFollowThenSearchDriver`, `TestBridgeBookFollowThenSearch` | PASS |
+| `TestBookIntegration` (on-device UI name walk) | PASS |
+| `TestCompiledMatchesGeneratedLines`, `TestBlobSize` | PASS |
+| `TestMoveStackWatermark` (new) | PASS — 487/1,152 slots |
+| `asm/engine.bin` byte-identical | **yes** — only unused stat constants in `book.inc` changed, so `TestMicroAB` cannot have moved |
+| `internal/sprt` package tests | PASS |
+
 ## 2026-07-28 — ★ THE SHIPPING BUILD NOW PLAYS, and it was showing FLASHING PUNCTUATION for half the pieces
 
 Closing the gap between the UI we test and the UI we ship. Two things were

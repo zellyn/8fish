@@ -78,11 +78,13 @@ move stack, which is garbage until the first search); a 30-byte copier — itsel
 `$C08B`, copies `$0E00`→`$E000`, and jumps there. `asm/uitest.s` is exactly this
 stub and it is proven to work in the emulator.
 
-> Incidental finding, not acted on: `defs.inc` reserves `$2000-$207F` as
-> move-stack overflow guard slack "which must stay unallocated", while
-> `book.inc` puts `BOOK_BASE = $2000`. They overlap. Only a 1151-move
-> single-ply generation could trip it, so it is theoretical — but the two
-> comments disagree and one of them should be corrected.
+> Incidental finding — **resolved 2026-07-28**, see the coexistence note in
+> `docs/book.md`. `defs.inc` used to reserve `$2000-$207F` as move-stack
+> overflow guard slack "which must stay unallocated" while `book.inc` puts
+> `BOOK_BASE = $2000`. The reservation was the wrong comment and has been
+> deleted: it protected nothing in either environment, and the measured
+> move-stack peak is 487 of 1,152 slots, now enforced by
+> `chesstest.TestMoveStackWatermark`. The book keeps all of `$2000-$3FFF`.
 
 ---
 

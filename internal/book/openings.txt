@@ -164,3 +164,450 @@ A07: 1. Nf3 d5 2. g3 Nf6 3. Bg2 e6 4. O-O Be7 5. d3 O-O
 # Dutch, Classical
 A90: 1. d4 f5 2. g3 Nf6 3. Bg2 e6 4. Nf3 Be7 5. O-O O-O
 
+
+# ===========================================================================
+# BREADTH SECTION
+#
+# Everything above this line is a MAIN LINE: a sound variation we are happy
+# to reach from either side, drilled 10-16 plies deep. Everything below is
+# BREADTH: short lines whose only job is to have a sane, developing answer
+# ready for a move a real opponent might actually play, so that the engine
+# does not fall out of book on move 1 and does not have to find its opening
+# moves by searching four plies deep on an Apple IIe.
+#
+# The "/b" and "/w" suffixes on the ECO code are what make this safe. A bare
+# ECO code compiles EVERY move of the line into the book, so the engine will
+# both play the line and answer it. "/b" compiles only Black's moves and
+# "/w" only White's. That is how we can answer 1.g4 without ever playing it,
+# and how we can punish 1...h5 without ever playing it. Our own first-move
+# repertoire therefore stays exactly what it was: e4, d4, c4, Nf3.
+#
+# Many breadth lines deliberately TRANSPOSE into a line declared earlier in
+# this file. A transposition is the cheapest breadth there is: it costs only
+# the entries up to the join, and then inherits that line's whole remaining
+# depth for free, because the book is keyed on the POSITION, not the move
+# order. `go test ./internal/book -run TestBookTranspositions -v` prints
+# exactly which lines do it, recomputed from this file — do not try to keep
+# a hand-written list here in sync.
+# ===========================================================================
+
+# ===== Answering White's offbeat first moves (we are Black) =====
+# One reply to every legal first move: the book now answers all 20.
+
+# Irregular Opening
+A00/b: 1. b3 d5 2. Bb2 Nf6 3. e3 e6 4. Nf3 Be7
+
+# Irregular Opening
+A00/b: 1. b4 d5 2. Bb2 Nf6 3. e3 e6 4. Nf3 Be7
+
+# Bird Opening
+A03/b: 1. f4 d5 2. Nf3 Nf6 3. e3 g6 4. Be2 Bg7
+
+# Irregular Opening
+A00/b: 1. g3 d5 2. Bg2 Nf6 3. Nf3 e6
+
+# Irregular Opening
+A00/b: 1. Nc3 d5 2. d4 Nf6 3. Bf4 e6 4. Nf3 Be7
+
+# Irregular Opening
+A00/b: 1. Nc3 d5 2. e4 d4 3. Nce2 e5 4. Ng3 Be6
+
+# Irregular Opening
+A00/b: 1. e3 d5 2. d4 Nf6 3. Nf3 e6 4. Bd3 Be7
+
+# Irregular Opening
+A00/b: 1. d3 d5 2. Nf3 Nf6 3. g3 e6 4. Bg2 Be7
+
+# Irregular Opening
+A00/b: 1. c3 d5 2. d4 Nf6 3. Nf3 e6 4. Bf4 Be7
+
+# Grob Opening
+A00/b: 1. g4 d5 2. Bg2 c6 3. h3 e5
+
+# Irregular Opening
+A00/b: 1. f3 d5 2. e4 dxe4 3. fxe4 e5 4. Nf3 Nc6
+
+# Irregular Opening
+A00/b: 1. a3 d5 2. d4 Nf6 3. Nf3 e6
+
+# Irregular Opening
+A00/b: 1. a4 d5 2. d4 Nf6 3. Nf3 e6
+
+# Irregular Opening
+A00/b: 1. h3 d5 2. d4 Nf6 3. Nf3 e6
+
+# Irregular Opening
+A00/b: 1. h4 d5 2. d4 Nf6 3. Nf3 e6
+
+# Irregular Opening
+A00/b: 1. Na3 d5 2. d4 Nf6 3. Nf3 e6
+
+# Irregular Opening
+A00/b: 1. Nh3 d5 2. d4 Nf6 3. Bf4 e6
+
+# ===== Answering Black's offbeat replies to 1.e4 (we are White) =====
+# With these the book answers all 20 legal Black first moves.
+
+# Irregular Defence
+A40/w: 1. e4 Nc6 2. d4 d5 3. Nc3 dxe4 4. d5 Ne5
+
+# Irregular Defence
+A40/w: 1. e4 b6 2. d4 Bb7 3. Nc3 e6 4. Nf3 d6
+
+# Irregular Defence
+A40/w: 1. e4 a6 2. d4 d5 3. Nc3 dxe4 4. Nxe4
+
+# Irregular Defence
+B00/w: 1. e4 b5 2. Bxb5 Bb7 3. Nc3 e6
+
+# Irregular Defence
+B00/w: 1. e4 f5 2. exf5 Nf6 3. Nc3 d5
+
+# Irregular Defence
+B00/w: 1. e4 f6 2. d4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+B00/w: 1. e4 g5 2. d4 d6 3. Nc3 Bg7
+
+# Irregular Defence
+B00/w: 1. e4 h5 2. d4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+B00/w: 1. e4 h6 2. d4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+B00/w: 1. e4 a5 2. d4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+B00/w: 1. e4 Na6 2. d4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+B00/w: 1. e4 Nh6 2. d4 d5 3. Nc3 dxe4
+
+# ===== Answering Black's offbeat replies to 1.d4 (we are White) =====
+
+# Queen's Gambit Declined
+A40/w: 1. d4 e6 2. c4 d5 3. Nc3 Nf6 4. Nf3 Be7
+
+# Pirc Defence
+B07/w: 1. d4 d6 2. e4 Nf6 3. Nc3 g6 4. Nf3 Bg7
+
+# Modern Defence
+B06/w: 1. d4 g6 2. e4 Bg7 3. Nc3 d6 4. f4 Nf6
+
+# Caro-Kann Defence
+B18/w: 1. d4 c6 2. e4 d5 3. Nc3 dxe4 4. Nxe4 Bf5
+
+# Irregular Defence
+A40/w: 1. d4 c5 2. d5 e5 3. e4 d6 4. Nc3 Be7
+
+# English Defence
+A40/w: 1. d4 b6 2. c4 Bb7 3. Nc3 e6 4. e4 Bb4
+
+# Irregular Defence
+A40/w: 1. d4 Nc6 2. d5 Ne5 3. e4 e6 4. Nc3 Nf6
+
+# Irregular Defence
+A40/w: 1. d4 e5 2. dxe5 Nc6 3. Nf3 Qe7 4. Bf4
+
+# Irregular Defence
+A40/w: 1. d4 b5 2. e4 Bb7 3. Bxb5 Bxe4 4. Nf3
+
+# Irregular Defence
+A40/w: 1. d4 f6 2. e4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+A40/w: 1. d4 a6 2. e4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+A40/w: 1. d4 h6 2. e4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+A40/w: 1. d4 a5 2. e4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+A40/w: 1. d4 h5 2. e4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+A40/w: 1. d4 Na6 2. e4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+A40/w: 1. d4 Nh6 2. e4 d5 3. Nc3 dxe4
+
+# Irregular Defence
+A40/w: 1. d4 g5 2. e4 d6 3. Nc3 Bg7
+
+# ===== White's second moves against our 1...e5 =====
+
+# Open Game
+C20/b: 1. e4 e5 2. Nc3 Nf6 3. f4 d5 4. fxe5 Nxe4
+
+# Open Game
+C20/b: 1. e4 e5 2. Bc4 Nf6 3. d3 c6 4. Nf3 d5
+
+# King's Gambit
+C30/b: 1. e4 e5 2. f4 exf4 3. Nf3 d5 4. exd5 Nf6
+
+# Open Game
+C20/b: 1. e4 e5 2. d4 exd4 3. Qxd4 Nc6 4. Qe3 Nf6
+
+# Open Game
+C20/b: 1. e4 e5 2. d3 Nf6 3. Nf3 Nc6 4. Be2 Bc5
+
+# Open Game
+C20/b: 1. e4 e5 2. c3 d5 3. exd5 Qxd5 4. d4 Nc6
+
+# Open Game
+C20/b: 1. e4 e5 2. Qh5 Nc6 3. Bc4 g6 4. Qf3 Nf6
+
+# ===== White's second moves against our 1...c5 =====
+
+# Sicilian Defence
+B20/b: 1. e4 c5 2. Nc3 Nc6 3. g3 g6 4. Bg2 Bg7
+
+# Sicilian Defence
+B20/b: 1. e4 c5 2. d4 cxd4 3. c3 dxc3 4. Nxc3 Nc6
+
+# Sicilian Defence
+B20/b: 1. e4 c5 2. f4 d5 3. exd5 Nf6 4. Nc3 Nxd5
+
+# Sicilian Defence
+B20/b: 1. e4 c5 2. b4 cxb4 3. a3 d5 4. exd5 Qxd5
+
+# Sicilian Defence
+B20/b: 1. e4 c5 2. g3 d5 3. exd5 Qxd5 4. Nf3 Bg4
+
+# Sicilian Defence
+B20/b: 1. e4 c5 2. Ne2 Nf6 3. Nbc3 d5 4. exd5 Nxd5
+
+# ===== White's second moves against our other 1.e4 defences =====
+
+# French Defence
+C00/b: 1. e4 e6 2. Nc3 d5 3. Nf3 Nf6 4. e5 Nfd7
+
+# French Defence
+C00/b: 1. e4 e6 2. Nf3 d5 3. Nc3 Nf6 4. e5 Nfd7
+
+# French Defence
+C00/b: 1. e4 e6 2. d3 d5 3. Nd2 Nf6 4. Ngf3 c5
+
+# Caro-Kann Defence
+B10/b: 1. e4 c6 2. Nc3 d5 3. Nf3 Bg4 4. h3 Bxf3
+
+# Caro-Kann Defence
+B10/b: 1. e4 c6 2. Nf3 d5 3. Nc3 Bg4 4. h3 Bxf3
+
+# Caro-Kann Defence
+B10/b: 1. e4 c6 2. c4 d5 3. exd5 cxd5 4. cxd5 Nf6
+
+# Caro-Kann Defence
+B10/b: 1. e4 c6 2. d3 d5 3. Nd2 e5 4. Ngf3 Bd6
+
+# Pirc Defence
+B07/b: 1. e4 d6 2. Nf3 Nf6 3. Nc3 g6 4. d4 Bg7
+
+# Pirc Defence
+B07/b: 1. e4 d6 2. Nc3 Nf6 3. d4 g6 4. Nf3 Bg7
+
+# Modern Defence
+B06/b: 1. e4 g6 2. Nc3 Bg7 3. d4 d6 4. f4 Nf6
+
+# Modern Defence
+B06/b: 1. e4 g6 2. Nf3 Bg7 3. d4 d6 4. Nc3 Nf6
+
+# Alekhine Defence
+B02/b: 1. e4 Nf6 2. Nc3 d5 3. e5 Nfd7 4. d4 e6
+
+# Alekhine Defence
+B02/b: 1. e4 Nf6 2. d3 d5 3. Nd2 e5 4. Ngf3 Nc6
+
+# Alekhine Defence
+B02/b: 1. e4 Nf6 2. e5 Nd5 3. c4 Nb6 4. d4 d6
+
+# Alekhine Defence
+B02/b: 1. e4 Nf6 2. e5 Nd5 3. Nf3 d6 4. d4 g6
+
+# Alekhine Defence
+B02/b: 1. e4 Nf6 2. e5 Nd5 3. d4 d6 4. c4 Nb6
+
+# Scandinavian
+B01/b: 1. e4 d5 2. Nc3 d4 3. Nce2 e5 4. Ng3 Be6
+
+# Scandinavian
+B01/b: 1. e4 d5 2. e5 c5 3. d4 Nc6 4. Nf3 Bf5
+
+# Scandinavian
+B01/b: 1. e4 d5 2. exd5 Qxd5 3. Nf3 Bg4 4. Be2 Nc6
+
+# ===== White's second moves against our 1...Nf6 / d5 / f5 =====
+
+# Indian Game
+A45/b: 1. d4 Nf6 2. Nf3 e6 3. c4 b6
+
+# Queen's Pawn Game
+D00/b: 1. d4 Nf6 2. Nc3 d5 3. Bf4 e6 4. e3 Bd6
+
+# London System
+A45/b: 1. d4 Nf6 2. Bf4 e6 3. e3 c5 4. c3 b6
+
+# Trompowsky Attack
+A45/b: 1. d4 Nf6 2. Bg5 e6 3. e4 h6 4. Bxf6 Qxf6
+
+# Indian Game
+A45/b: 1. d4 Nf6 2. g3 g6 3. Bg2 Bg7 4. Nf3 O-O
+
+# Indian Game
+A45/b: 1. d4 Nf6 2. e3 e6 3. Nf3 d5 4. c4 Be7
+
+# Indian Game
+A45/b: 1. d4 Nf6 2. f4 d5 3. Nf3 e6 4. e3 c5
+
+# Queen's Pawn Game
+D00/b: 1. d4 d5 2. Nc3 Nf6 3. Bg5 e6 4. e4 Be7
+
+# London System
+D02/b: 1. d4 d5 2. Bf4 Nf6 3. e3 e6 4. Nf3 c5
+
+# Queen's Pawn Game
+D00/b: 1. d4 d5 2. e3 Nf6 3. Nf3 e6 4. c4 Be7
+
+# Queen's Pawn Game
+D00/b: 1. d4 d5 2. Bg5 h6 3. Bh4 c6 4. e3 Qb6
+
+# Queen's Pawn Game
+D00/b: 1. d4 d5 2. g3 Nf6 3. Bg2 e6 4. Nf3 Be7
+
+# Queen's Pawn Game
+D00/b: 1. d4 d5 2. e4 dxe4 3. Nc3 Nf6 4. f3 exf3
+
+# Dutch Defence
+A80/b: 1. d4 f5 2. c4 Nf6 3. Nc3 e6 4. Nf3 Be7
+
+# Dutch Defence
+A80/b: 1. d4 f5 2. Nf3 Nf6 3. g3 e6 4. Bg2 Be7
+
+# Dutch Defence
+A80/b: 1. d4 f5 2. e4 fxe4 3. Nc3 Nf6 4. Bg5 e6
+
+# ===== Black's second moves against our own main lines (we are White) =====
+
+# Benoni Defence
+A56/w: 1. d4 Nf6 2. c4 c5 3. d5 e6 4. Nc3 exd5 5. cxd5 d6
+
+# Indian Defence
+A50/w: 1. d4 Nf6 2. c4 c5 3. d5 b5 4. cxb5 a6 5. bxa6 Bxa6
+
+# Indian Defence
+A50/w: 1. d4 Nf6 2. c4 d6 3. Nc3 e5 4. Nf3 Nbd7
+
+# English Defence
+A40/w: 1. d4 Nf6 2. c4 b6 3. Nc3 Bb7 4. Nf3 e6
+
+# Indian Defence
+A50/w: 1. d4 Nf6 2. c4 Nc6 3. Nf3 e6 4. Nc3 Bb4
+
+# Queen's Gambit
+D06/w: 1. d4 Nf6 2. c4 d5 3. cxd5 Nxd5 4. Nf3 e6
+
+# Queen's Gambit
+D06/w: 1. d4 d5 2. c4 Nc6 3. Nc3 dxc4 4. Nf3 Nf6
+
+# Queen's Gambit
+D06/w: 1. d4 d5 2. c4 Bf5 3. cxd5 Bxb1 4. Qa4+ c6
+
+# Queen's Gambit
+D06/w: 1. d4 d5 2. c4 c5 3. cxd5 Nf6 4. Nf3 cxd4
+
+# Queen's Gambit
+D06/w: 1. d4 d5 2. c4 Nf6 3. cxd5 Nxd5 4. Nf3 e6
+
+# Queen's Gambit
+D06/w: 1. d4 d5 2. c4 e5 3. dxe5 d4 4. Nf3 Nc6
+
+# Philidor Defence
+C41/w: 1. e4 e5 2. Nf3 d6 3. d4 Nf6 4. Nc3 Nbd7
+
+# Open Game
+C40/w: 1. e4 e5 2. Nf3 f5 3. Nxe5 Qf6 4. d4 d6
+
+# Open Game
+C40/w: 1. e4 e5 2. Nf3 d5 3. exd5 e4 4. Qe2 Nf6
+
+# Sicilian Defence
+B20/w: 1. e4 c5 2. Nf3 Nf6 3. e5 Nd5 4. Nc3 e6
+
+# Sicilian Defence
+B27/w: 1. e4 c5 2. Nf3 g6 3. d4 cxd4 4. Nxd4 Nc6
+
+# Sicilian Defence
+B27/w: 1. e4 c5 2. Nf3 a6 3. c3 d5 4. exd5 Qxd5
+
+# ===== 1.c4 and 1.Nf3: breadth, mostly by transposition =====
+
+# English Opening
+A15/w: 1. c4 Nf6 2. Nc3 e6 3. Nf3 d5 4. d4 Be7
+
+# English Opening
+A10/w: 1. c4 e6 2. Nc3 d5 3. d4 Nf6 4. Nf3 Be7
+
+# English, Anglo-Slav
+A11/w: 1. c4 c6 2. Nf3 d5 3. Nc3 Nf6 4. d4 e6
+
+# English, Anglo-Indian
+A10/w: 1. c4 g6 2. d4 Bg7 3. Nc3 Nf6 4. e4 d6
+
+# English, Anglo-Scandinavian
+A10/w: 1. c4 d5 2. cxd5 Qxd5 3. Nc3 Qa5 4. d4 Nf6
+
+# English Opening
+A10/w: 1. c4 b6 2. Nc3 Bb7 3. e4 e6 4. Nf3 Bb4
+
+# English Opening
+A10/w: 1. c4 f5 2. Nc3 Nf6 3. g3 e6 4. Bg2 Be7
+
+# Réti Opening
+A04/w: 1. Nf3 Nf6 2. c4 e6 3. Nc3 d5 4. d4 Be7
+
+# Réti Opening
+A04/w: 1. Nf3 c5 2. c4 Nc6 3. Nc3 Nf6 4. g3 g6
+
+# Réti Opening
+A04/w: 1. Nf3 f5 2. d4 Nf6 3. g3 e6 4. Bg2 Be7
+
+# Réti Opening
+A04/w: 1. Nf3 d6 2. d4 Nf6 3. Nc3 g6 4. e4 Bg7
+
+# Réti Opening
+A04/w: 1. Nf3 e6 2. d4 d5 3. c4 Nf6 4. Nc3 Be7
+
+# Réti Opening
+A04/w: 1. Nf3 g6 2. d4 Bg7 3. c4 Nf6 4. Nc3 d6
+
+# London System
+D02/b: 1. Nf3 d5 2. d4 Nf6 3. Bf4 c5 4. e3 Nc6
+
+# Réti Opening
+A06/b: 1. Nf3 d5 2. Nc3 Nf6 3. d4 e6 4. Bg5 Be7
+
+# Réti Opening
+A06/b: 1. Nf3 d5 2. e3 Nf6 3. c4 e6 4. b3 Be7
+
+# Réti Opening
+A06/b: 1. Nf3 d5 2. b3 Nf6 3. Bb2 e6 4. e3 Be7
+
+# Réti Opening
+A06/b: 1. Nf3 d5 2. d3 Nf6 3. g3 e6 4. Bg2 Be7
+
+# ===== Holes the engine opponent actually walked through (measured) =====
+# The mirror engine answers 1.c4 and 1.Nf3 with 1...Nc6, which ended the book
+# at ply 2 in the depth-6 walk. (Two further "holes" found in that walk —
+# 2.Nc3 against 1...e6 and 1...c6 — turned out to be artifacts of an earlier
+# draft in which breadth lines had joined our own Black repertoire. With that
+# fixed we never play those move orders, so the holes do not exist.)
+
+# Réti Opening
+A04/w: 1. Nf3 Nc6 2. d4 d5 3. c4 e6
+
+# English Opening
+A10/w: 1. c4 Nc6 2. Nc3 e5 3. g3 g6
+

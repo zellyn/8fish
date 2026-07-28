@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/zellyn/chess6502/harness"
+	"github.com/zellyn/chess6502/internal/book"
 	"github.com/zellyn/chess6502/internal/chesstest"
 	"github.com/zellyn/chess6502/internal/refchess"
 )
@@ -55,7 +56,7 @@ type Config struct {
 	FeaturesA2   byte // second feature byte (FT2_*) for side A (0 = none)
 	FeaturesB2   byte // second feature byte (FT2_*) for side B (0 = none)
 	BudgetCycles uint64
-	Pairs        int    // games = 2*Pairs (each opening pair, colors swapped)
+	Pairs        int // games = 2*Pairs (each opening pair, colors swapped)
 	Parallel     int
 	OpenSeed     uint64 // opening-generation seed; 0 = the historical default (42)
 
@@ -93,6 +94,39 @@ type Config struct {
 	// two regressors the on-device estimator forms, without perturbing the
 	// tree the way poking the cost table would.
 	ProbeAddrs map[string]uint16
+
+	// BookA / BookB are the per-side resident opening books. The whole point
+	// of having them PER SIDE is that a book A/B is INVISIBLE to an ordinary
+	// SPRT: both engines would share one book, play the same opening moves,
+	// and the book would cancel out exactly. Set BookA to the candidate blob
+	// and BookB to the incumbent (a nil book = that side plays no book and
+	// searches from move one).
+	//
+	// A book match must also NOT force an opening prefix — Openings would
+	// play right through the region the book is supposed to be choosing. Set
+	// NoOpening when BookA/BookB are set; Run refuses to do otherwise.
+	BookA *book.Book
+	BookB *book.Book
+	// BookEntry / BookEntryB are the addresses of the asm `bookentry` label
+	// (from engine.lbl) for each side's binary. Required when that side has a
+	// book. BookEntryB defaults to BookEntry when BinB is nil.
+	BookEntry  uint16
+	BookEntryB uint16
+	// BookSeed seeds the per-game deterministic PRNG that drives each side's
+	// weighted book pick. Mirrors ucibridge's stream exactly (one draw per
+	// probe, hit or miss), so replays reproduce.
+	BookSeed uint64
+	// Dither pokes a fresh eval-dither SEED byte before every search, as the
+	// UCI bridge does on device. Without it the engine is deterministic, so a
+	// match whose only variety comes from the book's weighted pick would
+	// replay a handful of distinct games over and over and report a confidence
+	// interval it has not earned. Required for a book match; harmless
+	// otherwise (it is what real games do).
+	Dither bool
+	// NoOpening starts every game from the standard position with no forced
+	// opening moves. Required for a book match; also the honest setting for
+	// any measurement of opening play.
+	NoOpening bool
 
 	// ColdTT is a DIAGNOSTIC knob: drop the aux-bank transposition table
 	// between moves so every search starts from an empty TT, the way a
@@ -196,6 +230,11 @@ type Result struct {
 	// check that makes the adaptive-vs-flat A/B honest.
 	ACycles, BCycles uint64
 	AMoves, BMoves   int
+	// ABookMoves/BBookMoves count moves each side played straight out of its
+	// resident book with no search. Report these: a book A/B whose two sides
+	// played the SAME number of book moves, or zero, has measured nothing,
+	// and that failure is otherwise indistinguishable from a true null.
+	ABookMoves, BBookMoves int
 }
 
 func (r *Result) Games() int { return r.Wins + r.Draws + r.Losses }
@@ -324,21 +363,37 @@ func Run(cfg Config) *Result {
 		cfg.Parallel = 1
 	}
 	openings := Openings
-	if cfg.Pairs > len(openings) || cfg.OpenSeed != 0 {
+	switch {
+	case cfg.NoOpening:
+		// One "opening" of zero moves: every game starts from the standard
+		// position and the engines (their books, if any) choose everything.
+		openings = [][]string{nil}
+	case cfg.Pairs > len(openings) || cfg.OpenSeed != 0:
 		openings = GenOpenings(cfg.Bin, cfg.Defs, cfg.Pairs, cfg.OpenSeed)
 	}
 	res := &Result{}
+	if (cfg.BookA != nil || cfg.BookB != nil) && !cfg.NoOpening {
+		// Guard rail for the trap this whole feature exists to avoid: with a
+		// forced opening prefix the books never get to choose, so the match
+		// measures nothing and looks like a clean null result.
+		res.Errors = append(res.Errors,
+			"book match without NoOpening: the forced opening prefix would play through the book")
+		return res
+	}
 	var mu sync.Mutex
 	sem := make(chan struct{}, cfg.Parallel)
 	var wg sync.WaitGroup
+	gameNo := 0
 	for p := 0; p < cfg.Pairs; p++ {
 		for _, aWhite := range []bool{true, false} {
 			wg.Add(1)
 			sem <- struct{}{}
-			go func(opening int, aWhite bool) {
+			gn := gameNo
+			gameNo++
+			go func(opening int, aWhite bool, gn int) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				outcome, aCyc, bCyc, aMv, bMv, err := playGame(cfg, openings[opening%len(openings)], aWhite)
+				outcome, aCyc, bCyc, aMv, bMv, aBk, bBk, err := playGame(cfg, openings[opening%len(openings)], aWhite, gn)
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
@@ -349,6 +404,8 @@ func Run(cfg Config) *Result {
 				res.BCycles += bCyc
 				res.AMoves += aMv
 				res.BMoves += bMv
+				res.ABookMoves += aBk
+				res.BBookMoves += bBk
 				switch outcome {
 				case 1:
 					res.Wins++
@@ -357,16 +414,24 @@ func Run(cfg Config) *Result {
 				case -1:
 					res.Losses++
 				}
-			}(p, aWhite)
+			}(p, aWhite, gn)
 		}
 	}
 	wg.Wait()
 	return res
 }
 
+// bookFor returns the book the given side plays with (nil = no book).
+func bookFor(cfg Config, aTurn bool) *book.Book {
+	if aTurn {
+		return cfg.BookA
+	}
+	return cfg.BookB
+}
+
 // playGame returns +1/0/-1 from A's perspective, plus the total emulated
 // cycles and own-move count each side spent across the game (own-move search).
-func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCyc uint64, aMv, bMv int, err error) {
+func playGame(cfg Config, opening []string, aWhite bool, gameNo int) (outcome int, aCyc, bCyc uint64, aMv, bMv int, aBook, bBook int, err error) {
 	ref, err := refchess.ParseFEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
 	if err != nil {
 		return
@@ -374,10 +439,10 @@ func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCy
 	for _, ms := range opening {
 		mv, err := refchess.ParseMove(ms)
 		if err != nil {
-			return 0, aCyc, bCyc, aMv, bMv, err
+			return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, err
 		}
 		if err := ref.Make(mv); err != nil {
-			return 0, aCyc, bCyc, aMv, bMv, err
+			return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, err
 		}
 	}
 	seen := map[uint64]int{}
@@ -387,24 +452,33 @@ func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCy
 		true:  {income: cfg.BudgetCycles},
 		false: {income: cfg.BudgetCycles},
 	}
+	// Per-side, per-game book PRNG. The two sides get DIFFERENT streams (the
+	// side bit is folded in) so that a shared book would still produce varied
+	// games rather than a mirror image, and the game number is folded in with
+	// the same golden-ratio step ucibridge uses.
+	mkRnd := func(side uint64) *rand.Rand {
+		seed := cfg.BookSeed + uint64(gameNo)*0x9E3779B97F4A7C15 + side*0xD1B54A32D192ED03
+		return rand.New(rand.NewPCG(seed, seed^0x5DEECE66D))
+	}
+	bookRnds := map[bool]*rand.Rand{true: mkRnd(0), false: mkRnd(1)}
 	for ply := range 400 {
 		if ref.HalfmoveClock() >= 100 || ref.InsufficientMaterial() {
-			return 0, aCyc, bCyc, aMv, bMv, nil
+			return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, nil
 		}
 		seen[ref.ZobristKey()]++
 		if seen[ref.ZobristKey()] >= 3 {
-			return 0, aCyc, bCyc, aMv, bMv, nil
+			return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, nil
 		}
 		legal := ref.LegalMoves()
 		aTurn := (ref.SideToMove() == 0) == aWhite
 		if len(legal) == 0 {
 			if !ref.InCheck() {
-				return 0, aCyc, bCyc, aMv, bMv, nil // stalemate
+				return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, nil // stalemate
 			}
 			if aTurn {
-				return -1, aCyc, bCyc, aMv, bMv, nil
+				return -1, aCyc, bCyc, aMv, bMv, aBook, bBook, nil
 			}
-			return 1, aCyc, bCyc, aMv, bMv, nil
+			return 1, aCyc, bCyc, aMv, bMv, aBook, bBook, nil
 		}
 		features := cfg.FeaturesA
 		features2 := cfg.FeaturesA2
@@ -418,11 +492,53 @@ func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCy
 		}
 		pos, err := chesstest.ParseFEN(ref.FEN())
 		if err != nil {
-			return 0, aCyc, bCyc, aMv, bMv, err
+			return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, err
+		}
+		// ---- Resident opening book, probed on device, before any search ----
+		// This mirrors ucibridge exactly: one PRNG draw per probe whether it
+		// hits or misses (so the stream depends only on seed and move number,
+		// not on how long the book lasted), and on a hit the move is PLAYED
+		// with no search at all. The probe's few thousand cycles are still
+		// charged and settled, so the unspent allocation banks toward the
+		// first out-of-book search — which is a real part of what a book buys
+		// and must not be given away for free.
+		if bk := bookFor(cfg, aTurn); bk != nil {
+			r := bookRnds[aTurn].Uint32()
+			entry := cfg.BookEntry
+			if !aTurn && cfg.BinB != nil && cfg.BookEntryB != 0 {
+				entry = cfg.BookEntryB
+			}
+			res, perr := chesstest.AsmBookProbe(bin, defs, entry, bk.Blob(), pos, r)
+			if perr != nil {
+				return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, fmt.Errorf("book probe: %w", perr)
+			}
+			if res.Hit {
+				mv, merr := refchess.ParseMove(res.Move)
+				if merr != nil {
+					return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, merr
+				}
+				if merr := ref.Make(mv); merr != nil {
+					return 0, aCyc, bCyc, aMv, bMv, aBook, bBook,
+						fmt.Errorf("ILLEGAL BOOK MOVE %q (fen %q): %w", res.Move, ref.FEN(), merr)
+				}
+				if aTurn {
+					aCyc += res.Cycles
+					aMv++
+					aBook++
+				} else {
+					bCyc += res.Cycles
+					bMv++
+					bBook++
+				}
+				if cfg.PerGame {
+					banks[aTurn].settle(res.Cycles)
+				}
+				continue
+			}
 		}
 		m, err := chesstest.NewMachine(bin, defs, pos, 0, nil)
 		if err != nil {
-			return 0, aCyc, bCyc, aMv, bMv, err
+			return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, err
 		}
 		chesstest.SetFeatures(m, defs, features)
 		chesstest.SetFeatures2(m, defs, features2)
@@ -449,6 +565,15 @@ func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCy
 			chesstest.SetBudget(m, defs, cfg.BudgetCycles, 24)
 		}
 		m.Mem.Main[defs["HALFMOVE"]] = byte(min(ref.HalfmoveClock(), 255))
+		if cfg.Dither {
+			// Fresh SEED per search, from the same per-side per-game stream
+			// that drives the book pick. Never 0 — 0 means "dither off".
+			seed := byte(bookRnds[aTurn].Uint32())
+			if seed == 0 {
+				seed = 1
+			}
+			m.Mem.Main[defs["SEED"]] = seed
+		}
 		if aux := auxes[aTurn]; aux != nil && !cfg.ColdTT {
 			copy(m.Mem.Aux[:], aux)
 		}
@@ -493,7 +618,7 @@ func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCy
 			exited, code, err = m.Run(runCap)
 		}
 		if err != nil || !exited {
-			return 0, aCyc, bCyc, aMv, bMv, fmt.Errorf("engine run: exited=%v err=%v (fen %q)", exited, err, ref.FEN())
+			return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, fmt.Errorf("engine run: exited=%v err=%v (fen %q)", exited, err, ref.FEN())
 		}
 		if cfg.MoveTrace != nil {
 			budget := uint64(m.Mem.Main[defs["BUDGET0"]]) |
@@ -528,10 +653,10 @@ func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCy
 		}
 		copy(auxes[aTurn], m.Mem.Aux[:])
 		if code == 2 {
-			return 0, aCyc, bCyc, aMv, bMv, fmt.Errorf("engine says no move but referee disagrees (fen %q)", ref.FEN())
+			return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, fmt.Errorf("engine says no move but referee disagrees (fen %q)", ref.FEN())
 		}
 		if code != 0 {
-			return 0, aCyc, bCyc, aMv, bMv, fmt.Errorf("engine exit code %d (fen %q)", code, ref.FEN())
+			return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, fmt.Errorf("engine exit code %d (fen %q)", code, ref.FEN())
 		}
 		from := m.Mem.Main[defs["BESTFROM"]]
 		to := m.Mem.Main[defs["BESTTO"]]
@@ -539,11 +664,11 @@ func playGame(cfg Config, opening []string, aWhite bool) (outcome int, aCyc, bCy
 		ms := chesstest.MoveUCI(from, to, flags)
 		mv, err := refchess.ParseMove(ms)
 		if err != nil {
-			return 0, aCyc, bCyc, aMv, bMv, err
+			return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, err
 		}
 		if err := ref.Make(mv); err != nil {
-			return 0, aCyc, bCyc, aMv, bMv, fmt.Errorf("ILLEGAL MOVE %q (fen %q): %w", ms, ref.FEN(), err)
+			return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, fmt.Errorf("ILLEGAL MOVE %q (fen %q): %w", ms, ref.FEN(), err)
 		}
 	}
-	return 0, aCyc, bCyc, aMv, bMv, nil
+	return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, nil
 }

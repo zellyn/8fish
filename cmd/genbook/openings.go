@@ -49,6 +49,18 @@ func parseOpenings(path string) ([]book.Line, error) {
 			return nil, fmt.Errorf("%s:%d: expected \"ECO: moves\", got %q", path, lineNo, t)
 		}
 		eco := strings.TrimSpace(t[:colon])
+		side := book.SideBoth
+		if slash := strings.IndexByte(eco, '/'); slash >= 0 {
+			switch strings.TrimSpace(eco[slash+1:]) {
+			case "w":
+				side = book.SideWhite
+			case "b":
+				side = book.SideBlack
+			default:
+				return nil, fmt.Errorf("%s:%d: %q has an unknown perspective suffix (want /w or /b)", path, lineNo, eco)
+			}
+			eco = strings.TrimSpace(eco[:slash])
+		}
 		if !validECO(eco) {
 			return nil, fmt.Errorf("%s:%d: %q is not a valid ECO code (want e.g. C78)", path, lineNo, eco)
 		}
@@ -61,7 +73,7 @@ func parseOpenings(path string) ([]book.Line, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s:%d: %s (%s): %w", path, lineNo, name, eco, err)
 		}
-		lines = append(lines, book.Line{ECO: eco, Name: name, Moves: moves})
+		lines = append(lines, book.Line{ECO: eco, Name: name, Side: side, Moves: moves})
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
@@ -149,11 +161,19 @@ func writeLinesGo(path string, lines []book.Line) error {
 	b.WriteString("// maintained source is internal/book/openings.txt (SAN); the compiler is\n")
 	b.WriteString("// cmd/genbook, which validates every line legal move-by-move through\n")
 	b.WriteString("// refchess and REFUSES to emit an illegal or malformed line.\n")
-	b.WriteString("type Line struct {\n\tECO   string\n\tName  string\n\tMoves []string\n}\n\n")
+	b.WriteString("//\n")
+	b.WriteString("// Side selects WHOSE moves in the line become book entries: SideBoth (the\n")
+	b.WriteString("// default, written with a bare ECO code) takes every move, so the engine\n")
+	b.WriteString("// will both play the line and answer it. SideBlack (\"A00/b\") takes only\n")
+	b.WriteString("// Black's moves and SideWhite (\"A00/w\") only White's — that is how a\n")
+	b.WriteString("// breadth line can teach the engine to ANSWER 1.g4 without teaching it to\n")
+	b.WriteString("// PLAY 1.g4.\n")
+	b.WriteString("type Line struct {\n\tECO   string\n\tName  string\n\tSide  Side\n\tMoves []string\n}\n\n")
 	b.WriteString("// Lines is the compiled opening book (generated from openings.txt).\n")
 	b.WriteString("var Lines = []Line{\n")
 	for _, ln := range lines {
-		fmt.Fprintf(&b, "\t{%q, %s, split(%s)},\n", ln.ECO, goString(ln.Name), goString(strings.Join(ln.Moves, " ")))
+		fmt.Fprintf(&b, "\t{%q, %s, %s, split(%s)},\n", ln.ECO, goString(ln.Name),
+			ln.Side, goString(strings.Join(ln.Moves, " ")))
 	}
 	b.WriteString("}\n\n")
 	b.WriteString("// split turns a space-separated UCI move list into a slice.\n")

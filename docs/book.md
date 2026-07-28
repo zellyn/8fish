@@ -12,7 +12,7 @@ the reference the asm probe is proven byte-for-byte equal to.
 
 | File | Role |
 |------|------|
-| **`internal/book/openings.txt`** | **the source of truth**: 48 sound main lines in human SAN (`# name` + `ECO: moves`). Edit this. |
+| **`internal/book/openings.txt`** | **the source of truth**: 179 lines in human SAN (`# name` + `ECO: moves`) — 48 deep main lines plus a BREADTH section. Edit this. |
 | `cmd/genbook/` | the compiler: parses `openings.txt`, validates every line legal move-by-move through refchess, and generates everything below |
 | `internal/book/lines.go` | **generated** Go `book.Lines` (UCI) — `DO NOT EDIT` |
 | `internal/book/bookblob.bin` | **generated** resident blob (embedded by package book) |
@@ -57,6 +57,72 @@ Rules:
   are ignored.
 - **A moves line is `<ECO>: <moves>`** — an ECO code (`A00`–`E99`), a
   colon, then the SAN move sequence. **Blank lines are ignored.**
+- **The ECO code may carry a perspective suffix, `/w` or `/b`** — see the
+  next section. A bare code means "both sides".
+
+### `/w` and `/b` — whose moves the line speaks for
+
+The book is a set of POSITIONS, so a line written out in full teaches the
+engine both to **play** those moves and to **answer** them. For a main line
+that is exactly right: we are happy on either side of a Ruy Lopez.
+
+For a breadth line it is exactly wrong. `A00: 1. g4 d5 2. Bg2 c6` would give
+the engine `1.g4` as a first move it can roll — a Grob, at weight 1, in the
+same lottery as `1.e4`. The point of the line is to have an answer ready for
+an opponent who plays the Grob, not to become a Grob player.
+
+So the ECO code takes an optional suffix:
+
+| written | compiles into entries |
+|---|---|
+| `A00:` | every move of the line (**default** — use for main lines) |
+| `A00/b:` | only **Black's** moves — "this is how we ANSWER it" |
+| `A00/w:` | only **White's** moves |
+
+A marked line is also **weightless, and may not touch a covered position**:
+
+- it never increments the weight of an entry an earlier line established, and
+- `Build` **refuses** it outright if it would add a *second* move at a
+  position the unmarked main lines already answer.
+
+Both rules exist because the first draft of the breadth section broke them
+and it cost **28 Elo over 2,000 games**. Weight is only "how many curated
+lines played this move here", so thirty short lines added to *answer* junk
+first moves each bumped the weight of their own opening move and quietly
+moved the engine's repertoire from 65% `1.e4` to 44%. Breadth lines answer;
+they do not advocate. If a breadth move really is one we want to play, drop
+the suffix and adopt it as a main line — visibly. `TestBookRepertoire`
+prints the distribution so the next such drift is seen, not inferred.
+
+```
+# Grob Opening
+A00/b: 1. g4 d5 2. Bg2 c6 3. h3 e5      <- we answer 1.g4; we never play it
+
+# Irregular Defence
+B00/w: 1. e4 h5 2. d4 d5 3. Nc3 dxe4    <- we punish 1...h5; we never play it
+```
+
+Every move is still parsed, validated and made — the line has to be walked
+to reach the later positions — but only the marked side's moves become
+entries. Our own first-move repertoire is therefore still exactly `e4`,
+`d4`, `c4`, `Nf3`, even though the book now answers all twenty legal first
+moves.
+
+**Transposition is free breadth.** Because the book is keyed on the position
+and not the move order, a short breadth line that reaches a position already
+in a deep main line inherits that whole main line. `B07: 1. d4 d6 2. e4 Nf6
+3. Nc3 g6 4. Nf3 Bg7` costs four plies and joins the Pirc main line already
+present under `1.e4 d6`. **41 of the 179 lines transpose this way** —
+`TestBookTranspositions` lists exactly which, and recomputes it from the
+source, so it cannot go stale the way a hand-written comment would.
+
+**Names are deduplicated.** Two lines whose `ECO Name` text is identical
+share one name ID and one stored string, so a dozen four-ply lines answering
+a dozen junk first moves can all honestly be `A00 Irregular Opening` and cost
+~22 bytes once. Breadth lines therefore use family names ("Sicilian Defence",
+"Queen's Pawn Game") while the deep main lines keep their exact ones ("B90
+Sicilian, Najdorf"). Name IDs must still fit in a byte, so there is a hard
+ceiling of 256 *distinct* names (the build fails loudly at 257).
 
 **Why SAN and not coordinate (`e2e4`)?** SAN is what a human authors and
 reviews naturally, and the compiler resolves it against refchess's legal
@@ -135,8 +201,17 @@ current-opening byte; text lookup is host-side only (logging).
 
 ## Sizes (current build)
 
-- 48 lines → 312 entries (2808 B) + 48 names (1050 B) + 8 B header
-- **blob = 3866 bytes** = 47.2% of the 8 KB hole (target was ≤ 6 KB)
+- 179 lines → 633 entries (5697 B) + 80 distinct names (1702 B) + 8 B header
+- **blob = 7407 bytes** = 90.4% of the 8 KB hole, **785 bytes free**
+- `TestBlobSize` fails if free headroom drops below 256 B. The old "≤ 6 KB
+  margin target" is gone: it was set when the book was 48 deep lines using
+  47% of the hole, and nothing else wants `$2000-$3FFF`. Breadth is what the
+  space is for.
+- The name table is 22% of the blob. `genbook` still prints the
+  word-tokenised alternative each build (currently 1242 B, a 460 B saving);
+  it is not implemented, because it would need a decoder in `uibookname`
+  (`asm/m8.s`) and 460 B is not yet worth that. If the book needs to grow
+  again, that is the next lever, before cutting lines.
 
 ## Bridge integration (`internal/ucibridge`)
 
@@ -238,12 +313,44 @@ confirms the pick frequencies equal the weights; `TestBookProbeOutOfBook`
 confirms misses match. `TestBookFollowThenSearchDriver` and ucibridge's
 `TestBridgeBookFollowThenSearch` play a full opening on-device.
 
-### Coexistence note (move stack)
+### Coexistence note (move stack) — settled 2026-07-28
 
-`MOVESTACKTOP` is `$2000` and the generator's overflow guard may write up
-to ~124 bytes past it (`$2000-$207F`) before trapping — only when the move
-stack is at capacity (~1151 stacked moves across the recursion), which no
-realistic search approaches. In that pathological case it would corrupt the
-book header; the book is probed only at the root before search, so it would
-affect at worst the *next* move's probe (which would see no magic and
-search). Not a concern at practical depths.
+`MOVESTACKTOP` is `$2000` and the generator's batched emission may write up
+to ~124 bytes past it (`$2000-$207F`) before its flush traps. `BOOK_BASE` is
+also `$2000`, so those 128 bytes — the header plus the ~13 lowest-keyed
+entries — are the book's exposure. `defs.inc` used to claim the same 128
+bytes were reserved guard slack that "must stay unallocated"; that claim was
+false the day the book landed and has been removed. Three facts settle it:
+
+1. **The exposed window does not grow with the book.** It is fixed at
+   `$2000-$207F` by `MOVESTACKTOP`. A 3,866-byte book and an 8,192-byte book
+   expose exactly the same 128 bytes, so book size was never the variable.
+2. **Slack would not have helped in either environment.** Under the harness
+   the store to `EXIT_TRAP` ends the run on that instruction, so the ~124
+   bytes already written are the entire blast radius and nothing runs
+   afterwards to observe them. On real hardware `$BFFF` is plain RAM (see
+   `cmd_quit` in `asm/m8.s`), so the trap is a no-op: the generator returns
+   and keeps writing past `$2000` for the rest of that ply and every deeper
+   one. The overrun is unbounded there; 128 bytes cannot contain it.
+3. **Overflow is far out of reach, and that is now enforced by a test.**
+   `chesstest.TestMoveStackWatermark` samples `MSP` (`$10-$11`) once per
+   executed instruction across tactical, maximum-mobility (3 queens + 2
+   rooks) and depth-10 endgame searches. Measured peaks:
+
+   | position | depth | peak MSP | slots used | % of 1,152 |
+   |---|---|---|---|---|
+   | kiwipete | 6 | `$159C` | 487 | 42.3% |
+   | open middlegame | 7 | `$14FC` | 447 | 38.8% |
+   | max mobility | 6 | `$14EC` | 443 | 38.5% |
+   | start position | 7 | `$129C` | 295 | 25.6% |
+   | pawn endgame | 10 | `$12BC` | 303 | 26.3% |
+
+   The test **fails** if the worst case ever exceeds half of capacity, which
+   is the point at which this argument would stop holding. It is the guard;
+   the deleted comment was not.
+
+Residual risk if it somehow happened anyway: the corrupting bytes are move
+records (tier/from/to/flags), so `BOOK_MAGIC` would almost certainly stop
+reading `'B','K'` and the probe would cleanly miss and search. But this is
+downstream of a condition that has already destroyed the search, so it is
+not the interesting failure.

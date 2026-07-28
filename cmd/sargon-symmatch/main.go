@@ -61,6 +61,7 @@ func main() {
 		budget      = flag.Uint64("budget-cycles", 30_000_000, "symmetric per-move budget B in 6502 cycles (both sides)")
 		usebook     = flag.Bool("book", false, "8fish plays its resident opening book before searching")
 		bookSeed    = flag.Uint64("book-seed", 1, "8fish book weighted-pick seed")
+		bookFile    = flag.String("bookfile", "", "load 8fish's resident book from this blob instead of the embedded one (for book A/B against the same Sargon)")
 		dither      = flag.String("dither", ucibridge.DitherEntropy, "8fish eval-dither seed source: entropy (hardware-faithful keystroke-timing collector), prng (host PCG), off")
 		ditherSeed  = flag.Uint64("dither-seed", 0, "with -dither prng: pin the stream for a reproducible run (0 = random)")
 		openings    = flag.String("openings", "", "EPD file of opening positions (one per line); games cycle through it")
@@ -127,7 +128,7 @@ func main() {
 		openingList = nil
 	}
 
-	eng, err := newEightfish(*binfile, *defsfile, *lblfile, *usebook, *bookSeed, *dither, *ditherSeed, logw)
+	eng, err := newEightfish(*binfile, *defsfile, *lblfile, *usebook, *bookFile, *bookSeed, *dither, *ditherSeed, logw)
 	if err != nil {
 		log.Fatalf("8fish init: %v", err)
 	}
@@ -241,7 +242,7 @@ type eightfish struct {
 	cw  io.WriteCloser
 }
 
-func newEightfish(binfile, defsfile, lblfile string, usebook bool, bookSeed uint64, dither string, ditherSeed uint64, logw io.Writer) (*eightfish, error) {
+func newEightfish(binfile, defsfile, lblfile string, usebook bool, bookFile string, bookSeed uint64, dither string, ditherSeed uint64, logw io.Writer) (*eightfish, error) {
 	bin, err := os.ReadFile(binfile)
 	if err != nil {
 		return nil, err
@@ -276,7 +277,7 @@ func newEightfish(binfile, defsfile, lblfile string, usebook bool, bookSeed uint
 		DitherSeed:   ditherSeed,
 	}
 	if usebook {
-		bk, err := book.Default()
+		bk, err := loadBookBlob(bookFile)
 		if err != nil {
 			return nil, fmt.Errorf("book: %w", err)
 		}
@@ -1100,4 +1101,18 @@ func normalizeFEN(fen string) string {
 		}
 	}
 	return strings.Join(f[:6], " ")
+}
+
+// loadBookBlob returns the embedded resident book, or the blob at path when
+// one is named. Naming a blob is how a book A/B holds everything else fixed —
+// same engine image, same Sargon, same budget — and varies only the book.
+func loadBookBlob(path string) (*book.Book, error) {
+	if path == "" {
+		return book.Default()
+	}
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return book.Load(blob)
 }

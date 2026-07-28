@@ -7,9 +7,9 @@
 
 BOOK_BASE      = $2000   ; resident base address
 BOOK_MAGIC     = BOOK_BASE+0   ; 2 bytes 'B','K'
-BOOK_COUNT     = BOOK_BASE+2   ; word: entry count (312)
+BOOK_COUNT     = BOOK_BASE+2   ; word: entry count (633)
 BOOK_NAMEOFF   = BOOK_BASE+4   ; word: base-relative name-table offset
-BOOK_NAMECT    = BOOK_BASE+6   ; byte: name count (48)
+BOOK_NAMECT    = BOOK_BASE+6   ; byte: name count (80)
 BOOK_STRIDE    = 9            ; entry stride in bytes
 BOOK_ENTRIES   = BOOK_BASE+8   ; first entry
 
@@ -22,6 +22,6 @@ BOOK_E_WEIGHT  = 7    ; weighted-pick weight
 BOOK_E_NAMEID  = 8    ; name-table index -> current-opening byte
 
 ; build stats:
-BOOK_ENTRY_COUNT = 312
-BOOK_NAME_COUNT  = 48
-BOOK_BLOB_SIZE   = 3866
+BOOK_ENTRY_COUNT = 633
+BOOK_NAME_COUNT  = 80
+BOOK_BLOB_SIZE   = 7407

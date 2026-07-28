@@ -608,8 +608,40 @@ MOVESTACKTOP = $2000    ; exclusive end; generator overflow-checks this.
                         ;  writes through a Y offset and flushes MSP at
                         ;  ray/handler boundaries, so up to ~124 bytes
                         ;  past this top can be written before the trap
-                        ;  fires: $2000-$207F is reserved guard slack
-                        ;  and must stay unallocated.
+                        ;  fires.
+                        ;
+                        ;  $2000-$207F IS NOT RESERVED. It used to be
+                        ;  described here as guard slack that "must stay
+                        ;  unallocated", which was never true (the
+                        ;  resident opening book has always been based at
+                        ;  $2000 — BOOK_BASE in asm/book.inc) and would
+                        ;  not have helped if it were:
+                        ;
+                        ;   - Under the harness, the store to EXIT_TRAP
+                        ;     ends the run on that very instruction, so
+                        ;     the <=124 bytes already written ARE the
+                        ;     whole blast radius and nothing afterwards
+                        ;     can observe them. Slack protects nothing.
+                        ;   - On real hardware $BFFF is plain RAM, so the
+                        ;     trap is a no-op: the generator RETURNS and
+                        ;     keeps emitting past $2000 for the rest of
+                        ;     that ply and every deeper one. The overrun
+                        ;     is unbounded and 128 bytes cannot contain
+                        ;     it. Slack protects nothing here either.
+                        ;
+                        ;  What actually keeps the book safe is distance:
+                        ;  overflow needs ~1151 moves stacked across the
+                        ;  live recursion, and the measured worst case
+                        ;  (TestMoveStackWatermark, per-instruction
+                        ;  sampling of MSP over tactical, max-mobility
+                        ;  and deep-endgame searches) is 487 slots —
+                        ;  under half. That test is the enforcement
+                        ;  mechanism and FAILS if a future change drives
+                        ;  the peak past 50% of capacity; do not replace
+                        ;  it with a comment. Note also that the exposed
+                        ;  window is fixed at $2000-$207F by this
+                        ;  constant, so it does NOT grow when the book
+                        ;  grows.
 
 ; Transposition table: 4096 x 8 bytes in AUX $0200-$81FF (see D6).
 TTBASE     = $0200

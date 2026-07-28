@@ -41,12 +41,6 @@ func main() {
 	}
 	blob := book.Encode(entries, names)
 
-	if len(blob) > book.MaxSize {
-		fmt.Fprintf(os.Stderr, "genbook: blob %d bytes exceeds %d (8 KB) resident budget\n",
-			len(blob), book.MaxSize)
-		os.Exit(1)
-	}
-
 	// Round-trip sanity: the blob must parse back to the same entry count.
 	bk, err := book.Load(blob)
 	if err != nil {
@@ -75,6 +69,15 @@ func main() {
 	fmt.Printf("  resident footprint: %d / %d bytes (%.1f%% of the 8 KB hole)\n",
 		len(blob), book.MaxSize, 100*float64(len(blob))/float64(book.MaxSize))
 	fmt.Printf("  reload OK: %d entries, %d names\n", len(bk.Entries()), len(names))
+
+	// The budget check comes LAST and after the breakdown is printed: when a
+	// book overflows you need to see WHERE the bytes went (entries vs names)
+	// to decide what to cut, and a bare "too big" line does not tell you.
+	if len(blob) > book.MaxSize {
+		fmt.Fprintf(os.Stderr, "genbook: blob %d bytes EXCEEDS the %d-byte resident budget by %d\n",
+			len(blob), book.MaxSize, len(blob)-book.MaxSize)
+		os.Exit(1)
+	}
 }
 
 // measureNameTables reports both name-encoding sizes so the choice is

@@ -168,7 +168,15 @@ m8main:
         ; no readable clock; the harness deliberately leaves it OFF because
         ; it has a real counter, so this must NOT be copied from
         ; ucibridge.runEngine.
-        lda #$1F                ; all search + eval features
+        ; FEATURES must be the SHIPPED GAMEPLAY MASK, $1F | FT_CKEXT ($5F) -
+        ; the same mask ucibridge.runEngine plays with and every Elo number
+        ; in docs/results.md was measured at. $1F alone was "all features"
+        ; only until FT_CKEXT was adopted (2026-07-25, +24 +/- 23 over 600
+        ; SPRT games); shipping $1F silently gave the disk build a weaker
+        ; search than the one that was benchmarked. Gated by
+        ; internal/ui TestShippedFeatureMask, which reads these two bytes
+        ; out of the BOOTED image and compares them with the rigs' mask.
+        lda #$1F|FT_CKEXT       ; all search + eval features
         sta FEATURES
         lda #FT2_GENDEFER|FT2_SOFTCLK
         sta FEATURES2

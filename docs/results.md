@@ -3,6 +3,102 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-28 — Book WIDENED (3,866 → 7,407 B): coverage transformed, Elo **+3 ± 10**. The null is an INSTRUMENT LIMIT, not a verdict on the book.
+
+zellyn's brief was breadth, not depth: *"Books are more to stop you from
+doing something dumb, and to leave you reasonably set up, than to try to
+drill as deep as possible."* Deferred until everything else was done; that
+condition was met.
+
+**Before:** 10 plies deep, 1-3 moves wide. Answered **4 of 20** first moves
+as Black. Against our own engine it died on move 2 (mean exit ply
+2.50/3.00). Crucially the exit positions were *fine* (+9/−29 cp) — the book
+was not misplacing us, it was simply **leaving**. That is what made breadth
+the right lever rather than better lines.
+
+**After:** 48 → 179 lines, **7,407 B of 8,192 (90.4%, 785 free)**. 20/20
+first moves answered in both colours; ply-1 opponent replies covered
+**17.5% → 72.5%**; exit ply 5.00/9.00; 45% more book moves played. Two
+compiler additions: a `/w` `/b` perspective suffix (answer 1.g4 without
+playing it) and name dedup. 41 lines transpose into existing main lines and
+inherit their depth for free.
+
+**★ The measured result: +3 ± 10 Elo over 3,000 paired games (new vs old),
+LLR(0,10) −0.79. And the reason is structural.** Head to head, both sides
+played **exactly 15,594 book moves**. The book is a property of the
+POSITION, so both engines enter and leave it together and the extra width
+is never exercised. Worse, self-play's opponent is our own engine — which
+never plays 1.Nc3, and so is structurally incapable of charging us for
+losing the thread on move one. **Self-play cannot price book breadth.** The
+null is a statement about the instrument, not about the book.
+
+For scale, the same rig prices the book as a whole honestly:
+
+| match | games | result |
+|---|---|---|
+| new vs old (paired) | 3,000 | **+3 ± 10**, LLR −0.79 |
+| new vs NO book | 2,000 | +37 ± 12, LLR **+8.72** (accepts +10) |
+| old vs NO book | 2,000 | +35 ± 12, LLR +8.17 |
+
+**The book is worth ~+36 Elo; widening it is worth nothing self-play can
+see.** Where the coverage gain IS visible is against a foreign opponent:
+**4 of 40 recorded Sargon games left the OLD book at ply 1** to 1.Nc3, and
+a live game showed the new `1.d4 d6` line transposing into the Pirc and
+holding book three moves where the old book had nothing. A Sargon gauntlet
+for an Elo number was refused as prohibitively expensive (thousands of
+games at ~5 min each), so **whether the coverage converts to Elo against
+diverse opponents remains UNMEASURED** — claimed neither way.
+
+**Kept** on: not a regression, repertoire provably unchanged, and the space
+had no other claimant. Honest cost to record: `$2000-$3FFF` is now 90% full,
+so a future hi-res board would have to move the book to LC bank 2 — which
+the UI design already assumed it would.
+
+### The defect the measurement caught
+
+The first draft measured **worse than the book it replaced** (+7 vs +35 vs
+no-book). Not the lines — the **weights**. A four-ply line added merely to
+*answer* 1...h5 still bumped the weight of its own first move, and thirty
+such lines moved our repertoire from **65% 1.e4 to 44%**. `Build` now
+refuses this structurally: marked lines are weightless and may not add an
+alternative where main lines already answer. Repertoire is byte-identical
+to the old book and the same match returns +37. A widening pass that
+quietly rewrites your opening repertoire is exactly the failure a
+book-vs-book A/B exists to catch.
+
+### The `$2000-$207F` reservation was WRONG, and is deleted (task #38)
+
+`defs.inc` reserved it as move-stack guard slack that "must stay
+unallocated" while `book.inc` put `BOOK_BASE` there. Resolved against the
+reservation, on three counts:
+- **The premise was false.** The exposed window is fixed at 128 bytes by
+  `MOVESTACKTOP`; it does not grow with the book.
+- **It protected nothing in either environment.** Under the harness the
+  `EXIT_TRAP` store ends the run *on that instruction*, so the ≤124 bytes
+  already written are the whole blast radius. On real hardware `$BFFF` is
+  plain RAM, so the trap is a no-op and an overrunning generator writes past
+  `$2000` unbounded — 128 bytes could never contain it.
+- **What actually protects it is distance, now enforced.** New
+  `TestMoveStackWatermark` samples `MSP` once per executed instruction:
+  worst case **487 of 1,152 slots (42.3%)** across tactical, 3-queen
+  max-mobility and depth-10 endgame searches; it fails at 50%. A comment
+  became a tripwire.
+
+### Instrument work (reusable)
+
+`sprt` gained per-side `BookA`/`BookB`, probed **on device** via
+`AsmBookProbe` (banking the probe's unspent allocation as `ucibridge`
+does); `NoOpening`, because the rig previously forced a 6-ply prefix
+straight through the book and `Run` now *refuses* a book match without it;
+and `ABookMoves`/`BBookMoves` printed **before** the Elo, so a match that
+engaged no book cannot masquerade as a null.
+
+Gates: `TestBookProbeParityASMvsGo` (264 → 585 positions), weighted
+distribution, out-of-book, e2e driver, bridge, on-device UI name walk,
+`TestCompiledMatchesGeneratedLines`, `TestBlobSize`,
+`TestMoveStackWatermark`, full `go test ./...` green. No engine core source
+touched.
+
 ## 2026-07-28 — the opening book, MEASURED and then WIDENED: coverage 4/20 → 20/20 first moves, and no Elo to show for it
 
 The last strength lever on the list, deferred until everything else was

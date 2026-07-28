@@ -3,6 +3,82 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-28 — ★ MILESTONE: 8fish is PLAYABLE on an Apple IIe (asm/m8.s), and it cost the engine ZERO bytes
+
+The on-device UI is built and a human can sit down and play: boot, choose a
+side, see the board, type moves, the engine replies, and the game reaches a
+real termination.
+
+**Evidence, not assertion.** A complete **75-ply game ending in checkmate**,
+driven keystroke-by-keystroke through the UI's own keyboard under the
+harness (goapple2 IIe memory + go6502), refereed ply-by-ply by `refchess` —
+127.2 s of emulated IIe time. A deterministic-opponent variant ended at 88
+plies in a genuine **threefold repetition**, detected by the UI's own
+1,024-byte hash history. `TestTerminations` additionally drives checkmate
+(two ways), stalemate, the 50-move rule and threefold, each asserting the
+resulting screen text.
+
+**Byte budget (measured from label deltas, `TestUIByteBudget`):**
+
+| component | bytes |
+|---|---:|
+| renderer / entropy | 508 / 56 |
+| main loop, position bookkeeping | 111 / 164 |
+| move generation + validation + legality | 333 |
+| game state (mate/stalemate/50/repetition) | 105 |
+| engine turn, limits+margin, ID driver | 147 / 296 / 267 |
+| input+parse, commands, painting, think line | 349 / 230 / 470 / 280 |
+| tables and strings | 888 |
+| **UICODE total** | **4,207** |
+| variables + history + hash history | 256 + 768 + 1,024 |
+| **TOTAL of 8,176 B Language Card** | **6,255 (77%), 1,921 free** |
+
+**It cost the engine nothing: 0 MAIN bytes, 0 TT entries, book unmoved.**
+The Language Card discovery from the design pass is what made that possible.
+Verified structurally, not just by comparison — the merge touched **no engine
+core source at all** (engine.s, search.s, eval.s, board.s, movegen.s, tt.s,
+tables.s, defs.inc, movegenbody.inc all untouched), and `TestMicroAB` passes
+with a fingerprint byte-identical to a clean `git archive HEAD` build (GRAND
+TOTAL CYCLES 3819284672 both sides), `asm/engine.bin` `cmp`-identical.
+
+**Settled decisions honoured:** FEATURES2 on device = FT2_GENDEFER |
+FT2_SOFTCLK (+ FT2_ADAPT for timed levels), deliberately NOT copied from the
+harness config. The budget-octave margin rule is implemented in
+`uimargin`/`uilimits` — octave shift-loop, table read, one 24×8
+shift-and-add, no division — scaling the base and deriving CEILMAX/UNSTCEIL/
+MINSPEND from the scaled value so all five limits share one margin, gated
+against `chesstest.SoftClockMargin` at all 9 levels. No per-move
+"thinking for N seconds" readout; row 14 shows depth/score/best move, which
+are exact.
+
+### Two findings worth keeping
+
+1. **The design's `$0E00` payload address was wrong by construction.**
+   `$0E00-$1FFF` is 4,608 B but the LC code budget is 5,888 B — so a UI that
+   grew into its own budget would have BLOADed straight over the opening book
+   at `$2000`. Moved to `$0900`, which makes the staging area and the budget
+   the same size, so the error cannot recur silently. A latent
+   corrupt-the-book bug that only appears once the UI is big enough.
+2. **Parity has to compare piece-list bytes, not FENs.** The move generator
+   walks the piece list, so a FEN round trip re-slots the pieces and yields a
+   different — equally valid — search tree. That is a real property of the
+   engine, not a test artifact, and anything comparing two positions for
+   tree-identity has to respect it.
+
+### Deferred, with prices (full table in docs/ui-design.md §12.6)
+
+Board flip for a Black human (~40 B) · hi-res board (~1,850 B, fits) ·
+insufficient-material draw (~50 B) · fivefold/75-move (~15 B) · mate distance
+in the think line (~40 B) · FT2_ADAPT's per-game bank (~120 B) · FEN/position
+setup (~250 B) · cursor entry (~200-260 B) · disk save (unpriced).
+
+**★ NOT deferred so much as BLOCKED — real-hardware validation.** The IIe
+model has no keyboard, so the shipping build is proven only to boot, paint,
+and block in `entkey` with the entropy counter spinning. And `ALTCHARSET` is
+not modelled, so inverse lowercase is verified as BYTES against the
+documented IIe encoding, not as pixels. Everything above is measured on an
+emulator; nobody has yet seen 8fish on a real Apple IIe.
+
 ## 2026-07-28 — THE ON-DEVICE UI IS PLAYABLE (8fish, `asm/m8.s`)
 
 The design in `docs/ui-design.md` is built. You can boot it, choose a side,

@@ -48,6 +48,57 @@ UIMFIRST  = MULCNT      ; $DA      loop scratch
 LAYPTR    = PSP0        ; $D2-$D3  16-bit layout-table pointer
 
 ; ---- UI RAM (Language Card, above the UI's own code) ----
+;
+; LC map ($E000-$FFFF; see docs/ui-design.md §2 — the engine runs with
+; $C08B latched, so this is ordinary directly-executable RAM costing the
+; engine ZERO MAIN bytes):
+;
+;   $E000-$F6FF  UICODE segment: code + static data (5,888 B; the link
+;                config caps it here, so an overflow is a link error)
+;   $F700-$F7FF  UI variables and screen-string buffers (this block)
+;   $F800-$FAFF  game history: from / to / flags, one page each
+;   $FB00-$FEFF  game hash history: HASH0-3, one page each
+;   $FF00-$FFEF  free (240 B)
+;   $FFF0-$FFFF  6502 vectors (RAM once LC read is enabled; m8.s writes them)
+M8VARS    = $F700
+UIHCNT    = M8VARS+$00  ; plies played so far
+UILEVEL   = M8VARS+$01  ; 1..9
+UIHUMAN   = M8VARS+$02  ; which colour the human has (0 / COLORMASK)
+UIRESULT  = M8VARS+$03  ; RES_* game-over code, 0 = still playing
+UINLEGAL  = M8VARS+$04  ; legal moves for the side to move (capped at 255)
+UICHK     = M8VARS+$05  ; nonzero: side to move is in check
+UIBLEN    = M8VARS+$06  ; characters in the input line
+UIMFROM   = M8VARS+$07  ; parsed / matched move
+UIMTO     = M8VARS+$08
+UIMPROM   = M8VARS+$09  ; promotion piece type (0 = none, else N/B/R/Q = 2..5)
+UIFFLAGS  = M8VARS+$0A  ; the generator's flags for the matched move
+UIPTRL    = M8VARS+$0B  ; move-list walk cursor (kept OUT of zero page:
+UIPTRH    = M8VARS+$0C  ;  make/unmake clobber most of the engine's ZP)
+UITMPB    = M8VARS+$0D
+UICNT2    = M8VARS+$0E
+UIFOUND   = M8VARS+$0F  ; nonzero: uifind matched
+UISCR0    = M8VARS+$10  ; 16-bit scratch (score formatting, scan bounds)
+UISCR1    = M8VARS+$11
+UIQ0      = M8VARS+$12  ; 16-bit quotient scratch
+UIQ1      = M8VARS+$13
+UIK       = M8VARS+$14  ; soft-clock margin multiplier
+UIACC0    = M8VARS+$15  ; 32-bit shift-and-add multiply accumulator
+UIACC1    = M8VARS+$16
+UIACC2    = M8VARS+$17
+UIACC3    = M8VARS+$18
+UIWIN     = M8VARS+$19  ; winning side for a decisive result (0 / COLORMASK)
+UILSC0    = M8VARS+$1A  ; last completed engine search score (engine POV)
+UILSC1    = M8VARS+$1B
+UIT0      = M8VARS+$1C  ; 24-bit temp for the per-move limit arithmetic
+UIT1      = M8VARS+$1D
+UIT2      = M8VARS+$1E
+UISEEN    = M8VARS+$1F  ; repetition count of the current position
+UIBUF     = M8VARS+$20  ; input line (UIBUFMAX bytes)
+UITHINK   = M8VARS+$30  ; think line: depth / score / best move
+UIMSGB    = M8VARS+$50  ; message row (40 B + terminator)
+UIBOOKB   = M8VARS+$80  ; opening-name row (40 B + terminator)
+                        ; $F7AA-$F7FF free
+
 ; The game history is three PARALLEL 256-byte arrays so a ply index fits in
 ; X with no multiply: 256 plies = 128 full moves (Sargon III's own move list
 ; caps at 127). Takeback replays the game from the start position through
@@ -55,7 +106,27 @@ LAYPTR    = PSP0        ; $D2-$D3  16-bit layout-table pointer
 UIHFROM   = $F800       ; 256 bytes: from-square per ply
 UIHTO     = $F900       ; 256 bytes: to-square per ply
 UIHFLAG   = $FA00       ; 256 bytes: move flags per ply
-UIHCNT    = $FB00       ; plies played so far
+
+; Game hash history: UIHASHn[i] is the position's 32-bit Zobrist hash
+; BEFORE ply i was played, so the CURRENT position is always at index
+; UIHCNT. The engine's own repetition scan works off HASHSTK, which at the
+; root holds nothing — the game history has to live here (design §5.3).
+UIHASH0   = $FB00
+UIHASH1   = $FC00
+UIHASH2   = $FD00
+UIHASH3   = $FE00
+
+UIBUFMAX  = 8           ; longest accepted input line ("e7e8q" + slack)
+
+; Game-over codes (UIRESULT).
+RES_MATE   = 1
+RES_STALE  = 2
+RES_50     = 3
+RES_REP    = 4
+RES_RESIGN = 5
+RES_AGREED = 6
+RES_LONG   = 7
+RES_ERR    = 8
 
 ; ---------------------------------------------------------------
 ; uigotorc: SCRPTR = the text-page-1 address of row A (0-23),

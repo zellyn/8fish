@@ -1,0 +1,1735 @@
+; ---------------------------------------------------------------------------
+; 8fish on-device user interface (docs/ui-design.md).
+;
+; DRIVER CODE, top to bottom. Nothing here is reachable from search / eval /
+; movegen / board: the UI calls INTO the engine at its published entry points
+; (asm/engsyms.inc, generated from asm/engine.lbl by cmd/genengsyms) and the
+; engine never calls back. engine.bin is bit-identical whether or not this
+; file exists, so the engine plays the same chess driven by a human as it
+; does driven by the UCI bridge.
+;
+; WHERE IT LIVES. Language Card RAM, $E000-$FFEF. The engine already latches
+; $C08B at entry and never switches back, so that is ordinary, directly
+; executable, directly addressable RAM in the normal address space — and this
+; project had never used a byte of it. The UI therefore costs the engine
+; ZERO MAIN bytes, zero transposition-table entries, and does not move the
+; opening book.
+;
+; TWO OUTPUT FILES (see m8.cfg):
+;   m8boot.bin  $0800  the run-once copier: latch $C08B, copy the payload
+;                      from $0900 to $E000, install the engine's LC-resident
+;                      aux primitives at $D000, jump to $E000. Both $0800
+;                      (PIECESQ) and $0900-$1FFF (the per-ply arrays and
+;                      MOVESTACK) are engine RAM that is garbage until the
+;                      first search, so this costs nothing permanent either.
+;   m8.bin      $E000  the UI itself.
+;
+; Assemble with -D HARNESSKBD to read the harness input traps instead of the
+; real $C000/$C010 — that is how internal/ui drives a whole game from Go.
+; ---------------------------------------------------------------------------
+
+        .include "defs.inc"
+        .include "book.inc"
+        .include "engsyms.inc"
+
+; Where m8.bin is BLOADed before the copier runs. $0900-$1FFF is 5,888 bytes
+; of engine RAM (the per-ply undo/search arrays, then MOVESTACK) that holds
+; nothing but garbage until the first search — and 5,888 is exactly the code
+; budget m8.cfg caps the UI at, so the payload can never grow into the
+; resident opening book at $2000. ($0800 itself is the copier's own home.)
+UIPAYLOAD = $0900
+
+; Levels 1-4 are fixed depth (BUDGET = 0, the period-honest "search N plies"
+; control that needs no clock at all); 5-9 are timed and run on
+; FT2_SOFTCLK's estimated clock. The split lives in the LVB* table, not in
+; code: a zero budget IS fixed-depth mode to the engine.
+NLEVELS = 9
+
+; ---------------------------------------------------------------------------
+; The $0800 copier. This is the only code that ever runs from MAIN.
+; ---------------------------------------------------------------------------
+        .segment "BOOT"
+
+        .import __UICODE_SIZE__
+
+boot:   ldx #$FF
+        txs
+        lda $C08B               ; LC bank 1, read RAM + write RAM — the same
+        lda $C08B               ;  double read engine.s's entry uses
+        lda #<UIPAYLOAD
+        sta ZPTR
+        lda #>UIPAYLOAD
+        sta ZPTR+1
+        lda #<$E000
+        sta TTPTR
+        lda #>$E000
+        sta TTPTR+1
+        ldx #>(__UICODE_SIZE__ + 255)
+        ldy #0
+btl:    lda (ZPTR),y
+        sta (TTPTR),y
+        iny
+        bne btl
+        inc ZPTR+1
+        inc TTPTR+1
+        dex
+        bne btl
+        ; Install the engine's LC-resident aux-bank primitives at $D000. The
+        ; engine's own $4000 entry does this, and the UI never uses that
+        ; entry — it drives `iterate` directly — so the UI must do it here or
+        ; the first transposition-table probe runs into garbage.
+        ldy #ENG_LCCODE_SIZE-1
+btlc:   lda ENG_LCCODE_LOAD,y
+        sta ENG_LCCODE_RUN,y
+        dey
+        bpl btlc
+        jmp $E000               ; the payload's first three bytes are a jump
+                                ;  to m8main, so the copier is byte-identical
+                                ;  for every build variant of the UI
+
+; ---------------------------------------------------------------------------
+        .segment "UICODE"
+
+        ; $E000 exactly: the payload's entry vector. Keeping it at a fixed
+        ; address (rather than letting the copier jump to a linked symbol)
+        ; means m8boot.bin does not change when the UI does.
+m8entry: jmp m8main
+
+        ; ui.s next: it defines the SCRSTR/INVSTR macros used below, and
+        ; ca65 macros must be defined before they are invoked.
+        .include "ui.s"
+        .include "entropy.inc"
+
+; ===========================================================================
+; Entry and the main loop
+; ===========================================================================
+
+; m8main: cold start. Runs at $E000 with LC RAM read+write enabled and the
+; engine image already resident at $4000.
+m8main:
+        ldx #$FF
+        txs
+        ; The 6502 vectors at $FFFA-$FFFF are RAM once LC read is enabled, so
+        ; they are ours to write and MUST be written: with LC RAM in, a BRK or
+        ; a stray interrupt would otherwise vector through whatever garbage
+        ; powered up there.
+        lda #<m8main
+        sta $FFFA               ; NMI
+        sta $FFFC               ; RESET
+        lda #>m8main
+        sta $FFFB
+        sta $FFFD
+        lda #<m8irq
+        sta $FFFE               ; IRQ / BRK
+        lda #>m8irq
+        sta $FFFF
+        ; ON-DEVICE FEATURE CONFIGURATION (docs/results.md 2026-07-27).
+        ; FT2_SOFTCLK is what makes budget mode run at all on a machine with
+        ; no readable clock; the harness deliberately leaves it OFF because
+        ; it has a real counter, so this must NOT be copied from
+        ; ucibridge.runEngine.
+        lda #$1F                ; all search + eval features
+        sta FEATURES
+        lda #FT2_GENDEFER|FT2_SOFTCLK
+        sta FEATURES2
+        lda #4
+        sta UILEVEL
+        lda #0
+        sta UIHUMAN             ; the human plays White by default
+        jsr m8new
+
+; The main loop. Every position change goes through uisync, and every
+; iteration repaints the WHOLE screen: a full 40x24 repaint is 23,659 cycles
+; (measured, internal/ui TestRenderCost) = 0.1% of a 30-second move, so
+; partial repaints — and the entire class of incremental-update bugs — are
+; designed out of existence.
+mloop:  jsr uisync
+        jsr uipaint
+        lda UIRESULT
+        bne mcmd                ; game over: commands only
+        jsr uimyturn
+        bcc mengine
+mcmd:   jsr uiread
+        jsr uidispatch
+        jmp mloop
+mengine:
+        jsr m8engine
+        jmp mloop
+
+m8irq:  rti
+
+; uimyturn: C=1 if the human is to move — either the side to move is his, or
+; the UI is in two-player mode (UIHUMAN = $FF), where it referees a game
+; between two people and never searches.
+uimyturn:
+        lda UIHUMAN
+        cmp #$FF
+        beq umtyes
+        cmp SIDE
+        bne umtno
+umtyes: sec
+        rts
+umtno:  clc
+        rts
+
+; uiwhoidx: A = 0 (human is White), 1 (Black) or 2 (two players).
+uiwhoidx:
+        lda UIHUMAN
+        cmp #$FF
+        beq uwi2
+        lsr
+        lsr
+        lsr                     ; 0 -> 0, COLORMASK -> 1
+        rts
+uwi2:   lda #2
+        rts
+
+; ===========================================================================
+; Position bookkeeping
+; ===========================================================================
+
+; uistartpos: install the standard starting position. Board, piece lists,
+; side, castling rights, ep square and the 50-move clock; then evalinit
+; rebuilds the accumulators, PHASE, the pawn-file bitmasks and HASH0-3.
+; Does NOT touch the game history (takeback replays through it).
+uistartpos:
+        lda #0
+        ldx #127
+uspc:   sta BOARD,x             ; zp,x: BOARD = $40, so $40..$BF
+        dex
+        bpl uspc
+        ldx #31
+uspp:   lda STSQ,x
+        sta PIECESQ,x
+        tay
+        lda STPC,x
+        sta a:BOARD,y
+        dex
+        bpl uspp
+        lda #0
+        sta SIDE
+        sta HALFMOVE
+        sta PLY
+        sta HVALID
+        sta ABORT
+        lda #CR_WK|CR_WQ|CR_BK|CR_BQ
+        sta CASTLE
+        lda #NOSQ
+        sta EPSQ
+        jmp ENG_evalinit
+
+; m8new: brand new game.
+m8new:  jsr uistartpos
+        lda #0
+        sta UIHCNT
+        sta UIRESULT
+        sta CUROPENING
+        sta UIBOOKB
+        sta UIMSGB
+        sta UITHINK
+        sta UILSC0
+        sta UILSC1
+        jmp uipushhash          ; the start position is hash-history entry 0
+
+; uipushhash: record HASH0-3 as the hash of the position before ply UIHCNT.
+uipushhash:
+        ldx UIHCNT
+        lda HASH0
+        sta UIHASH0,x
+        lda HASH1
+        sta UIHASH1,x
+        lda HASH2
+        sta UIHASH2,x
+        lda HASH3
+        sta UIHASH3,x
+        rts
+
+; uiplay: load the staged move (UIMFROM/UIMTO/UIFFLAGS) into the engine's
+; make inputs. Staged in UI RAM rather than left in FROM/TO/MVFLAGS because
+; make and unmake own those.
+uiplay: lda UIMFROM
+        sta FROM
+        lda UIMTO
+        sta TO
+        lda UIFFLAGS
+        sta MVFLAGS
+        rts
+
+; uiapply: commit the staged move to the game. Appends it to the history,
+; makes it at PLY 0, re-derives the position state, and pushes the new hash.
+uiapply:
+        jsr uiplay
+        ldx UIHCNT
+        lda FROM
+        sta UIHFROM,x
+        lda TO
+        sta UIHTO,x
+        lda MVFLAGS
+        sta UIHFLAG,x
+        lda #0
+        sta PLY
+        sta HVALID
+        jsr ENG_make            ; PLY -> 1
+        lda #0
+        sta PLY
+        inc UIHCNT
+        jsr ENG_evalinit
+        jmp uipushhash
+
+; ===========================================================================
+; Move generation, validation and legality — all borrowed from the engine.
+;
+; The UI contains NO chess rules. Castling, en passant and promotion are
+; free because the generator already emits them as ordinary list entries,
+; and "is this move legal" is the engine's own test, lifted verbatim from
+; search.s sdomove.
+; ===========================================================================
+
+; uigen: generate the side to move's pseudo-legal moves at ply 0 and point
+; the walk cursor at the list base.
+uigen:  lda #0
+        sta PLY
+        sta HVALID
+        lda #<MOVESTACK
+        sta MSP
+        lda #>MOVESTACK
+        sta MSP+1
+        jsr ENG_gennodef
+        lda PLYBASELO
+        sta UIPTRL
+        lda PLYBASEHI
+        sta UIPTRH
+        rts
+
+; uinext: fetch the next list entry into FROM/TO/MVFLAGS and advance the
+; cursor. C=1 = a move was fetched, C=0 = the list is exhausted.
+; A list entry is four bytes: tier, from, to, flags.
+uinext: lda UIPTRL
+        cmp PLYENDLO
+        bne unget
+        lda UIPTRH
+        cmp PLYENDHI
+        bne unget
+        clc
+        rts
+unget:  lda UIPTRL
+        sta T0
+        lda UIPTRH
+        sta T0+1
+        ldy #1
+        lda (T0),y
+        sta FROM
+        iny
+        lda (T0),y
+        sta TO
+        iny
+        lda (T0),y
+        sta MVFLAGS
+        lda UIPTRL
+        clc
+        adc #4
+        sta UIPTRL
+        bcc :+
+        inc UIPTRH
+:       sec
+        rts
+
+; uitrylegal: make FROM/TO/MVFLAGS, run the engine's own legality test, then
+; unmake unconditionally. C=1 = legal. The test is search.s sdomove's full
+; path: after make, the side that just moved must not have left its king
+; attacked.
+uitrylegal:
+        lda #0
+        sta PLY
+        jsr ENG_make            ; PLY -> 1; SIDE is now the opponent's
+        lda SIDE
+        sta ATSIDE
+        eor #COLORMASK
+        asl
+        tay
+        lda PIECESQ,y           ; the mover's king
+        sta ATSQ
+        jsr ENG_attacked        ; C=1 -> the mover left his king attacked
+        lda #0
+        rol                     ; A = 1 if illegal
+        sta UITMPB
+        jsr ENG_unmake
+        lda UITMPB
+        eor #1
+        lsr                     ; C = 1 if legal
+        rts
+
+; uilegals: UINLEGAL = how many legal moves the side to move has, saturating
+; at 255. Zero plus in check is checkmate; zero and not in check is
+; stalemate. Costs one generate plus one make/unmake per pseudo-legal move —
+; of order 20,000 cycles, against a move that takes millions.
+uilegals:
+        lda #0
+        sta UINLEGAL
+        jsr uigen
+ulgl:   jsr uinext
+        bcc ulgx
+        jsr uitrylegal
+        bcc ulgl
+        ldx UINLEGAL
+        inx
+        beq ulgl                ; saturate rather than wrap
+        stx UINLEGAL
+        bne ulgl
+ulgx:   rts
+
+; uifind: look for UIMFROM/UIMTO (and, for a promotion, UIMPROM) in the
+; generated list. On a match UIFOUND is nonzero and UIFFLAGS holds the
+; GENERATOR's flags, so castling and en passant carry FL_CASTLE / FL_EP
+; without the UI knowing what those are.
+uifind: lda #0
+        sta UIFOUND
+        jsr uigen
+uffl:   jsr uinext
+        bcc uffx
+        lda FROM
+        cmp UIMFROM
+        bne uffl
+        lda TO
+        cmp UIMTO
+        bne uffl
+        lda MVFLAGS
+        and #FL_PROMO
+        beq uffhit              ; not a promotion: from/to is unique
+        cmp UIMPROM
+        bne uffl                ; a different promotion piece
+uffhit: lda MVFLAGS
+        sta UIFFLAGS
+        lda #1
+        sta UIFOUND
+uffx:   rts
+
+; uipromoq: C=1 if UIMFROM/UIMTO names a promotion (so the UI must ask which
+; piece). Only called when the typed move had no fifth character.
+uipromoq:
+        jsr uigen
+upql:   jsr uinext
+        bcc upqx
+        lda FROM
+        cmp UIMFROM
+        bne upql
+        lda TO
+        cmp UIMTO
+        bne upql
+        lda MVFLAGS
+        and #FL_PROMO
+        beq upql
+        sec
+        rts
+upqx:   clc
+        rts
+
+; uireps: UISEEN = how many times the CURRENT position has occurred earlier
+; in the game. Two prior occurrences is a threefold repetition. Only
+; positions within the last HALFMOVE plies can repeat, and only every second
+; ply has the same side to move.
+uireps: lda #0
+        sta UISEEN
+        lda UIHCNT
+        sec
+        sbc #2
+        bcc urpx
+        sta UITMPB              ; scan index
+        lda UIHCNT
+        sec
+        sbc HALFMOVE
+        bcs :+
+        lda #0
+:       sta UISCR0              ; lower bound
+urpl:   lda UITMPB
+        cmp UISCR0
+        bcc urpx
+        ldx UITMPB
+        ldy UIHCNT
+        lda UIHASH0,x
+        cmp UIHASH0,y
+        bne urpn
+        lda UIHASH1,x
+        cmp UIHASH1,y
+        bne urpn
+        lda UIHASH2,x
+        cmp UIHASH2,y
+        bne urpn
+        lda UIHASH3,x
+        cmp UIHASH3,y
+        bne urpn
+        inc UISEEN
+urpn:   lda UITMPB
+        sec
+        sbc #2
+        bcc urpx
+        sta UITMPB
+        jmp urpl
+urpx:   rts
+
+; uisync: re-derive everything that depends on the position, and decide
+; whether the game is over. Called once per turn, before painting.
+uisync: lda #0
+        sta PLY
+        sta HVALID
+        sta ABORT
+        jsr ENG_evalinit
+        jsr ENG_curincheck
+        lda #0
+        rol
+        sta UICHK
+        jsr uilegals
+        lda UIRESULT
+        cmp #RES_RESIGN         ; a resignation or an agreed draw is a
+        bcs usyx                ;  DECISION, not a position property
+        lda #0
+        sta UIRESULT
+        lda UINLEGAL
+        bne usymv
+        lda SIDE                ; mated / stalemated: the side to move loses
+        eor #COLORMASK
+        sta UIWIN
+        lda UICHK
+        beq usysm
+        lda #RES_MATE
+        sta UIRESULT
+        rts
+usysm:  lda #RES_STALE
+        sta UIRESULT
+        rts
+usymv:  lda HALFMOVE
+        cmp #100
+        bcc :+
+        lda #RES_50
+        sta UIRESULT
+        rts
+:       jsr uireps
+        lda UISEEN
+        cmp #2
+        bcc :+
+        lda #RES_REP
+        sta UIRESULT
+        rts
+:       lda UIHCNT              ; the history arrays are one page each
+        cmp #250
+        bcc usyx
+        lda #RES_LONG
+        sta UIRESULT
+usyx:   rts
+
+; ===========================================================================
+; The engine's turn
+; ===========================================================================
+
+m8engine:
+        lda #CHKROW             ; a static "thinking" marker; the live one is
+        ldx #0                  ;  the between-iterations readout on row 14
+        jsr uigotorc
+        lda #<s_thinking
+        ldx #>s_thinking
+        jsr uiputs
+        jsr entseed             ; SEED = the collected keystroke entropy
+        jsr uibookrnd           ; BOOKRND likewise (book weighted pick)
+        lda #0
+        sta PLY
+        sta HVALID
+        sta ABORT
+        jsr ENG_evalinit        ; root HASH0-3 for the probe
+        jsr ENG_bookprobe       ; C=1 -> BESTFROM/TO/FLAGS + CUROPENING
+        bcc mesearch
+        jsr uibookname
+        lda #0
+        sta UITHINK             ; a book move did no searching: the previous
+        jmp meapply             ;  move's depth/score readout would be a lie
+mesearch:
+        lda #0
+        sta UIBOOKB             ; out of book: drop the opening line
+        jsr uilimits
+        jsr uidrive
+        lda SCORE
+        sta UILSC0
+        lda SCORE+1
+        sta UILSC1
+meapply:
+        ; Validate the engine's own move against the generator before playing
+        ; it. The search always returns a legal move and the book is keyed on
+        ; a 32-bit hash, so this never fires — but "never corrupt the
+        ; position" is cheaper to guarantee than to debug, and one generate
+        ; plus one make/unmake is invisible next to a search.
+        lda BESTFROM
+        sta UIMFROM
+        lda BESTTO
+        sta UIMTO
+        lda BESTFLAGS
+        and #FL_PROMO
+        sta UIMPROM
+        jsr uifind
+        lda UIFOUND
+        beq mebad
+        jsr uiplay
+        jsr uitrylegal
+        bcc mebad
+        jmp uiapply
+mebad:  lda #RES_ERR
+        sta UIRESULT
+        lda #<m_enginebad
+        ldx #>m_enginebad
+        jmp uisetmsg
+
+; uibookrnd: manufacture the book's 32-bit weighted-pick random from the
+; keystroke entropy collector — the only unpredictable quantity an Apple IIe
+; offers (asm/entropy.inc).
+uibookrnd:
+        lda ENTROPY
+        sta BOOKRND
+        lda ENTCNT
+        eor ENTROPY
+        sta BOOKRND+1
+        lda ENTCNT+1
+        sta BOOKRND+2
+        lda ENTROPY
+        eor ENTCNT+1
+        sta BOOKRND+3
+        rts
+
+; ---------------------------------------------------------------------------
+; uilimits: install this move's search limits from the level.
+;
+; ★ THE SAFETY-MARGIN RULE (docs/ui-design.md §6.2, defs.inc SOFTMARGIN,
+; internal/chesstest SoftClockMargin). The engine's FT2_SOFTCLK cost table
+; holds the RAW measured per-node cost; the deliberate safety bias lives on
+; the BUDGET side, because every use of the estimate is `estimate >= limit`
+; and scaling the limits is free — they are written once per move, off the
+; hot path. Indexed by the OCTAVE of the budget (the position of its top set
+; bit in 256-cycle units):
+;
+;       <= ~8 s   margin 127%   ->  BUDGET * 202 >> 8
+;       ~8-16 s   margin 113%   ->  BUDGET * 227 >> 8
+;       >  ~16 s  margin 100%   ->  unchanged
+;
+; A shift loop for the top set bit, a table read, and one 24x8
+; shift-and-add — once per move, no division anywhere.
+;
+; It must scale ALL FIVE limits, not just BUDGET: the engine compares its
+; estimate against BUDGET, ABORTL, CEILMAX, UNSTCEIL and MINSPEND. ABORTL is
+; derived on-device from BUDGET (or from CEILMAX under FT2_ADAPT) so it
+; inherits the scaling; CEILMAX / UNSTCEIL / MINSPEND are derived here from
+; the ALREADY-SCALED base, which is what makes all five share ONE margin.
+; Deriving each from its own octave would let CEILMAX — up to 4x base — pick
+; a looser margin and quietly widen the adaptive ceiling.
+; ---------------------------------------------------------------------------
+uilimits:
+        ldx UILEVEL
+        dex
+        cpx #NLEVELS
+        bcc :+
+        ldx #3                  ; defensive: an out-of-range level
+:       lda LVDEPTH,x
+        sta MAXDEPTH
+        lda LVB0,x
+        sta BUDGET0
+        lda LVB1,x
+        sta BUDGET1
+        lda LVB2,x
+        sta BUDGET2
+        jsr uimargin
+        lda BUDGET0
+        ora BUDGET1
+        ora BUDGET2
+        bne ultimed
+        lda FEATURES2           ; fixed-depth level: no clock is read at all
+        and #255-FT2_ADAPT      ; single bit, so this is ~FT2_ADAPT
+        sta FEATURES2
+        rts
+ultimed:
+        ; CEILMAX = 4*base, UNSTCEIL = 3*base, MINSPEND = base/4, all from
+        ; the scaled base (mirroring chesstest.SetAdaptive with no bank).
+        lda BUDGET0
+        sta UIT0
+        lda BUDGET1
+        sta UIT1
+        lda BUDGET2
+        sta UIT2
+        asl UIT0                ; 2*base
+        rol UIT1
+        rol UIT2
+        lda UIT0                ; 3*base -> UNSTCEIL
+        clc
+        adc BUDGET0
+        sta UNSTCEIL0
+        lda UIT1
+        adc BUDGET1
+        sta UNSTCEIL1
+        lda UIT2
+        adc BUDGET2
+        sta UNSTCEIL2
+        asl UIT0                ; 4*base -> CEILMAX
+        rol UIT1
+        rol UIT2
+        lda UIT0
+        sta CEILMAX0
+        lda UIT1
+        sta CEILMAX1
+        lda UIT2
+        sta CEILMAX2
+        lda BUDGET2             ; base/4 -> MINSPEND
+        lsr
+        sta MINSPEND2
+        lda BUDGET1
+        ror
+        sta MINSPEND1
+        lda BUDGET0
+        ror
+        sta MINSPEND0
+        lsr MINSPEND2
+        ror MINSPEND1
+        ror MINSPEND0
+        lda FEATURES2
+        ora #FT2_ADAPT
+        sta FEATURES2
+        rts
+
+; uimargin: BUDGET *= KTAB[octave(BUDGET)] / 256, in place. A KTAB entry of
+; 0 means "margin 100%, leave it alone".
+uimargin:
+        lda BUDGET0
+        ora BUDGET1
+        ora BUDGET2
+        bne :+
+        rts                     ; fixed depth: nothing to scale
+:       lda BUDGET0             ; find the top set bit by shifting a copy down
+        sta MUL0
+        lda BUDGET1
+        sta MUL1
+        lda BUDGET2
+        sta MUL2
+        ldx #$FF
+umsh:   inx
+        lsr MUL2
+        ror MUL1
+        ror MUL0
+        lda MUL0
+        ora MUL1
+        ora MUL2
+        bne umsh
+        cpx #24
+        bcc :+
+        ldx #23
+:       lda KTAB,x
+        bne :+
+        rts                     ; 100%: unchanged
+:       sta UIK
+        lda #0
+        sta UIACC0
+        sta UIACC1
+        sta UIACC2
+        sta UIACC3
+        ldy #8                  ; 24 x 8 shift-and-add, MSB of K first
+umml:   asl UIACC0
+        rol UIACC1
+        rol UIACC2
+        rol UIACC3
+        asl UIK
+        bcc ummn
+        clc
+        lda UIACC0
+        adc BUDGET0
+        sta UIACC0
+        lda UIACC1
+        adc BUDGET1
+        sta UIACC1
+        lda UIACC2
+        adc BUDGET2
+        sta UIACC2
+        lda UIACC3
+        adc #0
+        sta UIACC3
+ummn:   dey
+        bne umml
+        lda UIACC1              ; >> 8: K <= 255 so the result never exceeds
+        sta BUDGET0             ;  the input and 24 bits always suffice
+        lda UIACC2
+        sta BUDGET1
+        lda UIACC3
+        sta BUDGET2
+        rts
+
+; ---------------------------------------------------------------------------
+; uidrive: the UI's own iterative-deepening driver — a port of engine.s's
+; entry setup plus idloop, living entirely in the Language Card.
+;
+; It exists so the screen can show the search getting deeper WITHOUT touching
+; the hot path: search.s's only periodic hook is checkclock, which is on the
+; hot path and is not touched. Painting between completed ID iterations costs
+; ~2,000 cycles per iteration against a search of order 10^7, and the tree
+; the engine explores is byte-identical to the one the UCI bridge gets.
+; ---------------------------------------------------------------------------
+uidrive:
+        lda #0
+        sta PSP0
+        sta PSP1
+        sta ABORT
+        sta NODECNT
+        sta PLY
+        sta HVALID
+        jsr ENG_evalinit
+        lda #NOSQ
+        sta BESTFROM
+        ; FT2_SOFTCLK arming. engine.s's ENTRY block does this, and a driver
+        ; that jumps straight to `iterate` skips it (design §6.2's integration
+        ; note): patch ccsite's operand over to the accumulating entry point
+        ; and prime the estimate with the 128 nodes that run before the first
+        ; poll. PHASE is live here — evalinit just built it.
+        lda FEATURES2
+        and #FT2_SOFTCLK
+        beq udnosc
+        lda #<ENG_checkclocks
+        sta ENG_ccsite+1
+        lda #>ENG_checkclocks
+        sta ENG_ccsite+2
+        lda #0
+        sta CLOCK_TRAP+2
+        lda PHASE
+        cmp #NPCOST
+        bcc :+
+        lda #NPCOST-1
+:       tax
+        lda ENG_PCOSTLO,x
+        sta CLOCK_TRAP
+        lda ENG_PCOSTHI,x
+        sta CLOCK_TRAP+1
+udnosc:
+        lda MAXDEPTH
+        sta MAXCAP
+        lda BUDGET0             ; hard-abort limit = 2x budget
+        asl
+        sta ABORTL0
+        lda BUDGET1
+        rol
+        sta ABORTL1
+        lda BUDGET2
+        rol
+        sta ABORTL2
+        lda FEATURES2
+        and #FT2_ADAPT
+        beq :+
+        jsr ENG_adaptaborthi    ; ABORTL = 2*CEILMAX instead
+:       lda BUDGET0
+        ora BUDGET1
+        ora BUDGET2
+        bne udid
+        lda MAXCAP              ; fixed-depth mode: one iteration at the cap
+        sta CURDEPTH
+        jsr ENG_iterate
+        jmp uithinkln
+udid:   lda #1
+        sta CURDEPTH
+udloop: lda CLOCK_TRAP          ; iteration start (latched 24-bit)
+        sta ITSTART0
+        lda CLOCK_TRAP+1
+        sta ITSTART1
+        lda CLOCK_TRAP+2
+        sta ITSTART2
+        jsr ENG_iterate
+        lda ABORT
+        beq udok
+        ; Aborted mid-iteration: a partial iteration's "best" is only the
+        ; first root move it happened to search, so prefer the last COMPLETED
+        ; iteration's move, score and depth.
+        lda PREVFROM
+        cmp #NOSQ
+        beq udrep
+        sta BESTFROM
+        lda PREVTO
+        sta BESTTO
+        lda PREVFLAGS
+        sta BESTFLAGS
+        lda PREVSC0
+        sta SCORE
+        lda PREVSC1
+        sta SCORE+1
+        dec CURDEPTH            ; iteration 1 never aborts, so >= 1
+udrep:  jmp uithinkln
+udok:   jsr uithinkln           ; paint the completed iteration
+        lda SCORE+1             ; a winning mate is exact: deepening can't
+        bmi :+                  ;  improve it
+        cmp #MATEZONEHI
+        bcs udx
+:       jsr ENG_adaptmaybe      ; FT2_ADAPT: raise the ceiling or easy-stop
+        bne udx
+        lda CLOCK_TRAP          ; predictive gate: cost = now - ITSTART,
+        sec                     ;  est next = 2x cost
+        sbc ITSTART0
+        sta T0
+        lda CLOCK_TRAP+1
+        sbc ITSTART1
+        sta T1
+        lda CLOCK_TRAP+2
+        sbc ITSTART2
+        asl T0
+        rol T1
+        rol
+        bcs udx                 ; overflow: nowhere near fitting
+        sta T2
+        lda CLOCK_TRAP
+        clc
+        adc T0
+        sta T0
+        lda CLOCK_TRAP+1
+        adc T1
+        sta T1
+        lda CLOCK_TRAP+2
+        adc T2
+        bcs udx
+        sta T2
+        lda T0                  ; start it only if now + est fits the budget
+        cmp BUDGET0
+        lda T1
+        sbc BUDGET1
+        lda T2
+        sbc BUDGET2
+        bcs udx
+        inc CURDEPTH
+        lda CURDEPTH
+        cmp MAXCAP
+        beq udlj                ; continue while CURDEPTH <= MAXCAP
+        bcs udx
+udlj:   jmp udloop
+udx:    rts
+
+; ===========================================================================
+; Input
+; ===========================================================================
+
+; uiread: read one line into UIBUF. EVERY key the UI reads goes through
+; entkey, so every keystroke folds its arrival time into the entropy
+; accumulator — that collector is the shipped engine's only source of
+; randomness on a machine with no clock, and a plain keyboard poll here
+; would silently destroy it.
+uiread: lda #0
+        sta UIBLEN
+urdl:   jsr uiprompt
+        jsr entkey
+        cmp #$0D                ; RETURN
+        beq urdx
+        cmp #$08                ; left arrow
+        beq urdbs
+        cmp #$7F                ; DELETE
+        beq urdbs
+        cmp #$20
+        bcc urdl                ; other control keys: ignore
+        cmp #$7B
+        bcs urdl
+        jsr uilower
+        ldx UIBLEN
+        cpx #UIBUFMAX
+        bcs urdl
+        sta UIBUF,x
+        inc UIBLEN
+        bne urdl
+urdbs:  lda UIBLEN
+        beq urdl
+        dec UIBLEN
+        jmp urdl
+urdx:   rts
+
+; uilower: fold an ASCII letter to lower case, so an Apple IIe with CAPS
+; LOCK down types the same moves as one without it.
+uilower:
+        cmp #'A'
+        bcc ulwx
+        cmp #'Z'+1
+        bcs ulwx
+        ora #$20
+ulwx:   rts
+
+; uidispatch: act on the line just read. Files are a-h, so a bare letter is
+; unambiguously a command: a ONE-character line is a command, a four- or
+; five-character line is a move, anything else is a typo.
+uidispatch:
+        lda UIBLEN
+        beq udpx
+        cmp #1
+        beq udpcmd
+        cmp #4
+        beq udpmove
+        cmp #5
+        beq udpmove
+        lda #<m_badin
+        ldx #>m_badin
+        jmp uisetmsg
+udpx:   rts
+
+udpcmd: lda UIBUF
+        ldx #0
+udpcl:  cmp cmdkeys,x
+        beq udpgo
+        inx
+        cpx #NCMDS
+        bcc udpcl
+        lda #<m_badcmd
+        ldx #>m_badcmd
+        jmp uisetmsg
+udpgo:  lda cmdhi,x
+        pha
+        lda cmdlo,x
+        pha
+        rts                     ; rts-dispatch (addresses stored minus one)
+
+; ---- move entry ----
+udpmove:
+        lda UIRESULT
+        beq :+
+        lda #<m_over
+        ldx #>m_over
+        jmp uisetmsg
+:       jsr uimyturn
+        bcs :+
+        lda #<m_notyours
+        ldx #>m_notyours
+        jmp uisetmsg
+:       jsr uiparse
+        bcs :+
+        lda #<m_badin
+        ldx #>m_badin
+        jmp uisetmsg
+:       lda UIMPROM
+        bne :+
+        jsr uipromoq            ; a promotion typed without its piece
+        bcc :+
+        jsr uiaskpromo
+        bcs :+
+        rts                     ; cancelled: nothing typed, nothing played
+:       jsr uifind
+        lda UIFOUND
+        beq udpill
+        jsr uiplay
+        jsr uitrylegal
+        bcc udpill
+        jsr uiapply
+        jmp uiclrmsg
+udpill: lda #<m_illegal
+        ldx #>m_illegal
+        jmp uisetmsg
+
+; uiparse: UIBUF -> UIMFROM / UIMTO / UIMPROM. C=1 on success.
+uiparse:
+        lda #0
+        sta UIMPROM
+        ldx #0
+        jsr upsq
+        bcc upfail
+        sta UIMFROM
+        ldx #2
+        jsr upsq
+        bcc upfail
+        sta UIMTO
+        lda UIBLEN
+        cmp #5
+        bne upok
+        lda UIBUF+4
+        jsr upromo
+        bcc upfail
+upok:   sec
+        rts
+upfail: clc
+        rts
+
+; upsq: two characters at UIBUF+X -> a 0x88 square in A. C=1 on success.
+upsq:   lda UIBUF,x
+        sec
+        sbc #'a'
+        cmp #8
+        bcs upsf
+        sta UITMPB
+        lda UIBUF+1,x
+        sec
+        sbc #'1'
+        cmp #8
+        bcs upsf
+        asl
+        asl
+        asl
+        asl
+        ora UITMPB
+        sec
+        rts
+upsf:   clc
+        rts
+
+; upromo: A = a promotion letter -> UIMPROM (piece type 2..5). C=1 on success.
+upromo: ldy #0
+uprl:   cmp promoltr,y
+        beq uprh
+        iny
+        cpy #4
+        bcc uprl
+        clc
+        rts
+uprh:   tya
+        clc
+        adc #KNIGHT
+        sta UIMPROM
+        sec
+        rts
+
+; uiaskpromo: the fifth character was omitted on a promotion. Ask, and let
+; RETURN or ESC back out — a prompt with no way out is a trap. C=1 = a piece
+; was chosen (in UIMPROM), C=0 = cancelled.
+uiaskpromo:
+        lda #<m_promo
+        ldx #>m_promo
+        jsr uisetmsg
+        jsr uipaintmsg
+uapl:   jsr entkey
+        cmp #$0D
+        beq uapcan
+        cmp #$1B
+        beq uapcan
+        jsr uilower
+        jsr upromo
+        bcc uapl
+        jsr uiclrmsg
+        sec
+        rts
+uapcan: jsr uiclrmsg
+        clc
+        rts
+
+; ===========================================================================
+; Commands
+; ===========================================================================
+
+cmd_new:
+        jsr m8new
+        jmp uiclrmsg
+
+cmd_take:
+        lda UIHCNT
+        bne :+
+        lda #<m_noback
+        ldx #>m_noback
+        jmp uisetmsg
+:       lda #0                  ; a takeback un-ends a finished game
+        sta UIRESULT
+        lda SIDE                ; back to the human's own last decision:
+        cmp UIHUMAN             ;  two plies if the engine has already
+        bne ctone               ;  replied, one if it is still thinking
+        lda UIHCNT
+        cmp #2
+        bcc ctone
+        sec
+        sbc #2
+        jmp ctgo
+ctone:  lda UIHCNT
+        sec
+        sbc #1
+ctgo:   sta UITMPB
+        jsr uistartpos
+        lda #0
+        sta UIHCNT
+        jsr uipushhash
+ctrl:   lda UIHCNT              ; replay, rather than keeping an undo record:
+        cmp UITMPB              ;  80 bytes of code instead of a per-ply
+        bcs ctdone              ;  journal, and the same array the move panel
+        tax                     ;  already draws
+        lda UIHFROM,x
+        sta UIMFROM
+        lda UIHTO,x
+        sta UIMTO
+        lda UIHFLAG,x
+        sta UIFFLAGS
+        jsr uiapply
+        jmp ctrl
+ctdone: jmp uiclrmsg
+
+cmd_resign:
+        lda UIRESULT
+        bne :+
+        lda UIHUMAN             ; the human resigns: the engine wins
+        eor #COLORMASK
+        sta UIWIN
+        lda #RES_RESIGN
+        sta UIRESULT
+:       rts
+
+; cmd_draw: offer a draw. The engine accepts if its last completed search
+; said it was materially worse off; otherwise it declines. (A threefold
+; repetition or the 50-move rule is adjudicated automatically in uisync, so
+; this is a genuine offer, not a claim.)
+cmd_draw:
+        lda UIRESULT
+        beq :+
+        rts                     ; already over
+:       lda UILSC0              ; accept iff the engine's last completed
+        cmp #$6A                ;  search said it was worse than -150 cp
+        lda UILSC1              ;  (16-bit signed compare against $FF6A)
+        sbc #$FF
+        bvc :+
+        eor #$80
+:       bmi cdyes
+cdno:   lda #<m_drawno
+        ldx #>m_drawno
+        jmp uisetmsg
+cdyes:  lda #RES_AGREED
+        sta UIRESULT
+        rts
+
+cmd_level:
+        lda #<m_level
+        ldx #>m_level
+        jsr uisetmsg
+        jsr uipaintmsg
+cllk:   jsr entkey
+        cmp #$0D                ; RETURN or ESC backs out
+        beq cllx
+        cmp #$1B
+        beq cllx
+        sec
+        sbc #'1'
+        cmp #NLEVELS
+        bcs cllk
+        clc
+        adc #1
+        sta UILEVEL
+cllx:   jmp uiclrmsg
+
+; cmd_swap: cycle WHITE -> BLACK -> TWO PLAYERS -> WHITE. Two-player mode is
+; the referee mode: the UI validates and displays but never searches, which
+; is what you want for playing a friend, replaying a game, or setting up a
+; position by hand.
+cmd_swap:
+        lda UIHUMAN
+        beq cswb
+        cmp #COLORMASK
+        beq cswt
+        lda #0
+        beq cswset
+cswb:   lda #COLORMASK
+        bne cswset
+cswt:   lda #$FF
+cswset: sta UIHUMAN
+        jmp uiclrmsg
+
+cmd_help:
+        lda #<m_help2
+        ldx #>m_help2
+        jmp uisetmsg
+
+; cmd_quit: on real hardware $BFFF is plain RAM, so this stores a byte and
+; starts a new game; under the harness it is the exit trap and ends the run.
+cmd_quit:
+        lda #0
+        sta EXIT_TRAP
+        jmp m8new
+
+; ===========================================================================
+; Painting
+; ===========================================================================
+
+uipaint:
+        jsr uicls
+        jsr uititle
+        jsr uicoords
+        jsr uimoves
+        jsr uiboard
+        jsr uistatrow
+        jsr uichkrow
+        lda #THINKROW
+        ldx #0
+        jsr uigotorc
+        lda #<UITHINK
+        ldx #>UITHINK
+        jsr uiputs
+        jsr uipaintbook
+        jsr uipaintmsg
+        lda #HELPROW
+        ldx #0
+        jsr uigotorc
+        lda #<s_help1
+        ldx #>s_help1
+        jsr uiputs
+        lda #HELPROW+1
+        ldx #0
+        jsr uigotorc
+        lda #<s_help2
+        ldx #>s_help2
+        jmp uiputs
+
+uipaintmsg:
+        lda #MSGROW
+        ldx #0
+        jsr uigotorc
+        lda #<UIMSGB
+        ldx #>UIMSGB
+        jmp uiputs
+
+uipaintbook:
+        lda #BOOKROW
+        ldx #0
+        jsr uigotorc
+        lda #<UIBOOKB
+        ldx #>UIBOOKB
+        jmp uiputs
+
+; uititle: the inverse status bar, with the level digit and the human's
+; colour poked into the fixed template.
+uititle:
+        lda #0
+        ldx #0
+        jsr uigotorc
+        lda #<s_title
+        ldx #>s_title
+        jsr uiputs
+        lda UILEVEL
+        clc
+        adc #'0'
+        and #$3F                ; inverse video
+        ldy #TITLELVL
+        sta (SCRPTR),y
+        jsr uiwhoidx
+        tax
+        lda WHOOFF,x
+        tax
+        ldy #TITLEWHO
+utcl:   lda s_who,x
+        sta (SCRPTR),y
+        inx
+        iny
+        cpy #TITLEWHO+13
+        bcc utcl
+        rts
+
+; uistatrow: row 12, left column — side to move, or how the game ended.
+uistatrow:
+        ldx UIRESULT
+        bne usrres
+        ldx #0
+        lda SIDE
+        beq :+
+        ldx #1
+:       lda stmlo,x
+        sta UITMPB
+        lda stmhi,x
+        jmp usrput
+usrres: lda reslo,x
+        sta UITMPB
+        lda reshi,x
+usrput: sta UICNT2
+        lda #STATROW
+        ldx #0
+        jsr uigotorc
+        lda UITMPB
+        ldx UICNT2
+        jsr uiputs
+        ; A finished game explains itself in words on the message row — but
+        ; only when nothing more recent is there, so "GAME OVER - N STARTS A
+        ; NEW ONE" (the reply to a move typed after the end) is not wiped out
+        ; by the next repaint.
+        lda UIRESULT
+        beq :+
+        lda UIMSGB
+        bne :+
+        jsr uiresultmsg
+:       rts
+
+; uiresultmsg: fill the message row with the outcome in words.
+uiresultmsg:
+        ldx UIRESULT
+        cpx #RES_MATE
+        beq urmwin
+        cpx #RES_RESIGN
+        beq urmwin
+        lda #<m_drawn
+        ldx #>m_drawn
+        jmp uisetmsg
+urmwin: lda UIWIN
+        beq :+
+        lda #<m_blackwins
+        ldx #>m_blackwins
+        jmp uisetmsg
+:       lda #<m_whitewins
+        ldx #>m_whitewins
+        jmp uisetmsg
+
+; uichkrow: row 13 — check, while the game is live.
+uichkrow:
+        lda UIRESULT
+        bne ucrx
+        lda UICHK
+        beq ucrx
+        lda #CHKROW
+        ldx #0
+        jsr uigotorc
+        lda #<s_check
+        ldx #>s_check
+        jmp uiputs
+ucrx:   rts
+
+; uiprompt: row 23 — the input line with everything typed so far and a
+; cursor block.
+uiprompt:
+        lda #PROMPTROW
+        ldx #0
+        jsr uigotorc
+        ldy #39                 ; clear the row first: a backspace has to
+        lda #$A0                ;  visibly remove the character
+uprc:   sta (SCRPTR),y
+        dey
+        bpl uprc
+        lda UIRESULT
+        bne upcmd
+        jsr uimyturn
+        bcs upmv
+upcmd:  lda #<s_cmdq
+        ldx #>s_cmdq
+        jmp upput
+upmv:   lda #<s_movq
+        ldx #>s_movq
+upput:  jsr uiputs
+        ldy #PROMPTLEN
+        ldx #0
+uprpl:  cpx UIBLEN
+        bcs uprcur
+        lda UIBUF,x
+        ora #$80
+        sta (SCRPTR),y
+        iny
+        inx
+        bne uprpl
+uprcur: lda #$20                ; inverse space: the cursor
+        sta (SCRPTR),y
+        rts
+
+; uisetmsg / uiclrmsg: the message row's contents live in LC RAM so a full
+; repaint restores them.
+uisetmsg:
+        sta STRPTR
+        stx STRPTR+1
+        ldy #0
+usml:   lda (STRPTR),y
+        sta UIMSGB,y
+        beq usmx
+        iny
+        cpy #39
+        bcc usml
+        lda #0
+        sta UIMSGB,y
+usmx:   rts
+
+uiclrmsg:
+        lda #0
+        sta UIMSGB
+        rts
+
+; uibookname: CUROPENING -> "BOOK: <name>" in the opening row's buffer. The
+; name table is a run of length-prefixed strings at the end of the resident
+; blob; NAMEID indexes it by position, so the walk is the decode.
+uibookname:
+        lda BOOK_MAGIC
+        cmp #'B'
+        bne ubnnone
+        lda BOOK_MAGIC+1
+        cmp #'K'
+        bne ubnnone
+        lda BOOK_NAMEOFF
+        clc
+        adc #<BOOK_BASE
+        sta T0
+        lda BOOK_NAMEOFF+1
+        adc #>BOOK_BASE
+        sta T0+1
+        ldx CUROPENING
+        beq ubngot
+ubnskip:
+        ldy #0
+        lda (T0),y
+        sec                     ; += length + 1
+        adc T0
+        sta T0
+        bcc :+
+        inc T0+1
+:       dex
+        bne ubnskip
+ubngot: ldx #0
+ubnpfx: lda s_bookpfx,x
+        beq ubnbody
+        sta UIBOOKB,x
+        inx
+        bne ubnpfx
+ubnbody:
+        ldy #0
+        lda (T0),y
+        sta UITMPB
+ubncl:  iny
+        cpy UITMPB
+        beq :+
+        bcs ubnterm
+:       lda (T0),y
+        ora #$80
+        sta UIBOOKB,x
+        inx
+        cpx #39
+        bcc ubncl
+ubnterm:
+        lda #0
+        sta UIBOOKB,x
+        rts
+ubnnone:
+        lda #0
+        sta UIBOOKB
+        rts
+
+; ---------------------------------------------------------------------------
+; uithinkln: rebuild the think line and paint it. Called between completed
+; iterative-deepening iterations, from the UI's own driver — zero lines of
+; search.s change, and the numbers shown (depth, score, best move) are EXACT
+; rather than the estimator's ~27%-RMS guess at a per-move time.
+; ---------------------------------------------------------------------------
+uithinkln:
+        lda #<UITHINK
+        sta SCRPTR
+        lda #>UITHINK
+        sta SCRPTR+1
+        ldy #0
+        lda #'D'|$80
+        sta (SCRPTR),y
+        iny
+        lda CURDEPTH
+        jsr uidec2
+        lda #$A0
+        sta (SCRPTR),y
+        iny
+        jsr uiscore
+        lda #$A0
+        sta (SCRPTR),y
+        iny
+        lda BESTFROM
+        cmp #NOSQ
+        beq utlterm
+        jsr uisqout
+        lda BESTTO
+        jsr uisqout
+utlterm:
+        lda #0
+        sta (SCRPTR),y
+        lda #THINKROW
+        ldx #0
+        jsr uigotorc
+        lda #<UITHINK
+        ldx #>UITHINK
+        jmp uiputs
+
+; uiscore: SCORE (16-bit signed centipawns, side-to-move POV) -> a signed
+; pawn figure at (SCRPTR),y.
+uiscore:
+        lda SCORE+1
+        bpl uscpos
+        sec
+        lda #0
+        sbc SCORE
+        sta UISCR0
+        lda #0
+        sbc SCORE+1
+        sta UISCR1
+        lda #'-'|$80
+        bne uscsgn
+uscpos: lda SCORE
+        sta UISCR0
+        lda SCORE+1
+        sta UISCR1
+        lda #'+'|$80
+uscsgn: sta (SCRPTR),y
+        iny
+        lda UISCR1
+        cmp #MATEZONEHI
+        bcc uscnum
+        ldx #0
+uscml:  lda s_mate,x
+        beq uscmx
+        sta (SCRPTR),y
+        iny
+        inx
+        bne uscml
+uscmx:  rts
+
+; uscnum: UISCR1:UISCR0 (0..32767 centipawns) -> "d.dd" / "dd.dd" / "ddd.dd".
+uscnum: lda #0
+        sta UIQ0
+        sta UIQ1
+usd100: lda UISCR0              ; divide by 100 by repeated subtraction: at
+        cmp #100                ;  most ~320 iterations, once per iteration
+        lda UISCR1              ;  of a search that costs millions of cycles
+        sbc #0
+        bcc usdd
+        lda UISCR0
+        sec
+        sbc #100
+        sta UISCR0
+        lda UISCR1
+        sbc #0
+        sta UISCR1
+        inc UIQ0
+        bne usd100
+        inc UIQ1
+        jmp usd100
+usdd:   ldx #0                  ; hundreds of the integer part
+usdh:   lda UIQ0
+        cmp #100
+        lda UIQ1
+        sbc #0
+        bcc usdhd
+        lda UIQ0
+        sec
+        sbc #100
+        sta UIQ0
+        lda UIQ1
+        sbc #0
+        sta UIQ1
+        inx
+        bne usdh
+usdhd:  cpx #0
+        beq usdt
+        txa
+        clc
+        adc #'0'|$80
+        sta (SCRPTR),y
+        iny
+        lda UIQ0
+        jsr uid2z
+        jmp usddot
+usdt:   lda UIQ0
+        cmp #10
+        bcc usdu
+        jsr uid2z
+        jmp usddot
+usdu:   clc
+        adc #'0'|$80
+        sta (SCRPTR),y
+        iny
+usddot: lda #'.'|$80
+        sta (SCRPTR),y
+        iny
+        lda UISCR0
+        ; fall through
+
+; uid2z: A = 0..99 -> two digits at (SCRPTR),y, leading zero PRINTED (unlike
+; ui.s's uidec2, which blanks it — a hundredths field needs the zero).
+uid2z:  ldx #0
+ud2zl:  cmp #10
+        bcc ud2zd
+        sbc #10
+        inx
+        bne ud2zl
+ud2zd:  pha
+        txa
+        clc
+        adc #'0'|$80
+        sta (SCRPTR),y
+        iny
+        pla
+        clc
+        adc #'0'|$80
+        sta (SCRPTR),y
+        iny
+        rts
+
+; ===========================================================================
+; Tables and strings
+; ===========================================================================
+
+; The standard starting position as 32 (square, piece byte) pairs, in the
+; engine's slot order: slot 0 is each side's king, white slots 0-15 and
+; black 16-31, piece byte = index<<4 | colour<<3 | type. The indices match
+; chesstest.ParseFEN's FEN-scan assignment exactly, which matters because
+; the Zobrist hash — and therefore every opening-book key — is computed from
+; these bytes. internal/ui's TestStartPosition asserts the whole image.
+STSQ:   .byte $04, $10, $11, $12, $13, $14, $15, $16     ; wK, wPa2..wPh2(1-7)
+        .byte $17, $00, $01, $02, $03, $05, $06, $07     ; wPh2, wRa1..wRh1
+        .byte $74, $70, $71, $72, $73, $75, $76, $77     ; bK, bRa8..bRh8
+        .byte $60, $61, $62, $63, $64, $65, $66, $67     ; bPa7..bPh7
+STPC:   .byte $06, $11, $21, $31, $41, $51, $61, $71
+        .byte $81, $94, $A2, $B3, $C5, $D3, $E2, $F4
+        .byte $0E, $1C, $2A, $3B, $4D, $5B, $6A, $7C
+        .byte $89, $99, $A9, $B9, $C9, $D9, $E9, $F9
+
+; Levels. 1-4 are fixed depth (no clock read anywhere — the period-honest
+; control, and the only kind an Apple IIe could offer before FT2_SOFTCLK);
+; 5-9 are timed, in 256-cycle units at 1.0205 MHz. Nothing below ~4 s is
+; offered: one soft-clock poll is 0.45-0.57 s of resolution, so a shorter
+; level would be quantisation noise.
+;             lvl   1    2    3    4    5      6      7      8       9
+;             sec   -    -    -    -    4      8      15     30      60
+LVDEPTH: .byte       2,   3,   4,   5,   20,    20,    20,    20,     20
+LVB0:    .byte     $00, $00, $00, $00, $49,   $93,   $92,   $24,    $48
+LVB1:    .byte     $00, $00, $00, $00, $3E,   $7C,   $E9,   $D3,    $A6
+LVB2:    .byte     $00, $00, $00, $00, $00,   $00,   $00,   $01,    $03
+
+; KTAB: the soft-clock margin as a multiplier over 256, indexed by the
+; budget's octave. 0 means "margin 100%, do not scale". 202 = 25600/127,
+; 227 = 25600/113 — the two MEASURED anchors (4 s and 15 s adherence against
+; an exact-clock control) with the 8-16 s entry interpolated and the ends
+; held flat. See internal/chesstest softMarginPct, the reference this must
+; agree with.
+KTAB:   .byte 202, 202, 202, 202, 202, 202, 202, 202
+        .byte 202, 202, 202, 202, 202, 202, 227,   0
+        .byte   0,   0,   0,   0,   0,   0,   0,   0
+
+promoltr: .byte 'n', 'b', 'r', 'q'
+
+NCMDS = 8
+cmdkeys: .byte 'n', 't', 'r', 'd', 'l', 's', 'q', '?'
+cmdlo:  .byte <(cmd_new-1),  <(cmd_take-1),  <(cmd_resign-1), <(cmd_draw-1)
+        .byte <(cmd_level-1), <(cmd_swap-1), <(cmd_quit-1),   <(cmd_help-1)
+cmdhi:  .byte >(cmd_new-1),  >(cmd_take-1),  >(cmd_resign-1), >(cmd_draw-1)
+        .byte >(cmd_level-1), >(cmd_swap-1), >(cmd_quit-1),   >(cmd_help-1)
+
+stmlo:  .byte <s_white, <s_black
+stmhi:  .byte >s_white, >s_black
+reslo:  .byte <s_white, <s_mate2, <s_stale, <s_d50, <s_drep, <s_resign
+        .byte <s_agreed, <s_toolong, <s_err
+reshi:  .byte >s_white, >s_mate2, >s_stale, >s_d50, >s_drep, >s_resign
+        .byte >s_agreed, >s_toolong, >s_err
+
+TITLELVL  = 20          ; column of the level digit in s_title
+TITLEWHO  = 26          ; column of the 13-character "who plays what" field
+PROMPTLEN = 11          ; length of s_movq / s_cmdq
+
+s_title:   INVSTR " 8FISH 1.0    LEVEL 4     YOU ARE WHITE "
+s_who:     INVSTR "YOU ARE WHITE"
+           INVSTR "YOU ARE BLACK"
+           INVSTR " TWO PLAYERS "
+WHOOFF:    .byte 0, 14, 28     ; INVSTR's $00 terminator makes the stride 14
+s_white:   SCRSTR "WHITE TO MOVE"
+s_black:   SCRSTR "BLACK TO MOVE"
+s_check:   SCRSTR "CHECK"
+s_thinking: SCRSTR "THINKING..."
+s_mate:    SCRSTR "MATE"
+s_mate2:   SCRSTR "CHECKMATE"
+s_stale:   SCRSTR "STALEMATE"
+s_d50:     SCRSTR "DRAW: 50 MOVES"
+s_drep:    SCRSTR "DRAW: REPETITION"
+s_resign:  SCRSTR "RESIGNED"
+s_agreed:  SCRSTR "DRAW AGREED"
+s_toolong: SCRSTR "DRAW: TOO LONG"
+s_err:     SCRSTR "INTERNAL ERROR"
+s_movq:    SCRSTR "YOUR MOVE? "
+s_cmdq:    SCRSTR "COMMAND?   "
+s_help1:   SCRSTR "N-NEW T-TAKEBACK R-RESIGN D-DRAW"
+s_help2:   SCRSTR "L-LEVEL S-SIDES Q-QUIT ?-HELP"
+s_bookpfx: SCRSTR "BOOK: "
+
+m_illegal:  SCRSTR "ILLEGAL MOVE - TRY AGAIN"
+m_badin:    SCRSTR "TYPE A MOVE LIKE e2e4, OR ONE COMMAND"
+m_badcmd:   SCRSTR "UNKNOWN COMMAND - ? FOR HELP"
+m_notyours: SCRSTR "NOT YOUR MOVE"
+m_over:     SCRSTR "GAME OVER - N STARTS A NEW ONE"
+m_promo:    SCRSTR "PROMOTE TO (Q R B N)?"
+m_noback:   SCRSTR "NOTHING TO TAKE BACK"
+m_level:    SCRSTR "LEVEL? 1-4 PLIES, 5-9 TIMED (4-60 SEC)"
+m_drawno:   SCRSTR "DRAW DECLINED"
+m_drawn:    SCRSTR "GAME DRAWN"
+m_whitewins: SCRSTR "WHITE WINS - N STARTS A NEW GAME"
+m_blackwins: SCRSTR "BLACK WINS - N STARTS A NEW GAME"
+m_help2:    SCRSTR "MOVES ARE e2e4 / e7e8q. RETURN SENDS."
+m_enginebad: SCRSTR "ENGINE RETURNED AN ILLEGAL MOVE"

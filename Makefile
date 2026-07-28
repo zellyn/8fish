@@ -10,7 +10,7 @@ ifneq ($(CC65_VERSION),$(TESTED_CC65))
 $(warning ca65 is $(CC65_VERSION); this repo was last tested with $(TESTED_CC65))
 endif
 
-.PHONY: all hello perft banktest entropytest uitest engine tables test test-siblings clean
+.PHONY: all hello perft banktest entropytest uitest m8 engine tables test test-siblings clean
 
 all: hello perft engine test
 
@@ -29,6 +29,11 @@ banktest: asm/banktest.bin
 entropytest: asm/entropytest.bin
 
 uitest: asm/uitest.bin
+
+# The on-device 8fish user interface: two BLOADable files, m8boot.bin ($0800,
+# the run-once copier) and m8.bin (the UI itself, copied to Language Card RAM
+# at $E000). Costs the engine image zero bytes; see docs/ui-design.md.
+m8: asm/m8.bin
 
 engine: asm/engine.bin
 
@@ -50,6 +55,19 @@ asm/entropytest.bin: asm/entropytest.s asm/entropy.inc asm/defs.inc asm/entropyt
 asm/uitest.bin: asm/uitest.s asm/ui.s asm/defs.inc asm/uitest.cfg
 	cd asm && $(CA65) uitest.s -o uitest.o
 	cd asm && $(LD65) -C uitest.cfg uitest.o -o uitest.bin
+
+# The UI's symbol bridge: the engine entry points asm/m8.s calls by address.
+# A REAL dependency on engine.bin, so the failure mode of an engine refactor
+# is a broken build, never a UI linked against stale addresses.
+asm/engsyms.inc: asm/engine.bin internal/engsyms/engsyms.go cmd/genengsyms/main.go
+	go run ./cmd/genengsyms
+
+M8_SRCS = asm/m8.s asm/ui.s asm/entropy.inc asm/defs.inc asm/book.inc \
+          asm/engsyms.inc asm/m8.cfg
+
+asm/m8.bin: $(M8_SRCS)
+	cd asm && $(CA65) -g m8.s -o m8.o
+	cd asm && $(LD65) -C m8.cfg m8.o -o m8.bin -Ln m8.lbl
 
 asm/tables.s: cmd/gentables/main.go cmd/gentables/pesto.go
 	go run ./cmd/gentables

@@ -1,5 +1,6 @@
-// Package ui_test exercises the on-device 40-column text renderer
-// (asm/ui.s) under the harness emulator.
+// This file exercises the 40-column text RENDERER (asm/ui.s) on its own,
+// under the harness emulator. The rest of package ui_test drives the whole
+// on-device UI (asm/m8.s) built on top of it.
 //
 // asm/uitest.s runs the REAL renderer from the address it will really run
 // at: a stub at $4000 enables Language Card bank-1 RAM with the same $C08B
@@ -24,6 +25,7 @@ import (
 	"github.com/zellyn/chess6502/harness"
 	"github.com/zellyn/chess6502/internal/asmbuild"
 	"github.com/zellyn/chess6502/internal/chesstest"
+	"github.com/zellyn/chess6502/internal/ui"
 )
 
 const (
@@ -41,66 +43,14 @@ const (
 // panel, so the board and the move list describe the same position.
 const demoFEN = "r1bqk2r/1pppbppp/p1n2n2/4p3/B3P3/5N2/PPPP1PPP/RNBQ1RK1 w kq -"
 
-// textRowBase is the Apple II interleaved text-page-1 row base.
-func textRowBase(row int) uint16 {
-	return 0x400 + uint16(row%8)*0x80 + uint16(row/8)*0x28
-}
-
-// decode converts an Apple IIe text-screen byte to its ASCII character
-// plus an "inverse video" flag.
-//
-//	$80-$FF  normal video, ASCII = b & $7F (lowercase lives at $E0-$FF)
-//	$60-$7F  inverse lowercase (IIe alternate character set), ASCII = b
-//	$40-$5F  flashing uppercase — unused by this UI
-//	$20-$3F  inverse space/punctuation/digits, ASCII = b
-//	$00-$1F  inverse @ A-Z [ \ ] ^ _, ASCII = b | $40
-func decode(b byte) (ascii byte, inverse bool) {
-	switch {
-	case b >= 0x80:
-		return b & 0x7F, false
-	case b >= 0x60:
-		return b, true
-	case b >= 0x40:
-		return b & 0x3F, false // flashing; not used here
-	case b >= 0x20:
-		return b, true
-	default:
-		return b | 0x40, true
-	}
-}
-
-type screen struct {
-	raw [24][40]byte
-}
-
-func (s *screen) text(row int) string {
-	var sb strings.Builder
-	for col := 0; col < 40; col++ {
-		a, _ := decode(s.raw[row][col])
-		sb.WriteByte(a)
-	}
-	return sb.String()
-}
-
-// video renders one row's inverse/normal attributes as a bar, so the
-// checkerboard is visible in test output.
-func (s *screen) video(row int) string {
-	var sb strings.Builder
-	for col := 0; col < 40; col++ {
-		if _, inv := decode(s.raw[row][col]); inv {
-			sb.WriteByte('#')
-		} else {
-			sb.WriteByte('.')
-		}
-	}
-	return sb.String()
-}
+// The screen decoding, the interleaved row bases and the Screen type all
+// live in the ui package now, shared with the tests that drive the whole
+// on-device UI (asm/m8.s).
 
 // run builds and runs the PoC image with the given position and UIREP,
 // returning the resulting screen and the total emulated cycle count.
-func run(t *testing.T, fen string, rep, rep2 uint16) (*screen, uint64) {
+func run(t *testing.T, fen string, rep, rep2 uint16) (*ui.Screen, uint64) {
 	t.Helper()
-	root := filepath.Join("..", "..")
 	if err := asmbuild.BuildStandalone(root, "uitest"); err != nil {
 		if errors.Is(err, asmbuild.ErrCA65NotInstalled) {
 			t.Skip("SKIP: ca65 not installed")
@@ -154,11 +104,11 @@ func run(t *testing.T, fen string, rep, rep2 uint16) (*screen, uint64) {
 	if code != 0 {
 		t.Fatalf("exit code %d, want 0", code)
 	}
-	var s screen
-	for row := 0; row < 24; row++ {
-		base := textRowBase(row)
-		for col := 0; col < 40; col++ {
-			s.raw[row][col] = m.Mem.Peek(base + uint16(col))
+	var s ui.Screen
+	for row := range 24 {
+		base := ui.RowBase(row)
+		for col := range 40 {
+			s.Raw[row][col] = m.Mem.Peek(base + uint16(col))
 		}
 	}
 	return &s, m.Cycles
@@ -173,7 +123,7 @@ func TestRenderPosition(t *testing.T) {
 		var sb strings.Builder
 		sb.WriteString("    +----------------------------------------+\n")
 		for row := 0; row < 24; row++ {
-			fmt.Fprintf(&sb, "%2d  |%s|  %s\n", row, s.text(row), s.video(row))
+			fmt.Fprintf(&sb, "%2d  |%s|  %s\n", row, s.Text(row), s.Video(row))
 		}
 		sb.WriteString("    +----------------------------------------+")
 		return sb.String()
@@ -192,7 +142,7 @@ func TestRenderPosition(t *testing.T) {
 		"R N B Q   R K   ", // rank 1
 	}
 	for i, want := range wantBoard {
-		got := s.text(brdRow0 + i)[brdCol : brdCol+16]
+		got := s.Text(brdRow0 + i)[brdCol : brdCol+16]
 		if got != want {
 			t.Errorf("board rank %d: got %q, want %q", 8-i, got, want)
 		}
@@ -205,7 +155,7 @@ func TestRenderPosition(t *testing.T) {
 		for f := 0; f < 8; f++ {
 			wantDark := (rank+f)%2 == 0
 			for half := 0; half < 2; half++ {
-				_, inv := decode(s.raw[brdRow0+r][brdCol+2*f+half])
+				_, inv := ui.Decode(s.Raw[brdRow0+r][brdCol+2*f+half])
 				if inv != wantDark {
 					t.Errorf("square rank%d file%d half%d: inverse=%v, want %v",
 						rank+1, f, half, inv, wantDark)
@@ -216,11 +166,11 @@ func TestRenderPosition(t *testing.T) {
 
 	// Coordinates and the rest of the layout.
 	for i, want := range []string{"8", "7", "6", "5", "4", "3", "2", "1"} {
-		if got := string(s.text(brdRow0 + i)[brdCol-2]); got != want {
+		if got := string(s.Text(brdRow0 + i)[brdCol-2]); got != want {
 			t.Errorf("rank label row %d: got %q, want %q", brdRow0+i, got, want)
 		}
 	}
-	if got := s.text(brdRow0 + 8)[brdCol : brdCol+16]; got != "a b c d e f g h " {
+	if got := s.Text(brdRow0 + 8)[brdCol : brdCol+16]; got != "a b c d e f g h " {
 		t.Errorf("file labels: got %q", got)
 	}
 	for _, tc := range []struct {
@@ -242,12 +192,12 @@ func TestRenderPosition(t *testing.T) {
 		{20, "N-NEW T-TAKEBACK R-RESIGN D-DRAW L-LEVEL"},
 		{23, "YOUR MOVE?"},
 	} {
-		if !strings.Contains(s.text(tc.row), tc.want) {
-			t.Errorf("row %d = %q, want it to contain %q", tc.row, s.text(tc.row), tc.want)
+		if !strings.Contains(s.Text(tc.row), tc.want) {
+			t.Errorf("row %d = %q, want it to contain %q", tc.row, s.Text(tc.row), tc.want)
 		}
 	}
 	// The whole title row must be inverse video (the status bar).
-	if v := s.video(0); v != strings.Repeat("#", 40) {
+	if v := s.Video(0); v != strings.Repeat("#", 40) {
 		t.Errorf("title row video = %q, want all inverse", v)
 	}
 }

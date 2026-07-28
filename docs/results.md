@@ -3,6 +3,107 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-28 — THE ON-DEVICE UI IS PLAYABLE (8fish, `asm/m8.s`)
+
+The design in `docs/ui-design.md` is built. You can boot it, choose a side,
+see the board, type moves, have the engine reply, and reach a real game end.
+`internal/ui` boots the REAL image the way the real machine will, types on
+its keyboard and reads its screen back; `internal/refchess` referees every
+ply.
+
+**Headline evidence: a complete game, keystroke by keystroke, to checkmate.**
+75 plies, White (a scripted depth-4 opponent) mating the UI's engine at level
+1, 127.2 s of emulated IIe time, every ply cross-checked against refchess.
+The final screen:
+
+```
+ 0  | 8FISH 1.0    LEVEL 1     YOU ARE WHITE |
+ 2  | 8   R     k b   r    MOVES             |
+ 3  | 7           b p     26 g3e5 e7e6       |
+ ...
+12  |CHECKMATE            37 b8d6 e7e8       |
+14  |D 2 -MATE e7e8       38 b1b8            |
+17  |WHITE WINS - N STARTS A NEW GAME        |
+23  |COMMAND?                                |
+```
+
+A second run with a deterministic opponent ended at 88 plies in a genuine
+threefold repetition, detected by the UI's own 1,024-byte game hash history —
+the thing the engine cannot do at the root, where `HASHSTK` is empty.
+
+**Measured byte budget** — 4,207 B of code+static data plus 2,048 B of RAM
+arrays and 256 B of variables = **6,255 of the Language Card's 8,176 B, 77%,
+1,921 B free**. **MAIN cost 0 bytes**, TT cost 0 bytes, book unmoved. The
+copier is 57 B at $0800, which the engine later overwrites with `PIECESQ`. The
+design's *derived* estimate was ~4,011 B; the overrun is almost entirely
+strings, the level/limit arithmetic and the ID driver.
+
+**The engine is untouched.** `asm/engine.bin` is byte-identical to a build of
+a clean tree (md5 `58ef9645…`, checked by `git archive HEAD` into a temp
+directory and `cmp`), and `TestMicroAB` is green. The UI is a SEPARATE link
+running from Language Card RAM at `$E000`, calling the engine by address
+through `asm/engsyms.inc`, which `internal/engsyms` generates from
+`asm/engine.lbl` against a fixed whitelist — so a renamed engine symbol is a
+build failure, never a stale address.
+
+**Parity gate for the UI's own ID driver.** `docs/ui-design.md` §7 has the UI
+supply its own iterative-deepening loop so the screen can show the search
+deepening without touching `search.s`. `TestEngineParity` proves that costs
+nothing: at four positions and depths 2-5, the move the UI-driven engine
+plays is the move the engine's ordinary `$4000` entry plays, given the same
+position bytes, features, depth and dither seed. (The comparison has to hand
+the reference the UI's PIECE-LIST bytes, not a FEN: the generator walks the
+piece list, so a FEN round trip re-slots the pieces and yields a different —
+equally valid — tree. That is a real property of this engine and worth
+recording.)
+
+**The safety-margin rule (§6.2) is implemented and gated.** Octave of the
+budget, `KTAB` lookup, one 24x8 shift-and-add, no division; applied to the
+BASE, with `CEILMAX`/`UNSTCEIL`/`MINSPEND` derived from the already-scaled
+value so all five limits share ONE margin. `TestSoftClockLimits` checks every
+level against `chesstest.SoftClockMargin`'s reference to within 1% (the
+device rule is `x * K >> 8` with `K = 25600/margin`; the host rule is
+`x * 100 / margin` — same margin, different rounding):
+
+| level | control | margin | BUDGET | CEILMAX | UNSTCEIL | MINSPEND |
+|---|---|---:|---:|---:|---:|---:|
+| 1-4 | fixed depth 2/3/4/5 | — | 0 | — | — | — |
+| 5 | 4 s | 127% | 12,581 | 50,324 | 37,743 | 3,145 |
+| 6 | 8 s | 113% | 28,278 | 113,112 | 84,834 | 7,069 |
+| 7 | 15 s | 100% | 59,794 | 239,176 | 179,382 | 14,948 |
+| 8 | 30 s | 100% | 119,588 | 478,352 | 358,764 | 29,897 |
+| 9 | 60 s | 100% | 239,176 | 956,704 | 717,528 | 59,794 |
+
+(256-cycle units. `ABORTL` is derived on device and inherits the scaling.)
+
+`FEATURES2` on device is `FT2_GENDEFER | FT2_SOFTCLK` = `$30`, plus
+`FT2_ADAPT` for timed levels — NOT `ucibridge.runEngine`'s config, which
+deliberately leaves `FT2_SOFTCLK` off because the harness has a real counter.
+A level-5 (4 s) move ran on the ESTIMATED clock with the harness clock trap
+DISABLED — hardware semantics — and spent 2.79 emulated seconds, i.e. it
+stopped short of its allocation, which is the direction the estimator is
+biased to fail in.
+
+**Validation is the engine's own.** The UI contains no chess rules: it calls
+`gennodef`, walks the list, and runs `search.s sdomove`'s legality test
+verbatim. `TestLegalityAgainstRefchess` types every move refchess calls legal
+at six positions (124 of them) and 240 illegal coordinate strings, checking
+the resulting position against refchess each time — castling both ways, en
+passant, both promotion spellings, pins and evasions all come out right with
+zero UI code, because the generator already emits them.
+
+**Cost of the interface, measured.** Full 40x24 repaint 23,659 cycles
+(23.2 ms) after every move — 0.1% of a 30-second move — so there are no
+partial repaints anywhere and the whole class of incremental-update bugs does
+not exist. Cold boot (LC copy, LCCODE install, start position, legal-move
+count, first paint) 154,280 cycles = 151 ms.
+
+**What is deliberately NOT there:** a per-move "thinking for N seconds"
+readout. The estimator's per-move RMS is ~27% and worse at phase 14-19; it
+would be visibly wrong and would make the engine look broken. Row 14 shows
+depth, score and the current best move instead, and those are exact. Full
+deferral list with prices in `docs/ui-design.md` §12.5.
+
 ## 2026-07-27 — FT2_SOFTCLK ENABLEMENT DECISION: on-device YES, harness NO
 
 Both controls independently re-verified on main, from source (see the

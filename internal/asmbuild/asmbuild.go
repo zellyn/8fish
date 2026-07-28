@@ -112,6 +112,22 @@ func Build(root string) error {
 // defs.inc and one module and so need none of the engine build. It does
 // not regenerate the tables.
 func BuildStandalone(root, name string) error {
+	return BuildStandaloneAs(root, name, name)
+}
+
+// BuildStandaloneAs is BuildStandalone with the output name decoupled from
+// the source name, plus optional ca65 -D defines: it assembles
+// asm/<src>.s with asm/<out>.cfg into asm/<out>.bin / asm/<out>.lbl. The
+// config follows the OUTPUT name because a link config also names any
+// secondary output files it emits, and two variants of one source must not
+// write the same ones.
+//
+// Needed because a source can have more than one meaningful build — the UI
+// (asm/m8.s) is assembled once for real hardware, reading $C000/$C010, and
+// once with -D HARNESSKBD so internal/ui can drive it from Go through the
+// harness input traps. Two builds of one source must not fight over one
+// output name.
+func BuildStandaloneAs(root, src, out string, defines ...string) error {
 	if _, err := exec.LookPath("ca65"); err != nil {
 		return ErrCA65NotInstalled
 	}
@@ -128,11 +144,18 @@ func BuildStandalone(root, name string) error {
 		}
 		return nil
 	}
+	ca65 := []string{"-g"} // -g so the .lbl carries every label: the UI's
+	// tests read routine addresses out of it (to unit-test a single
+	// routine) and derive the measured byte budget from label deltas.
+	for _, d := range defines {
+		ca65 = append(ca65, "-D", d)
+	}
+	ca65 = append(ca65, src+".s", "-o", out+".o")
 	return withBuildLock(root, func() error {
-		if err := run("ca65", name+".s", "-o", name+".o"); err != nil {
+		if err := run("ca65", ca65...); err != nil {
 			return err
 		}
-		return run("ld65", "-C", name+".cfg", name+".o", "-o", name+".bin")
+		return run("ld65", "-C", out+".cfg", out+".o", "-o", out+".bin", "-Ln", out+".lbl")
 	})
 }
 

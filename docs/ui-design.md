@@ -1,8 +1,11 @@
 # 8fish on-device user interface — design
 
-Status: **design + verified proof of concept**. Not merged, not built beyond the
-renderer. The PoC (`asm/ui.s`, `asm/uitest.s`, `internal/ui`) is real code that
-runs in the emulator; everything else below is a plan with priced components.
+Status: **BUILT AND PLAYABLE** (2026-07-28). `asm/m8.s` implements this design;
+`internal/ui` boots the real image in the emulator, types on its keyboard and
+plays whole games against it, refereed ply by ply by `internal/refchess`. See
+§12 for what shipped, the measured byte budget and what was deliberately
+deferred. The sections below are the design as written; where the
+implementation chose differently, §12 says so.
 
 All byte counts are **measured** (ca65 `.out` on label differences, or the ld65
 segment map) unless labelled *derived*, in which case the instruction-level
@@ -22,8 +25,8 @@ labelled *derived*.
 | levels / time control | **fixed depth OR timed** — the IIe has no readable clock, but `FT2_SOFTCLK` (shipped 2026-07-27) gives the engine an ESTIMATED one; see §6.2 |
 | `FT2_ADAPT` | **now runnable on device** via `FT2_SOFTCLK`; exposing it is still a UI decision (its ceilings are host-computed). See §6.3 |
 | progress during search | printed **between iterative-deepening iterations**, from the UI's own driver loop. **Zero lines of `search.s` change** |
-| MAIN-RAM cost | **0 bytes permanent** (a run-once 30-byte copier lives in soon-to-be-overwritten RAM) |
-| LC budget | ~4,000 B of 8,176 B used; **~50% headroom** |
+| MAIN-RAM cost | **0 bytes permanent** (a run-once 57-byte copier lives in soon-to-be-overwritten RAM) |
+| LC budget | **6,255 B of 8,176 B measured** (4,207 B code+data, 2,048 B RAM arrays, 256 B variables); **1,921 B free** |
 
 The single most important finding is in §2: this project has never used its
 Language Card. The UI does not have to compete for the 1,622 bytes.
@@ -608,7 +611,9 @@ the next starts.
     harness against `refchess` as referee, asserting agreement every ply — the
     same discipline `internal/sargon`'s `CrossCheckHistory` applies to Sargon.
 
-Steps 1-9 need no hardware. Step 10 is the first that does.
+**Status 2026-07-28: steps 1-11 are DONE**, each with the verification listed
+(see §12.4 for the gate names). Step 10's second half — "then on hardware" —
+is the only thing outstanding, and it is the only thing that needs hardware.
 
 ---
 
@@ -642,3 +647,168 @@ Steps 1-9 need no hardware. Step 10 is the first that does.
    new files (`asm/ui.s`, `asm/uitest.s`, `asm/uitest.cfg`, `internal/ui/`) plus
    two additive Makefile rules, so the rebase surface is a Makefile and nothing
    else.
+
+---
+
+## 12. What shipped (2026-07-28)
+
+The design above is implemented. This section is the delta: the files, the
+MEASURED byte budget, the places the implementation chose differently, and
+the explicit list of what was deferred.
+
+### 12.1 Files
+
+| file | what |
+|---|---|
+| `asm/m8.s` | the UI: main loop, move entry and validation, game-over detection, the engine turn, the ID driver, the level/limit arithmetic, commands, painting. Two output files from one link. |
+| `asm/m8.cfg` / `asm/m8t.cfg` | link configs. `LC` is capped at `$E000-$F6FF`, so overflowing the code budget is a **link error**, not a silent overwrite of the game history. `m8t.cfg` is the `-D HARNESSKBD` variant with distinct output names. |
+| `asm/ui.s` | unchanged renderer, plus the LC memory map and the UI variable block. |
+| `asm/engsyms.inc` | **generated**: the engine entry points the UI calls by address. |
+| `internal/engsyms` + `cmd/genengsyms` | the generator. A fixed whitelist, so a renamed engine symbol is a build failure, never a stale address. |
+| `internal/ui/m8.go` | the Go driver: boots the real image, types keys, reads the screen, reads/writes the position. |
+| `internal/ui/*_test.go` | the gates (§12.4). |
+
+**No engine source file is modified.** `asm/engine.bin` is byte-identical to a
+build from a clean tree (md5 `58ef9645…`, verified by building `HEAD` into a
+temp directory and `cmp`).
+
+### 12.2 Boot
+
+Two BLOADable files, essentially as designed:
+
+```
+m8boot.bin   57 B   BRUN at $0800   latch $C08B, copy $0900 -> $E000,
+                                    install the engine's LC aux primitives
+                                    at $D000, JMP $E000
+m8.bin    4,207 B   BLOAD at $0900  the UI payload
+```
+
+`$0800` is `PIECESQ` and `$0900-$1FFF` is the per-ply undo/search arrays and
+then `MOVESTACK` — all engine RAM that is garbage until the first search, so
+the **permanent MAIN cost is 0 bytes**.
+
+The design said `$0E00`. That is wrong by construction: `$0E00-$1FFF` is only
+4,608 bytes, while the LC code budget is 5,888, so a UI grown past 4,608 B
+would have been BLOADed straight over the resident opening book at `$2000`.
+Loading at `$0900` makes the staging area and the code budget exactly the
+same size, so the overrun cannot happen.
+The payload's first three bytes are `JMP m8main`, so `m8boot.bin` does not
+change when the UI does.
+
+One thing the design did not price: a UI that drives `iterate` directly never
+runs `engine.s`'s `$4000` entry, so it must **install `LCCODE` itself** or the
+first transposition-table probe reads garbage. That is the second loop in the
+copier (8 bytes).
+
+### 12.3 Measured byte budget
+
+From the linker's segment size and label deltas (`internal/ui`
+`TestUIByteBudget`), against the 8,176 bytes of `$E000-$FFEF`:
+
+| component | bytes |
+|---|---|
+| entry vector (fixed at `$E000`) | 3 |
+| `asm/ui.s` renderer | 508 |
+| `asm/entropy.inc` | 56 |
+| cold start, main loop, whose-turn-is-it | 111 |
+| position bookkeeping (new game, apply, hash history) | 164 |
+| move generation / validation / legality | 333 |
+| game state (legal count, mate/stalemate/50/repetition) | 105 |
+| the engine's turn (seed, book probe, apply) | 147 |
+| level table + the soft-clock margin rule | 296 |
+| the UI's own iterative-deepening driver | 267 |
+| line editor, move parsing, promotion prompt | 349 |
+| commands | 230 |
+| painting | 470 |
+| think line + signed centipawn formatting | 280 |
+| tables and strings | 888 |
+| **UICODE total (measured)** | **4,207** |
+| UI variables + screen buffers (`$F700`) | 256 |
+| game history from/to/flags (`$F800-$FAFF`) | 768 |
+| game hash history (`$FB00-$FEFF`) | 1,024 |
+| **TOTAL** | **6,255 of 8,176 (77%)** |
+| **FREE** | **1,921** |
+
+**MAIN cost 0 B. TT cost 0 B. Book unmoved.** The design's estimate was
+~4,011 B; the real thing is 6,255 B, the difference being almost entirely
+strings, the level/limit arithmetic and the ID driver coming in heavier than
+their *derived* rows.
+
+### 12.4 The gates
+
+All under `internal/ui`, plus the two engine-side ones:
+
+| gate | what it proves |
+|---|---|
+| `TestM8Boot` | the shipping boot path runs, the UI executes from `$E000`, and it paints a start position and waits for a key |
+| `TestShippingImageBoots` | the REAL-keyboard build (not the HARNESSKBD one) boots, paints, and blocks in `entkey`'s poll loop with `ENTCNT` spinning — the engine's only source of entropy |
+| `TestStartPosition` | the hand-written 64-byte start image is byte-identical to `chesstest.ParseFEN`, piece-list slots included (the Zobrist hash, and therefore every book key, is computed from those bytes) |
+| `TestMoveEntry` | a typed opening produces refchess's position at every ply, and the move panel lists it |
+| `TestSpecialMoves` | castling both ways, en passant, both promotion spellings — with zero UI chess code |
+| `TestPromotionPrompt` | a promotion typed without its fifth character asks, and the answer completes the move |
+| `TestLegalityAgainstRefchess` | 124 legal moves accepted with the right resulting position, 240 illegal ones rejected with a clear message and no state change, across six positions |
+| `TestBadInput` | garbage is named, not swallowed, and never touches the game |
+| `TestTerminations` | checkmate (two ways), stalemate, the 50-move rule and threefold repetition, each with the screen text it produces, and a move typed afterwards refused |
+| `TestTakeback` | replaying from the start position restores the exact prior FEN, all the way back to move 1 |
+| `TestCommands` | N / T / R / L / S / ? |
+| `TestDrawOffer` | the engine accepts a draw only when its last search said it was losing |
+| `TestEngineParity` | **the UI-driven engine plays the move the `$4000`-entry engine plays**, at four positions and depths 2-5 |
+| `TestSoftClockLimits` | all five limits, at all nine levels, against `chesstest.SoftClockMargin`'s reference |
+| `TestTimedLevel` | one move on the ESTIMATED clock with the harness clock trap disabled — hardware semantics — coming in under its allocation |
+| `TestBookIntegration` | the resident book is probed instead of searched, and the opening name streamed from the blob matches `internal/book` |
+| `TestUIByteBudget` | the measured budget above, and that the components sum to the linker's segment size |
+| `TestFullGame` | **a complete game to a real termination, refereed ply by ply by refchess** |
+| `TestRenderPosition` / `TestRenderCost` | the pre-existing renderer gates, unchanged |
+| `chesstest.TestMicroAB` | the engine's tree fingerprint, byte-identical to a clean-tree run |
+| `engine.bin` md5 | identical to a `git archive HEAD` build |
+
+### 12.5 Where the implementation differs from the design
+
+1. **Levels.** 1-4 are fixed depth 2/3/4/5 (`BUDGET = 0`, no clock read
+   anywhere); 5-9 are timed at 4/8/15/30/60 s with `FT2_SOFTCLK` **and**
+   `FT2_ADAPT`. The design left adaptive effort open as a product decision;
+   the ceiling arithmetic turned out to be three shifts and an add off the
+   already-scaled base (`CEILMAX = 4x`, `UNSTCEIL = 3x`, `MINSPEND = /4`), so
+   it shipped.
+2. **The margin rule is implemented exactly as specified** — octave of the
+   budget, `KTAB` lookup, one 24x8 shift-and-add, no division — and applied to
+   the BASE before the ceilings are derived from it, which is what makes all
+   five limits share one margin. `ABORTL` inherits it (the engine derives
+   `ABORTL` from `BUDGET`, or from `CEILMAX` under `FT2_ADAPT`).
+3. **A third side mode.** `S` cycles WHITE -> BLACK -> **TWO PLAYERS**.
+   Referee mode never searches: it validates and displays. It is what you want
+   for playing a friend or setting a position up by hand, and it is what makes
+   the test suite able to drive both sides.
+4. **Draws are adjudicated, not claimed.** A threefold repetition or a
+   halfmove clock of 100 ends the game by itself, which is what a casual
+   player expects. `D` is therefore a genuine draw OFFER: the engine accepts
+   only if its last completed search scored it below -150 cp.
+5. **Command/move disambiguation is by LENGTH.** A one-character line is a
+   command, a four- or five-character line is a move. That resolves `d`
+   (offer draw) against `d2d4` without a special case, and every letter is
+   case-folded so CAPS LOCK does not matter.
+6. **`uiresultmsg` yields to a fresher message**, so "GAME OVER - N STARTS A
+   NEW ONE" is not wiped out by the next repaint.
+7. **The engine's own move is re-validated** against the generator before it
+   is played (one generate plus one make/unmake, invisible next to a search).
+   The search always returns a legal move and the book is keyed on 32 bits, so
+   this never fires — but "never corrupt the position" is cheaper to guarantee
+   than to debug.
+
+### 12.6 Deferred, with prices
+
+Nothing below is needed to play a game.
+
+| deferred | why | price to add |
+|---|---|---|
+| **Board flip when the human plays Black** | `uiboard` walks `a8` downward with a fixed square-colour phase | ~40 B: a direction byte and a phase seed in `uiboard`, plus reversing `uicoords` |
+| **Hi-res board** (§3.1) | costs information, not bytes: mixed mode leaves 4 text rows and the panel/status/prompt no longer fit at once | ~1,850 B, fits in the 1,921 B free; book moves to LC bank 2 |
+| **Insufficient-material draw** (KK, KNK, KBK) | the engine detects it *inside* the search; at the root the UI does not | ~50 B: the same piece-list scan `search.s` already has, hoisted |
+| **Fivefold / 75-move automatic ends** | threefold and 50 already adjudicate | ~15 B (two constants) |
+| **Mate distance in the think line** | shows `+MATE` / `-MATE`, not `#4` | ~40 B: one subtract from `MATE` and a halve |
+| **`FT2_ADAPT`'s per-GAME bank** | the host bridge banks unspent time across a game; on device each move gets a flat allocation | ~120 B: a signed 24-bit bank, income accrual and `min(4*base, income+bank)` |
+| **Position setup / FEN entry** | two-player mode plus takeback covers replaying a game | ~250 B for a FEN parser, or ~150 B for a cursor-driven piece placer |
+| **Cursor / joystick move entry** | typed entry wins on code, notation, entropy and errors (§5.1) | ~200-260 B on top of the same validator |
+| **A saved game / disk I/O** | needs a DOS or ProDOS MLI interface the rest of the project does not have | unpriced |
+| **Real-hardware validation** | the emulator carries the ][+ character ROM and does not model `ALTCHARSET`, so inverse lowercase is verified as BYTES against the documented IIe encoding, not as pixels; and the IIe memory model has no keyboard at all, so the shipping build's `$C000`/`$C010` path is only proven to boot, paint and block (`TestShippingImageBoots`), never to receive a key | a disk image and a IIe |
+| **Ctrl-Reset behaviour** (§11 risk 3) | the UI writes `$FFFA-$FFFF`, but whether a IIe forces ROM back in before the reset vector fetch is a hardware question | nothing to write; a hardware answer |

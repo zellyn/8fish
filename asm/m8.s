@@ -1191,6 +1191,15 @@ cmd_take:
         jmp uisetmsg
 :       lda #0                  ; a takeback un-ends a finished game
         sta UIRESULT
+        ; ...and RETRACTS the last search, which described a position that is
+        ; about to leave the board. UILSC is the ONLY thing cmd_draw consults,
+        ; and takebacks stack, so leaving it behind lets a draw be agreed on
+        ; the strength of a search of a line the player has just withdrawn.
+        ; Same rule m8engine already applies to the think line after a book
+        ; move: no completed search for THIS position, no readout. (A is 0.)
+        sta UILSC0
+        sta UILSC1
+        sta UITHINK
         lda SIDE                ; back to the human's own last decision:
         cmp UIHUMAN             ;  two plies if the engine has already
         bne ctone               ;  replied, one if it is still thinking
@@ -1225,7 +1234,15 @@ ctdone: jmp uiclrmsg
 cmd_resign:
         lda UIRESULT
         bne :+
-        lda UIHUMAN             ; the human resigns: the engine wins
+        ; The side TO MOVE is the one resigning, and the other one wins.
+        ; Deriving that from SIDE rather than UIHUMAN is what makes it right
+        ; in TWO-PLAYER mode, where UIHUMAN is the sentinel $FF and not a
+        ; colour at all: `$FF EOR COLORMASK` is nonzero, so a resignation by
+        ; either player used to be announced as "BLACK WINS". `R` is only
+        ; reachable while UIRESULT is 0, which is only ever the side to
+        ; move's own turn, so SIDE is the resigning side in every mode —
+        ; and it is the same expression uisync already uses for a mate.
+        lda SIDE
         eor #COLORMASK
         sta UIWIN
         lda #RES_RESIGN

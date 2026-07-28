@@ -3,6 +3,139 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-28 — FOUR-LENS ADVERSARIAL REVIEW: the shipping disk was ~24 Elo weaker than everything we measured, and would have sprayed garbage on a IIe
+
+Four independent reviewers, one lens each (hardware fidelity, engine asm,
+chess rules, instrument/memory-map integrity), told to verify rather than
+speculate and not to pad. All findings below are CONFIRMED unless marked.
+
+### ★ 1. The disk shipped `FEATURES = $1F`; every measurement used `$5F` — FIXED
+
+`asm/m8.s` installed `$1F` under a comment reading "all search + eval
+features" — true only until **FT_CKEXT was adopted 2026-07-25 at +24 ± 23
+Elo over 600 SPRT games**. Every rig plays `$5F`: `ucibridge.runEngine`,
+`internal/sprt`, `TestProfileR5`, the soft-clock gates, and **both Sargon
+gauntlets (+89 and +110)**. So the bootable disk — the artifact a user is
+handed — played about **24 Elo below the artifact this log describes**. Not
+a crash; a silently weaker product.
+
+**Two independent reviewers found it the same day**, which is the strongest
+evidence the lens split was worth it.
+
+**Why every gate missed it, and this is the durable lesson:** `internal/ui`'s
+reference searches go through `chesstest.NewMachine`, whose TEST default is
+also `$1F`, so `TestEngineParity` compared **`$1F` against `$1F`**. The
+reference had been built to match the UI rather than to match what ships —
+the identical shape as the harness clock the hardware does not have, and the
+position pool that was not game conditions. `engine.bin` is unaffected (the
+mask is poked at runtime), so MicroAB fingerprints never moved.
+
+Now gated from both directions by `TestShippedFeatureMask` and
+`TestShippedFeatureConfig`, which read the bytes out of the BOOTED image and
+compare them against the bridge.
+
+Second-order, still open: the FT2_SOFTCLK cost table was **fit on `$5F`
+games** while the device ran `$1F`, and check evasions are exactly the
+per-node cost the phase regressor cannot see. Fixing FEATURES realigns them —
+but the adherence numbers should be re-run before anyone touches SOFTMARGIN.
+
+### ★ 2. `80STORE` was never cleared: the aux TT would land on the text screen — FIXED
+
+With `80STORE` on, `$0400-$07FF` follows `PAGE2` and **ignores
+`RAMRD`/`RAMWRT`**. The TT spans aux `$0200-$81FF`, which contains that
+range — so 1,024 TT slots would write to the **MAIN text page**: garbage
+characters spraying across the board on every search, and a TT reading the
+screen back as entries.
+
+A IIe powers up with `80STORE` off, so the **disk boot was never affected**.
+But the 80-column firmware turns it ON — exactly what a `BLOAD`/`BRUN` from
+BASIC.SYSTEM in 80-column mode inherits (the default on a IIc, and on any IIe
+booted after `PR#3`), which §12.2 ships as a first-class path. Fixed with one
+`sta $C000` (+3 B).
+
+**goapple2 does not implement `80STORE`** (it counts `$C000/$C001` as
+Unhandled), so **no test in this repo could ever have caught it**.
+`TestDiskBoots` now *requires* the store to appear in Unhandled, so it cannot
+be silently removed.
+
+### 3. Two rules bugs a player would have hit — both FIXED
+
+- **Resigning always announced "BLACK WINS" in two-player mode.**
+  `cmd_resign` computed the winner as `UIHUMAN EOR COLORMASK`, but in referee
+  mode `UIHUMAN` is the sentinel `$FF`, so `$FF EOR $08 = $F7` → read as
+  Black whoever resigned. Fixed to `lda SIDE` — the same expression `uisync`
+  already uses for mate, and one byte smaller.
+- **A draw offer was answered from a search of a retracted position.**
+  Takebacks stack, so the engine could agree a draw on the strength of a line
+  many plies from the board. `cmd_take` now clears the stale score, the same
+  rule `m8engine` already applied after a book move.
+
+### 4. The chess itself is CLEAN
+
+Worth stating positively. Differential gates added: 28 hand-built corners
+(every castling transit square, castling out of/into check, the horizontal-pin
+en passant, promotion with capture, smothered mate, double check), ~800 random
+positions, and 12 random games **typed into the UI** with the whole position
+compared every ply. Verified: rights lost to a rook **captured on its home
+square**; repetition is position-based (castling rights, ep file and side to
+move all in the Zobrist) and fires on the third occurrence; the 50-move rule
+is halfmoves and **mate on the hundredth halfmove is mate**; all four
+promotions reachable including on captures. Insufficient material is a
+*missing* draw, never a wrong one.
+
+The engine reviewer separately audited `ttmovevalid` line-by-line against
+`generate` (the routine that, since deferred generation, is the ONLY thing
+stopping a 2⁻²⁰ TT collision from putting an illegal move on the board) and
+found no permissiveness; also make/unmake symmetry path-by-path, every
+signed/unsigned score compare, the TT depth/bound proof, page alignment and
+both SMC sites, and a scripted zero-page overlap check. Nothing found.
+
+### 5. Open, NOT fixed (filed)
+
+- **Ctrl-Reset does not return to 8fish.** The IIe language card *is*
+  disabled by a hardware reset, so `$FFFC` comes from ROM and `m8main`'s
+  vector writes are dead code. Autostart's warm-start test then passes and
+  jumps into Applesoft **with zero page trashed by the engine**. 8-byte fix
+  proposed (invalidate the power-up byte so Ctrl-Reset is a clean cold boot).
+- **No machine detection.** On a ][+ the aux switches are no-ops, so the TT
+  writes over the book and the engine image — it overwrites itself mid-search.
+  On a 64K IIe the TT is dead and ~1 false hit per game slips the 24-bit
+  verify. ~30 B two-sided probe proposed.
+- **`Q-QUIT` does not quit** — it silently starts a new game, and no test
+  presses Q.
+- **Move numbers ≥ 100 render as punctuation** (`uidec2` is two-digit); and a
+  legal game is **force-drawn at ply 250** regardless of position.
+- **`adaptmaybe`'s score-drop test lacks overflow correction** (SUSPECTED) —
+  time management only, same class as the `cmp #$74` bug, in code nobody
+  re-audited after that fix.
+
+### 6. Gate weaknesses found (several fixed)
+
+`TestUIByteBudget`'s fit assertion is unreachable (the linker always fires
+first); `TestDiskLedger`'s book identity check compares a file to itself;
+`TestBlobSize` compares blob **length**, not content; `TestMoveStackWatermark`
+reads MSP at hardcoded `$10/$11` instead of `defs["MSP"]` — relocate MSP and
+it silently samples the wrong bytes and **passes**, since the gate is
+one-sided. New `TestMainMemoryLayout`/`TestLanguageCardLayout` derive the whole
+map from the `.cfg`, `defs.inc` and real binary sizes.
+
+**GDVBUF was the third stale memory-map comment** (after the `$2000-$207F`
+reservation and the `$0E00` staging address): it sits at `$3000` justified as
+"above the book", quoting the size the book had *before* widening — it now
+overlaps by 3,311 B. Since there is no other 4 KB hole in MAIN, the overlap is
+now documented as deliberate and **enforced where it can fail**:
+`chesstest.newStubMachine` refuses to build a GDVERIFY machine with a resident
+book.
+
+### 7. Infrastructure
+
+`make test` **cannot run inside a `.claude/worktrees/` worktree** at all —
+`go.work` lists the repo root, and the worktree is inside the repo but outside
+the workspace, so `go build ./...` fails in a way easily mistaken for a build
+error. And one reviewer's worktree was created from a commit **~40 commits
+behind main**, where the files under review did not yet exist; it had to reset
+to main first. Both are worth fixing before the next agent fleet.
+
 ## 2026-07-28 — ADVERSARIAL RULES REVIEW of the UI's own referee: the chess is CLEAN, two GAME-RESULT bugs were not
 
 The on-device UI (`asm/m8.s`) is a second, independent implementation of the

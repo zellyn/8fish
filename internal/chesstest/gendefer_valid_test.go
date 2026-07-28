@@ -75,6 +75,19 @@ func newStubMachine(t *testing.T, bin []byte, pos *Position, sub uint16) *harnes
 	if err != nil {
 		t.Fatal(err)
 	}
+	// GDVBUF (ttmvsweep's 32x128 buffer at $3000) DELIBERATELY overlaps the
+	// resident book, which spans $2000-$3CEE since the 2026-07-28 widening --
+	// there is no other 4 KB hole in MAIN. A GDVERIFY build and a loaded book
+	// are therefore mutually exclusive, and this is where that invariant is
+	// enforced rather than merely asserted in a comment: a book loaded here
+	// would be shredded by the sweep, and the sweep's results by the book.
+	if bookBase := defs["BOOK_BASE"]; bookBase != 0 {
+		if m.Mem.Main[bookBase] == 'B' && m.Mem.Main[bookBase+1] == 'K' {
+			t.Fatalf("a resident book is loaded at $%04X, but this is a GDVERIFY "+
+				"machine whose GDVBUF sweep buffer at $3000 overlaps it: the two "+
+				"are mutually exclusive (see asm/defs.inc GDVBUF)", bookBase)
+		}
+	}
 	board := defs["BOARD"]
 	for rank := uint16(0); rank < 8; rank++ {
 		base := rank * 16

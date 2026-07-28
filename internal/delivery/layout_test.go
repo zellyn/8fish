@@ -275,14 +275,23 @@ func TestDebugBufferPlacement(t *testing.T) {
 	if buf+gdvBufSize > EngineOrg {
 		t.Errorf("GDVBUF $%04X+%d runs into the engine at $%04X", buf, gdvBufSize, EngineOrg)
 	}
-	if buf < BookOrg+book && buf+gdvBufSize > BookOrg {
-		t.Errorf("GDVBUF ($%04X-$%04X) overlaps the resident book ($%04X-$%04X) by %d bytes. "+
-			"asm/defs.inc still justifies $%04X as being ABOVE the book, quoting $2000-$2F19 "+
-			"— the size the book had before it was widened to %d B. Either move the buffer, "+
-			"or replace that justification with the real invariant (no GDVERIFY run may load "+
-			"a book) and assert it where the GDVERIFY machine is built.",
-			buf, buf+gdvBufSize-1, BookOrg, BookOrg+book-1,
-			min(buf+gdvBufSize, BookOrg+book)-max(buf, BookOrg), buf, book)
+	// RESOLVED 2026-07-28, taking this test's own second option. The buffer
+	// DOES overlap the book and now must: the book spans $2000-$3CEE since
+	// the widening, and there is no other 4 KB hole in MAIN. So a GDVERIFY
+	// build and a loaded book are MUTUALLY EXCLUSIVE, which is an invariant
+	// rather than an accident, and it is enforced where the GDVERIFY machine
+	// is built — chesstest.newStubMachine fails if a book is resident.
+	// asm/defs.inc no longer claims the buffer sits above the book.
+	//
+	// What this test still gates is the part that has no other home: the
+	// buffer must not run into the ENGINE, and the overlap must stay confined
+	// to the book region so the invariant above is the ONLY thing being
+	// relied on.
+	if buf < BookOrg {
+		t.Errorf("GDVBUF $%04X starts below the book at $%04X: the deliberate "+
+			"overlap is with the BOOK only, and anything below $%04X is engine "+
+			"scratch that a GDVERIFY sweep would corrupt with nothing asserting it",
+			buf, BookOrg, BookOrg)
 	}
 }
 

@@ -194,7 +194,20 @@ m8main:
         ; no readable clock; the harness deliberately leaves it OFF because
         ; it has a real counter, so this must NOT be copied from
         ; ucibridge.runEngine.
-        lda #$1F                ; all search + eval features
+        ; FEATURES must match ucibridge.runEngine's GAMEPLAY config, because
+        ; that is the configuration every Elo number in docs/results.md was
+        ; measured on. It shipped as $1F until 2026-07-28 -- a comment reading
+        ; "all search + eval features" that was true only until FT_CKEXT was
+        ; added on 07-25. So the disk played WITHOUT check extensions: a
+        ; +24 +/- 23 Elo feature, absent from the artifact we hand to a user,
+        ; present in every measurement we quote about it.
+        ;
+        ; Every gate missed it because internal/ui's reference searches use
+        ; chesstest.NewMachine, whose TEST default is also $1F, so
+        ; TestEngineParity compared $1F against $1F -- the reference was built
+        ; to match the UI instead of to match what ships.
+        ; internal/ui/shipconfig_test.go now pins this against the bridge.
+        lda #FT_CKEXT|$1F
         sta FEATURES
         lda #FT2_GENDEFER|FT2_SOFTCLK
         sta FEATURES2

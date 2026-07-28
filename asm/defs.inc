@@ -510,11 +510,25 @@ SMODE      = $0DE0      ; child window mode for the move being searched:
 ; the shipped image assembles none of that code and leaves them free.
 GDVMSP     = $0213      ; GDVERIFY: MSP saved across the throwaway generate
 GDVBASE    = $0215      ; GDVERIFY: ttmvsweep's first from-square
-GDVBUF     = $3000      ; GDVERIFY: ttmvsweep's 32x128 result buffer. Plain
-                        ;  RAM under the engine's $4000 org and above the
-                        ;  resident book blob ($2000-$2F19); used only by
-                        ;  TestTTMoveValidExhaustive's stub runs, which
-                        ;  probe no book.
+GDVBUF     = $3000      ; GDVERIFY: ttmvsweep's 32x128 result buffer.
+                        ;  DELIBERATELY OVERLAPS THE RESIDENT BOOK. It must:
+                        ;  the book now spans $2000-$3CEE (7407 B after the
+                        ;  2026-07-28 widening) and there is no other 4 KB
+                        ;  hole in MAIN, so a GDVERIFY build and a loaded
+                        ;  book are MUTUALLY EXCLUSIVE. That is fine -- the
+                        ;  sweep is a debug-only entry that probes no book --
+                        ;  but it is an invariant, not an accident, and
+                        ;  chesstest.newStubMachine asserts it.
+                        ;
+                        ;  This comment used to justify $3000 as being ABOVE
+                        ;  the blob, quoting $2000-$2F19: the size the book
+                        ;  had BEFORE it was widened. That made it the third
+                        ;  comment in this file to assert a memory-map fact
+                        ;  that had quietly stopped being true (see also the
+                        ;  deleted $2000-$207F reservation, and the stale
+                        ;  $0E00 staging address in docs/ui-design.md). Prefer
+                        ;  a test that enforces the invariant over a comment
+                        ;  that asserts it.
 
 ; ---- Entropy collector (asm/entropy.inc; M8 keyboard/text UI driver) ----
 ; The IIe has no clock and no RNG, so the eval dither's SEED is MANUFACTURED

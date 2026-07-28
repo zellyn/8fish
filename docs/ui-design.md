@@ -26,7 +26,7 @@ labelled *derived*.
 | `FT2_ADAPT` | **now runnable on device** via `FT2_SOFTCLK`; exposing it is still a UI decision (its ceilings are host-computed). See §6.3 |
 | progress during search | printed **between iterative-deepening iterations**, from the UI's own driver loop. **Zero lines of `search.s` change** |
 | MAIN-RAM cost | **0 bytes permanent** (a run-once 57-byte copier lives in soon-to-be-overwritten RAM) |
-| LC budget | **6,255 B of 8,176 B measured** (4,207 B code+data, 2,048 B RAM arrays, 256 B variables); **1,921 B free** |
+| LC budget | **6,270 B of 8,176 B measured** (4,222 B code+data, 2,048 B RAM arrays, 256 B variables); **1,906 B free** |
 
 The single most important finding is in §2: this project has never used its
 Language Card. The UI does not have to compete for the 1,622 bytes.
@@ -143,8 +143,16 @@ inverse upper  ASCII & $3F     ($00-$3F)
 inverse lower  ASCII           ($60-$7F)
 ```
 
-`$60-$7F` is inverse lowercase on both the enhanced and unenhanced IIe (they
-differ only at `$40-$5F`, which this design does not use). The whole mapping is a
+**★ PRECONDITION, added 2026-07-28 after it bit us.** That table describes
+the IIe's **ALTERNATE** character set. A IIe powers up on the **PRIMARY**
+set, where `$60-$7F` is **flashing punctuation** — so a UI that writes those
+bytes without first storing to `$C00F` shows a blinking digit or bracket
+wherever it meant a black piece on a dark square. `m8main` now takes the
+display in five stores (`$C00C` 80COL-off, `$C00F` ALTCHARSET, `$C051` TEXT,
+`$C052` NOMIX, `$C054` PAGE1); see docs/results.md 2026-07-28. `$60-$7F` is
+inverse lowercase on both the enhanced and unenhanced IIe once the alternate
+set is selected (they differ only at `$40-$5F`, which this design does not
+use). The whole mapping is a
 single **32-byte table** indexed by `dark<<4 | (piece & $0F)` — see `PIECECH` in
 `asm/ui.s`. Entry `$00` is a normal space and entry `$10` an inverse space, which
 also serves as the blank half-cell, so the inner loop needs no second table.
@@ -558,13 +566,20 @@ the image layout from the `ld65` segment map.
 4. **The engine is untouched.** `engine.bin` md5 is unchanged and `TestMicroAB`
    passes.
 
-**Not yet de-risked** (and honestly so): keyboard input on real hardware (the
-harness stands in for `$C000`/`$C010` via `HARNESSKBD`, which is how
-`internal/entropy` already validates the collector); the actual IIe character
-generator (goapple2 carries the ][+ 2 KB character ROM and does not model
-`ALTCHARSET`, so the inverse-lowercase glyphs are verified as *bytes* against the
-documented IIe encoding, not as pixels); and everything in §5-§7 that is a plan
-rather than code.
+**Not yet de-risked** (and honestly so, as of the PoC): keyboard input on real
+hardware (the harness stands in for `$C000`/`$C010` via `HARNESSKBD`, which is
+how `internal/entropy` already validates the collector); the actual IIe
+character generator (goapple2 carries the ][+ 2 KB character ROM and does not
+model `ALTCHARSET`, so the inverse-lowercase glyphs are verified as *bytes*
+against the documented IIe encoding, not as pixels); and everything in §5-§7
+that is a plan rather than code.
+
+> **Both emulator gaps were closed on 2026-07-28** — goapple2's `iie` gained
+> the IIe keyboard and `ALTCHARSET`, and a new `chargen` package renders IIe
+> glyphs — and closing the second one found a real bug in the shipping
+> build: it never selected the alternate character set (§3.2, §11 risk 2,
+> docs/results.md). The shipping image now plays a full game through
+> `$C000`/`$C010` and is screen-identical to the HARNESSKBD build.
 
 ---
 
@@ -631,10 +646,17 @@ is the only thing outstanding, and it is the only thing that needs hardware.
    worth offering. NOTE the UI owns the safety margin (§6.2): the engine's cost
    table is raw, and the per-move limits must be scaled before they are poked. See docs/results.md for the error distribution and
    the residual budget dependence.
-2. **Character-generator verification gap.** goapple2 carries the ][+ 2 KB
-   character ROM and does not model `ALTCHARSET`, so inverse lowercase is
-   verified as bytes-against-the-documented-encoding, not as pixels. If a real
-   IIe disagrees, the fallback in §3.2 is a 32-byte table swap.
+2. ~~**Character-generator verification gap.**~~ **CLOSED 2026-07-28, and it
+   WAS A BUG.** goapple2 now models `ALTCHARSET` and carries a IIe character
+   generator (`chargen`), so inverse lowercase is verified as dots. Doing
+   that immediately caught the shipping build never selecting the alternate
+   character set — on the primary set the board's `$60-$7F` bytes are
+   flashing punctuation, so every black piece on a dark square would have
+   blinked as a digit or bracket on real hardware. Fixed in `m8main` (five
+   display stores, +15 B). `TestInverseVideoPixels` now asserts that
+   *nothing on the whole screen* would flash or render as MouseText, which
+   is what fails if the store is ever removed. The §3.2 fallback table
+   remains available if a real IIe still disagrees.
 3. **The 6502 vectors at `$FFFA-$FFFF` are RAM** once LC read is enabled. The UI
    must write them (RESET → UI entry, IRQ/BRK → a safe handler). Whether Ctrl-Reset
    on a IIe forces ROM back in before the vector fetch needs hardware
@@ -680,7 +702,7 @@ Two BLOADable files, essentially as designed:
 m8boot.bin   57 B   BRUN at $0800   latch $C08B, copy $0900 -> $E000,
                                     install the engine's LC aux primitives
                                     at $D000, JMP $E000
-m8.bin    4,207 B   BLOAD at $0900  the UI payload
+m8.bin    4,222 B   BLOAD at $0900  the UI payload
 ```
 
 `$0800` is `PIECESQ` and `$0900-$1FFF` is the per-ply undo/search arrays and
@@ -710,7 +732,7 @@ From the linker's segment size and label deltas (`internal/ui`
 | entry vector (fixed at `$E000`) | 3 |
 | `asm/ui.s` renderer | 508 |
 | `asm/entropy.inc` | 56 |
-| cold start, main loop, whose-turn-is-it | 111 |
+| cold start, main loop, whose-turn-is-it | 126 |
 | position bookkeeping (new game, apply, hash history) | 164 |
 | move generation / validation / legality | 333 |
 | game state (legal count, mate/stalemate/50/repetition) | 105 |
@@ -722,15 +744,15 @@ From the linker's segment size and label deltas (`internal/ui`
 | painting | 470 |
 | think line + signed centipawn formatting | 280 |
 | tables and strings | 888 |
-| **UICODE total (measured)** | **4,207** |
+| **UICODE total (measured)** | **4,222** |
 | UI variables + screen buffers (`$F700`) | 256 |
 | game history from/to/flags (`$F800-$FAFF`) | 768 |
 | game hash history (`$FB00-$FEFF`) | 1,024 |
-| **TOTAL** | **6,255 of 8,176 (77%)** |
-| **FREE** | **1,921** |
+| **TOTAL** | **6,270 of 8,176 (77%)** |
+| **FREE** | **1,906** |
 
 **MAIN cost 0 B. TT cost 0 B. Book unmoved.** The design's estimate was
-~4,011 B; the real thing is 6,255 B, the difference being almost entirely
+~4,011 B; the real thing is 6,270 B, the difference being almost entirely
 strings, the level/limit arithmetic and the ID driver coming in heavier than
 their *derived* rows.
 
@@ -741,7 +763,13 @@ All under `internal/ui`, plus the two engine-side ones:
 | gate | what it proves |
 |---|---|
 | `TestM8Boot` | the shipping boot path runs, the UI executes from `$E000`, and it paints a start position and waits for a key |
-| `TestShippingImageBoots` | the REAL-keyboard build (not the HARNESSKBD one) boots, paints, and blocks in `entkey`'s poll loop with `ENTCNT` spinning — the engine's only source of entropy |
+| `TestShippingImageBoots` | the REAL-keyboard build (not the HARNESSKBD one) boots, paints, blocks in `entkey`'s poll loop with `ENTCNT` spinning — the engine's only source of entropy — and has selected the alternate character set |
+| `TestShippingKeyboard` | a key pressed on the modelled IIe keyboard reaches the SHIPPING image through `$C000`/`$C010`: echoed, backspaced, applied, and folded into `ENTROPY` |
+| `TestShippingScreenParity` | the shipping and HARNESSKBD builds paint **byte-identical screens after every keystroke** across 68 keys of moves, a capture, castling, an illegal move, a takeback, a level change and help |
+| `TestShippingEngineParity` | the two builds play the same **engine** moves and end with the same `ENTROPY`, so the two keyboard paths collect identical entropy |
+| `TestShippingFullGame` | **the SHIPPING image plays a complete game to a real termination through `$C000`/`$C010`**, refereed by refchess, screen-compared to the harness build at every keystroke |
+| `TestInverseVideoPixels` | the checkerboard as DOTS through `goapple2/chargen`, with the character set the image actually selected: all 128 board cells inverse iff dark, the piece glyphs dot-for-dot, and nothing on the screen that would flash or render as MouseText |
+| `TestPrimaryCharsetWouldBeWrong` | why the `$C00F` store is load-bearing: the same byte is a flashing `.` on the primary set and an inverse `n` on the alternate one |
 | `TestStartPosition` | the hand-written 64-byte start image is byte-identical to `chesstest.ParseFEN`, piece-list slots included (the Zobrist hash, and therefore every book key, is computed from those bytes) |
 | `TestMoveEntry` | a typed opening produces refchess's position at every ply, and the move panel lists it |
 | `TestSpecialMoves` | castling both ways, en passant, both promotion spellings — with zero UI chess code |
@@ -802,7 +830,7 @@ Nothing below is needed to play a game.
 | deferred | why | price to add |
 |---|---|---|
 | **Board flip when the human plays Black** | `uiboard` walks `a8` downward with a fixed square-colour phase | ~40 B: a direction byte and a phase seed in `uiboard`, plus reversing `uicoords` |
-| **Hi-res board** (§3.1) | costs information, not bytes: mixed mode leaves 4 text rows and the panel/status/prompt no longer fit at once | ~1,850 B, fits in the 1,921 B free; book moves to LC bank 2 |
+| **Hi-res board** (§3.1) | costs information, not bytes: mixed mode leaves 4 text rows and the panel/status/prompt no longer fit at once | ~1,850 B, fits in the 1,906 B free; book moves to LC bank 2 |
 | **Insufficient-material draw** (KK, KNK, KBK) | the engine detects it *inside* the search; at the root the UI does not | ~50 B: the same piece-list scan `search.s` already has, hoisted |
 | **Fivefold / 75-move automatic ends** | threefold and 50 already adjudicate | ~15 B (two constants) |
 | **Mate distance in the think line** | shows `+MATE` / `-MATE`, not `#4` | ~40 B: one subtract from `MATE` and a halve |
@@ -810,5 +838,7 @@ Nothing below is needed to play a game.
 | **Position setup / FEN entry** | two-player mode plus takeback covers replaying a game | ~250 B for a FEN parser, or ~150 B for a cursor-driven piece placer |
 | **Cursor / joystick move entry** | typed entry wins on code, notation, entropy and errors (§5.1) | ~200-260 B on top of the same validator |
 | **A saved game / disk I/O** | needs a DOS or ProDOS MLI interface the rest of the project does not have | unpriced |
-| **Real-hardware validation** | the emulator carries the ][+ character ROM and does not model `ALTCHARSET`, so inverse lowercase is verified as BYTES against the documented IIe encoding, not as pixels; and the IIe memory model has no keyboard at all, so the shipping build's `$C000`/`$C010` path is only proven to boot, paint and block (`TestShippingImageBoots`), never to receive a key | a disk image and a IIe |
+| **Real-hardware validation** | **narrowed 2026-07-28.** The emulator now models the IIe keyboard and `ALTCHARSET`, so the shipping build plays a full game through `$C000`/`$C010` and the checkerboard is verified as dots. What remains is genuinely a hardware question: the real character ROM's glyph shapes, video timing, and Ctrl-Reset | a disk image and a IIe |
+| **80-column / `80STORE`** | goapple2's `iie` deliberately leaves `80STORE` unmodelled (a compare on the hottest path for a switch nobody throws); `m8main` writes `PAGE1`, which pulls `$0400-$07FF` back to MAIN if firmware left it on | an emulator feature, not a UI one |
+| **MouseText glyphs** | `chargen` names MouseText but has no shapes for it; this UI does not use `$40-$5F` | 32 glyph bitmaps in goapple2 |
 | **Ctrl-Reset behaviour** (§11 risk 3) | the UI writes `$FFFA-$FFFF`, but whether a IIe forces ROM back in before the reset vector fetch is a hardware question | nothing to write; a hardware answer |

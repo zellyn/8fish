@@ -71,6 +71,13 @@ type Config struct {
 	InStatusAddr uint16
 	ClockAddr    uint16
 
+	// RealKeyboard makes the machine serve keystrokes the way an Apple IIe
+	// does — from the $C000 data latch, cleared by $C010 — instead of
+	// through the InAddr/InStatusAddr traps. Feed it with Machine.SendKey.
+	// This is what lets a test drive the SHIPPING build of an image rather
+	// than a harness-keyboard variant of it.
+	RealKeyboard bool
+
 	// Trace, if true, prints each executed instruction to stderr (a
 	// behavior of the underlying go6502/cpu package, which traces
 	// unconditionally to os.Stderr regardless of other I/O routing).
@@ -108,6 +115,7 @@ func New(cfg Config) (*Machine, error) {
 		InAddr:       cfg.InAddr,
 		InStatusAddr: cfg.InStatusAddr,
 		ClockAddr:    cfg.ClockAddr,
+		RealKeyboard: cfg.RealKeyboard,
 	}
 	if cfg.ROM != nil {
 		copy(mem.ROM[:], cfg.ROM)
@@ -170,3 +178,10 @@ func (m *Machine) WaitingForInput() bool { return m.Mem.waitingInput }
 
 // SendInput appends bytes to the input buffer served by the input trap.
 func (m *Machine) SendInput(data []byte) { m.Mem.Input = append(m.Mem.Input, data...) }
+
+// SendKey presses and releases one key on the modelled Apple IIe keyboard
+// (Config.RealKeyboard). The key is latched at $C000 with the strobe set and
+// stays there until the program clears it with $C010 — one key at a time,
+// exactly like the hardware's single-byte latch, so callers must run the
+// machine between keystrokes rather than queueing a whole line.
+func (m *Machine) SendKey(key byte) { m.Mem.KeyPress(key) }

@@ -5,10 +5,21 @@
 // The boot is the shipping boot. m8boot.bin is loaded at $0800 and executed;
 // it latches $C08B, copies the UI payload from $0900 up to Language Card RAM
 // at $E000, installs the engine's LC-resident aux primitives at $D000, and
-// jumps to $E000. Nothing about the image is special-cased for the test
-// except the keyboard: the HARNESSKBD build of asm/m8.s reads the harness
-// input traps instead of $C000/$C010, which is exactly how internal/entropy
-// already validates the same entkey code.
+// jumps to $E000.
+//
+// KEYBOARD. Two images, two ways in, and both are driven from here:
+//
+//	Boot          the HARNESSKBD build (asm/m8t.bin), which reads the
+//	              harness input traps at $BFF1/$BFF2 — the same way
+//	              internal/entropy validates the same entkey code.
+//	BootShipping  the SHIPPING build (asm/m8.bin), which polls $C000 for a
+//	              key with bit 7 set and clears the strobe at $C010,
+//	              through goapple2/iie's modelled IIe keyboard. This is the
+//	              image that goes on the disk.
+//
+// Machine.Key/Type/Enter work identically on both, so every gate can be run
+// against either; internal/ui/shipping_test.go runs the two in lockstep and
+// requires byte-identical screens.
 //
 // CLOCK. The machine is built with the harness clock trap DISABLED, because
 // that is the hardware truth: on an Apple IIe $BFF4 is plain RAM, and with
@@ -41,6 +52,11 @@ type Machine struct {
 	M    *harness.Machine
 	Defs chesstest.Defs
 	Lbl  map[string]uint16 // asm/m8t.lbl: UI label -> address
+
+	// RealKbd is set for the SHIPPING image: keystrokes go into the IIe
+	// keyboard latch at $C000 and the image clears the strobe at $C010,
+	// instead of the harness input traps the HARNESSKBD build reads.
+	RealKbd bool
 
 	// StepLimit caps how many cycles the image may run WITHOUT blocking for
 	// input before RunToInput gives up. A stuck image must fail the test,
@@ -146,7 +162,7 @@ func ParseLbl(path string) (map[string]uint16, error) {
 // keystroke. book, if non-nil, is injected at $2000 (the resident opening
 // book's home).
 func Boot(root string, book []byte) (*Machine, error) {
-	u, err := load(root, "m8tboot", "m8t", book, true)
+	u, err := load(root, "m8tboot", "m8t", book, false)
 	if err != nil {
 		return nil, err
 	}
@@ -157,26 +173,31 @@ func Boot(root string, book []byte) (*Machine, error) {
 }
 
 // BootShipping loads the SHIPPING image — the build that reads the real
-// $C000/$C010 keyboard rather than the harness input traps — and runs the
-// copier for the given number of cycles. It cannot be typed at (the IIe
-// memory model has no keyboard), so it will end up spinning in entkey's
-// poll loop; what it proves is that the image that goes on the disk boots,
-// installs itself in Language Card RAM, paints, and then waits.
-func BootShipping(root string, cycles uint64) (*Machine, error) {
-	u, err := load(root, "m8boot", "m8", nil, false)
+// $C000/$C010 keyboard rather than the harness input traps — and runs it to
+// its first keyboard poll. The returned Machine types exactly like the
+// HARNESSKBD one: Key/Type/Enter put the keystroke in the modelled IIe
+// keyboard latch, and the image reads it with the same $C000 poll and
+// $C010 strobe clear it will execute on hardware.
+//
+// This is the build that goes on the disk. Everything the HARNESSKBD gates
+// prove about the UI, this one has to prove about the artefact.
+func BootShipping(root string, book []byte) (*Machine, error) {
+	u, err := load(root, "m8boot", "m8", book, true)
 	if err != nil {
 		return nil, err
 	}
-	if _, _, err := u.M.Run(cycles); err != nil {
+	if err := u.RunToInput(); err != nil {
 		return nil, err
 	}
 	return u, nil
 }
 
-// load builds the machine and lays the three images out in memory. traps
-// selects whether the harness input traps are wired up at all: the shipping
-// build reads $C000/$C010, so leaving them on would be a lie.
-func load(root, bootName, payloadName string, book []byte, traps bool) (*Machine, error) {
+// load builds the machine and lays the three images out in memory.
+// realKbd selects the keyboard the image will read: the shipping build goes
+// through the modelled IIe keyboard at $C000/$C010 and the harness input
+// traps are left unwired, because wiring them for an image that never reads
+// them would be a lie.
+func load(root, bootName, payloadName string, book []byte, realKbd bool) (*Machine, error) {
 	engine, err := os.ReadFile(filepath.Join(root, "asm", "engine.bin"))
 	if err != nil {
 		return nil, err
@@ -207,7 +228,9 @@ func load(root, bootName, payloadName string, book []byte, traps bool) (*Machine
 		// accumulator. See the package comment.
 		ClockAddr: 0,
 	}
-	if traps {
+	if realKbd {
+		cfg.RealKeyboard = true
+	} else {
 		cfg.InAddr, cfg.InStatusAddr = 0xBFF1, 0xBFF2
 	}
 	m, err := harness.New(cfg)
@@ -219,7 +242,7 @@ func load(root, bootName, payloadName string, book []byte, traps bool) (*Machine
 	if book != nil {
 		copy(m.Mem.Main[0x2000:], book)
 	}
-	return &Machine{M: m, Defs: defs, Lbl: lbl, StepLimit: DefaultStepLimit}, nil
+	return &Machine{M: m, Defs: defs, Lbl: lbl, StepLimit: DefaultStepLimit, RealKbd: realKbd}, nil
 }
 
 // ErrExited reports that the image hit the exit trap (the Q command).
@@ -252,9 +275,30 @@ func (u *Machine) RunToInput() error {
 
 // Key sends one keystroke and runs until the UI blocks for the next one.
 func (u *Machine) Key(c byte) error {
-	u.M.SendInput([]byte{c})
+	if u.RealKbd {
+		u.M.SendKey(c)
+	} else {
+		u.M.SendInput([]byte{c})
+	}
 	return u.RunToInput()
 }
+
+// Spin runs the image for a while with NO key arriving, so a test can watch
+// what the keyboard wait does while it waits. The "blocked for input" break
+// is suppressed for the duration; nothing else changes.
+func (u *Machine) Spin(cycles uint64) error {
+	saved := u.M.Mem.RealKeyboard
+	u.M.Mem.RealKeyboard = false
+	defer func() { u.M.Mem.RealKeyboard = saved }()
+	_, _, err := u.M.Run(cycles)
+	return err
+}
+
+// AltCharset reports whether the image has selected the IIe's ALTERNATE
+// character set. It has to be on, or the $60-$7F bytes the board uses for
+// black pieces on dark squares are flashing punctuation rather than inverse
+// lowercase (goapple2/chargen documents both sets).
+func (u *Machine) AltCharset() bool { return u.M.Mem.AltCharset }
 
 // Type sends a string of keystrokes one at a time, letting the machine run
 // between each — the same way a human types, and the same way the entropy

@@ -3,6 +3,93 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-28 — ★ THE SHIPPING BUILD NOW PLAYS, and it was showing FLASHING PUNCTUATION for half the pieces
+
+Closing the gap between the UI we test and the UI we ship. Two things were
+only ever verified adjacent to the real situation, and one of them was
+wrong.
+
+**★ THE FINDING: the shipping build never selected the IIe's alternate
+character set.** `asm/ui.s`'s `PIECECH` encodes a black piece on a dark
+square as `$60-$7F` — inverse lowercase, exactly as documented. That
+encoding is correct **only on the ALTERNATE character set**. An Apple IIe
+powers up on the **PRIMARY** set, where `$60-$7F` is **flashing
+punctuation**. Nothing in `asm/m8.s` ever wrote `$C00F`. So on real
+hardware, every black piece standing on a dark square — 8 of the 16 black
+men in the start position — would have been a *blinking digit or bracket*,
+and the inverse-video checkerboard would have been half missing.
+
+Every byte on the screen was right. Every byte would have been displayed as
+something else. The bytes were verified against the documented encoding;
+the encoding's precondition was never verified, because the emulator did not
+model the switch that establishes it.
+
+Fixed in the SHIPPING BUILD, not the emulator: `m8main` now takes the
+display in five stores — `80COL off` (ProDOS boots a IIe into 80 columns,
+which would show this 40-column screen one column out of two), **`ALTCHARSET
+on`**, `TEXT`, `NOMIX`, `PAGE1` (which also pulls `$0400-$07FF` back to MAIN
+if the 80-column firmware left `80STORE` on). **+15 bytes**, all in
+Language Card RAM; free budget 1,921 → 1,906 B. Engine untouched.
+
+**The shipping build now plays a whole game through the real keyboard.**
+`asm/m8.bin` — built WITHOUT `-D HARNESSKBD`, polling `$C000` for bit 7 and
+clearing the strobe at `$C010` — played the same **75-ply game to
+checkmate**, 193 keystrokes, 127.2 s of emulated IIe time. Previously it was
+proven to boot, paint and block, and nothing else.
+
+**Shipping and test builds are byte-identical on screen.** `TestShippingScreenParity` and `TestShippingFullGame` drive both builds in lockstep and
+compare all 960 screen bytes **after every keystroke**. No divergence, at
+any keystroke, in any test — including the engine's own moves, which are
+seeded from the `ENTROPY` accumulator the keyboard feeds, so the two
+keyboard paths collect identical entropy and the engine plays identical
+chess either way. The two payloads differ by 3 bytes (4,222 vs 4,219): the
+operands of `entkey`'s two loads, plus the `bit KBDSTRB` that clears the
+strobe. `m8boot.bin` is byte-identical for both.
+
+**goapple2 gained what made this checkable** (committed there, on `master`):
+
+| added | what it is |
+|---|---|
+| `iie` keyboard | `$C000-$C00F` read the data latch, `$C010` clears the strobe and reports any-key-down; `KeyDown`/`KeyUp`/`KeyPress` inject; `KbdIdlePolls` distinguishes blocked-for-input from still-working |
+| `iie` ALTCHARSET + display state | `$C00E`/`$C00F` write, `$C01E` read, plus 80COL and the `$C050-$C057` switches with their `$C01A-$C01D` status reads; reset state is 40-column primary-set text |
+| `chargen` (new package) | the IIe character generator: screen byte + ALTCHARSET → the dots a IIe lights, for both character sets |
+
+Deliberately **left** of the broader stage-2 retrofit: `80STORE` (a second
+compare on the hottest path in the emulator for a switch nobody throws —
+it stays loud in `Unhandled`), aux-bank/80-column video, slot ROM
+switching, mouse/paddles/speaker, key auto-repeat, and the 32 MouseText
+glyph shapes (`chargen` names MouseText but has no pixels for it and says
+so rather than inventing them). The list is in `iie`'s package doc.
+
+**Inverse video is now verified as dots, not bytes.** `TestInverseVideoPixels`
+renders the board through `chargen` with the character set the image
+actually selected, and asserts: all 128 board cells are inverse iff the
+square is dark (by lit-dot count, not by byte value); a black knight on a
+dark square is a lowercase `n` *cut out of a lit background*, dot for dot;
+and **nothing anywhere on the 40x24 screen would flash or come out as
+MouseText**. That last assertion is the one that fails if the `$C00F` store
+is ever deleted.
+
+### Gates
+
+| gate | result |
+|---|---|
+| `TestShippingFullGame` (75 plies to checkmate, real keyboard, refereed by refchess, screen-compared to the harness build after each of 193 keystrokes) | **pass** |
+| `TestShippingScreenParity` (68 keystrokes: moves, capture, castling, illegal move, takeback, level, help) | **pass** |
+| `TestShippingEngineParity` (both builds play the same engine moves; `ENTROPY` identical) | **pass** |
+| `TestShippingKeyboard` (echo, backspace, move applied, entropy folded) | **pass** |
+| `TestInverseVideoPixels` / `TestPrimaryCharsetWouldBeWrong` | **pass** |
+| `TestShippingImageBoots` (now also asserts ALTCHARSET) | **pass** |
+| rest of `internal/ui` (19 gates), `harness`, `internal/entropy` | **pass** |
+| goapple2 `iie` (incl. new `TestKeyboard`, `TestDisplaySwitches`), `chargen` | **pass** |
+| `chesstest.TestMicroAB` | **pass**, fingerprint unchanged |
+| `asm/engine.bin` | **`cmp`-identical** to a `git archive HEAD` build, md5 `58ef9645…` |
+
+**Still not de-risked:** nobody has run this on a real Apple IIe. What
+changed is that the emulator no longer *quietly agrees* with the shipping
+image about the keyboard and the character set — it now disagrees where the
+hardware would.
+
 ## 2026-07-28 — ★ MILESTONE: 8fish is PLAYABLE on an Apple IIe (asm/m8.s), and it cost the engine ZERO bytes
 
 The on-device UI is built and a human can sit down and play: boot, choose a
@@ -78,6 +165,11 @@ and block in `entkey` with the entropy counter spinning. And `ALTCHARSET` is
 not modelled, so inverse lowercase is verified as BYTES against the
 documented IIe encoding, not as pixels. Everything above is measured on an
 emulator; nobody has yet seen 8fish on a real Apple IIe.
+
+> **Both emulator gaps were closed later the same day, and closing the
+> second one found a real bug in the shipping build** — it never selected
+> the alternate character set, so half the black pieces would have been
+> flashing punctuation on hardware. See the entry at the top of this file.
 
 ## 2026-07-28 — THE ON-DEVICE UI IS PLAYABLE (8fish, `asm/m8.s`)
 

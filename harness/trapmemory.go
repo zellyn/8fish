@@ -34,6 +34,15 @@ type TrapMemory struct {
 	ClockAddr    uint16
 	Input        []byte // pending input; append via Machine.SendInput
 
+	// RealKeyboard drives the SHIPPING keyboard path instead of the input
+	// traps: keys are injected into the iie.Memory keyboard latch with
+	// Machine.SendKey and the program reads them from $C000/$C010, exactly
+	// as it will on hardware. A read of the keyboard latch with no key
+	// waiting sets WaitingForInput, which is the same "the program is
+	// blocked" signal InStatusAddr gives — the program is in its keyboard
+	// poll loop and nothing will change until a key arrives.
+	RealKeyboard bool
+
 	exited       bool
 	exitCode     byte
 	waitingInput bool
@@ -61,6 +70,10 @@ func (t *TrapMemory) Write(addr uint16, val byte) {
 // Read implements cpu.Memory, applying the read traps (main-bank reads
 // only) before delegating to the underlying iie.Memory.
 func (t *TrapMemory) Read(addr uint16) byte {
+	// The keyboard is I/O, not RAM: RAMRD does not shadow it.
+	if t.RealKeyboard && addr >= 0xC000 && addr <= 0xC00F && !t.Memory.KeyWaiting() {
+		t.waitingInput = true
+	}
 	if !t.Memory.RamRd {
 		switch {
 		case t.InAddr != 0 && addr == t.InAddr:

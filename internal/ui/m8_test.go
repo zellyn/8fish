@@ -231,14 +231,15 @@ func TestUIByteBudget(t *testing.T) {
 
 // TestShippingImageBoots runs the image that actually goes on the disk — the
 // build that reads the real $C000/$C010 keyboard, not the harness input
-// traps. It cannot be typed at (the IIe memory model has no keyboard), so
-// what this proves is the part that is otherwise never exercised: m8boot.bin
-// copies the shipping payload into Language Card RAM, the UI runs there,
-// paints a start position, and then blocks in entkey's poll loop with the
-// entropy counter spinning.
+// traps. m8boot.bin copies the shipping payload into Language Card RAM, the
+// UI runs there, paints a start position, and then blocks in entkey's poll
+// loop with the entropy counter spinning.
 func TestShippingImageBoots(t *testing.T) {
-	u, err := ui.BootShipping(root, 4_000_000) // ~4 s of IIe time
+	u, err := ui.BootShipping(root, nil)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := u.Spin(4_000_000); err != nil { // ~4 s of IIe time, no key
 		t.Fatal(err)
 	}
 	s := u.Screen()
@@ -266,4 +267,9 @@ func TestShippingImageBoots(t *testing.T) {
 	}
 	t.Logf("ENTCNT = %d after %d cycles: the entropy collector is spinning in the keyboard wait",
 		entcnt, u.M.Cycles)
+	// And it must have taken the display: without ALTCHARSET the board's
+	// inverse lowercase is flashing punctuation on a real IIe.
+	if !u.AltCharset() {
+		t.Error("the shipping image did not select the ALTERNATE character set")
+	}
 }

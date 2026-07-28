@@ -104,11 +104,42 @@ m8entry: jmp m8main
 ; Entry and the main loop
 ; ===========================================================================
 
+; IIe display soft switches. These are WRITE-only on a IIe (all of
+; $C000-$C00F READS as the keyboard), so each is reached with a store.
+; Deliberately declared here and not in defs.inc: that file is engine
+; source, and the UI does not touch engine source.
+SET80COLOFF = $C00C     ; w: 40-column display
+SETALTCHAR  = $C00F     ; w: ALTERNATE character set
+TXTSET      = $C051     ; text, not graphics
+MIXCLR      = $C052     ; full screen, no four-line text window
+TXTPAGE1    = $C054     ; display page 1 (and, under 80STORE, map it to MAIN)
+
 ; m8main: cold start. Runs at $E000 with LC RAM read+write enabled and the
 ; engine image already resident at $4000.
 m8main:
         ldx #$FF
         txs
+        ; TAKE THE DISPLAY. Five stores, and the first two are not optional.
+        ;
+        ; ALTCHARSET is the load-bearing one. A IIe powers up on the PRIMARY
+        ; character set, in which $60-$7F is FLASHING PUNCTUATION — so every
+        ; black piece standing on a dark square (PIECECH's inverse lowercase)
+        ; would come out as a blinking digit or bracket. $60-$7F is inverse
+        ; lowercase only once the ALTERNATE set is selected, and only the
+        ; program can select it. The byte encoding in docs/ui-design.md §3.2
+        ; is correct; it just silently assumed a switch nobody threw.
+        ;
+        ; 80COL-off matters because ProDOS on a IIe boots into 80 columns:
+        ; with the 80-column hardware live, this 40-column screen is shown
+        ; one column out of two. TEXT / NOMIX / PAGE1 are three bytes each
+        ; and remove the remaining assumptions about the state a BRUN
+        ; inherits; PAGE1 also pulls $0400-$07FF back to MAIN if the
+        ; 80-column firmware left 80STORE on.
+        sta SET80COLOFF
+        sta SETALTCHAR
+        sta TXTSET
+        sta MIXCLR
+        sta TXTPAGE1
         ; The 6502 vectors at $FFFA-$FFFF are RAM once LC read is enabled, so
         ; they are ours to write and MUST be written: with LC RAM in, a BRK or
         ; a stray interrupt would otherwise vector through whatever garbage

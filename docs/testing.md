@@ -53,6 +53,7 @@ memory map (D8) so engine tables can never collide with them.
 | `$BFF2` | read (main bank) | `$80` if input is waiting, else 0; reading with an empty buffer also sets `WaitingForInput`, so a driving process can supply input (`SendInput`) and resume the run |
 | `$BFF4`-`$BFF6` | read (main bank) | cycle count / 256, 24 bits little-endian, latched on the `$BFF4` read. **Disable it** (`m.Mem.ClockAddr = 0`) to get real hardware semantics — plain RAM — which is what `FT2_SOFTCLK` needs: the engine's estimated-cycle accumulator lives at this same address, and with the trap enabled the trap's answer wins. `m.Cycles` still reports the true count either way, which is what makes the estimator measurable (internal/chesstest/softclock_test.go). |
 | `$C019` | read | VBL status derived from the cycle counter (bit 7 low during VBL, IIe sense) — lets the hardware timing path be tested pre-metal |
+| `$C000`/`$C010` | read | the REAL IIe keyboard, when `Config.RealKeyboard` is set. Not a trap: `goapple2/iie` models the data latch and the strobe, and `(*Machine).SendKey` presses a key. A read of `$C000-$C00F` with no key waiting sets `WaitingForInput` exactly the way `$BFF2` does, so the same driving loop works. This is how `internal/ui` drives the **shipping** build of the M8 UI (2026-07-28) — the one WITHOUT `HARNESSKBD` — rather than a keyboard-substituted variant of it |
 
 The `-cout`/`-exit` flags can relocate the traps for experiments, but
 $BFF0/$BFFF are canonical — all checked-in code assumes them.
@@ -93,11 +94,31 @@ memory model (no video, no cards) implementing:
 - An `Unhandled` counter for accesses to anything it does not implement,
   so the harness warns when code strays outside the supported subset
 
-Deliberately unimplemented in stage 1 (the engine keeps 80STORE off, which
-on real hardware makes RAMRD/RAMWRT govern all of `$0200-$BFFF`):
-80STORE/PAGE2/HIRES display-coupled banking, INTCXROM/SLOTC3ROM Cxxx ROM
-mapping, keyboard. Stage 2 adds these, validated by the rest of a2audit,
-and wires the model into the interactive goapple2 machine.
+**Stage 1.5 (2026-07-28), added for the shipping M8 UI:**
+
+- the **keyboard**: `$C000-$C00F` read the data latch (all sixteen do on a
+  IIe; those addresses are write-only switches), `$C010` read or write
+  clears the strobe and a read also returns any-key-down in bit 7.
+  `KeyDown`/`KeyUp`/`KeyPress` inject; `KbdIdlePolls` counts trips round a
+  wait loop, which is how a driver tells blocked-for-input from working
+- **ALTCHARSET** (`$C00E`/`$C00F` write, `$C01E` read), 80COL
+  (`$C00C`/`$C00D`, `$C01F`) and the `$C050-$C057` display switches with
+  their `$C01A-$C01D` status reads — **state only**, since the model draws
+  nothing. Reset state is 40-column primary-set text, as on hardware
+- the new `goapple2/chargen` package turns a screen byte plus the
+  ALTCHARSET state into the dots a IIe lights, for both character sets, so
+  inverse video can be checked as pixels rather than as bytes. Finding it
+  paid for itself immediately: see docs/results.md 2026-07-28
+
+Still deliberately unimplemented (the engine keeps 80STORE off, which on
+real hardware makes RAMRD/RAMWRT govern all of `$0200-$BFFF`):
+80STORE/PAGE2/HIRES display-coupled **banking** — one extra compare on the
+hottest path in the emulator for a switch no caller throws, so it stays
+loud in `Unhandled` — plus aux-bank/80-column video, INTCXROM/SLOTC3ROM
+Cxxx ROM mapping, mouse/paddles/speaker, key auto-repeat, and the 32
+MouseText glyph shapes. The list lives in `iie`'s package doc. Stage 2
+adds them, validated by the rest of a2audit, and wires the model into the
+interactive goapple2 machine.
 
 ### Validation against a2audit
 

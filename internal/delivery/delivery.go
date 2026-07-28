@@ -33,6 +33,25 @@
 // growth (the engine eats the spare, the UI eats the growth room), so
 // TestDiskLedger asserts both rather than trusting this comment.
 //
+// NEITHER MARGIN IS A WALL. It is our disk. The 44 KB cap and the contiguous
+// span are properties of the SIMPLEST Standard Delivery layout — one shot,
+// one span — not of the medium. When the margins run out the answer is a
+// different LOADER, not a smaller program:
+//
+//   - chain-load: the first thing loaded loads the next. Cheap in principle,
+//     but by the time it is robust it is most of a sector reader, at which
+//     point taking a good one beats writing one.
+//   - ProRWTS2 (peterferrie): reads AND WRITES ProDOS files. It is the
+//     intended successor, because Standard Delivery is READ-ONLY and a saved
+//     game needs a writer — and hand-rolling a Disk II WRITER (6-and-2 nibble
+//     encoding plus write-splice timing) is the last thing this project
+//     should write itself: getting it wrong corrupts disks instead of failing.
+//     It would also remove the contiguous-span squeeze, handing the UI back
+//     its full 5,888-byte LC budget.
+//
+// So the ledger is a TRIPWIRE that says "the simple path no longer fits,
+// choose a mechanism", not a budget that has to be defended.
+//
 // The staging address is not hardcoded in asm/m8.s; it is a linker symbol
 // defined by asm/m8sd.cfg, so this layout and the BLOAD layout are built from
 // the same source and the copier is the only thing that differs (by two
@@ -262,14 +281,16 @@ func Build(root, imgPath, dskPath string) (Ledger, error) {
 		return Ledger{}, err
 	}
 	if l.SDSpare < 0 {
-		return l, fmt.Errorf("delivery: image is %d B, which is %d B over `diskii mksd`'s %d B limit "+
-			"(see internal/delivery's package doc: raising the base at $%04X buys 256 B per page, "+
-			"at the cost of the same 256 B of UI staging room)",
-			l.ImageBytes, -l.SDSpare, MaxImage, Base)
+		return l, fmt.Errorf("delivery: image is %d B, %d B over `diskii mksd`'s %d B limit -- "+
+			"8fish has outgrown the simple single-shot Standard Delivery layout. Raising the "+
+			"base above $%04X buys 256 B per page from the %d B of UI staging room; past that, "+
+			"chain-load or move to ProRWTS2 (see this package's doc)",
+			l.ImageBytes, -l.SDSpare, MaxImage, Base, l.UIRoom)
 	}
 	if l.UIRoom < 0 {
 		return l, fmt.Errorf("delivery: the staged UI payload ends at $%04X, %d B INTO the resident "+
-			"opening book at $%04X: the copier would load the book's first %d bytes over itself",
+			"opening book at $%04X: in this layout the copier would load the book's first %d bytes "+
+			"over itself. A loader that does not stage below the book fixes it (see this package's doc)",
 			l.PayloadEnd, -l.UIRoom, BookOrg, -l.UIRoom)
 	}
 	if _, err := exec.LookPath("diskii"); err != nil {

@@ -92,9 +92,15 @@ func TestDiskLayout(t *testing.T) {
 	}
 }
 
-// TestDiskLedger is the margin ledger. It fails when EITHER margin is
-// exhausted and prints both on every run, so growth is visible long before it
-// is fatal. A comment would not survive the growth; this does.
+// TestDiskLedger is the margin ledger for the SIMPLE SINGLE-SHOT layout.
+//
+// It is a TRIPWIRE, not a wall. It is our disk: nothing stops us chain-loading
+// (one loaded thing loading the next) or moving to ProRWTS2, and either
+// removes the contiguous-span squeeze entirely. What this test says when a
+// margin goes negative is "the one-shot Standard Delivery path no longer fits
+// -- pick a different mechanism", NOT "8fish cannot grow". It exists so that
+// choice is made deliberately on the day it arrives, instead of a disk quietly
+// coming out wrong.
 func TestDiskLedger(t *testing.T) {
 	pieces, err := delivery.Load(root)
 	if err != nil {
@@ -120,16 +126,21 @@ func TestDiskLedger(t *testing.T) {
 		t.Errorf("image is %d B but the ledger says %d", len(img), l.ImageBytes)
 	}
 	if l.SDSpare < 0 {
-		t.Errorf("MARGIN 1 EXHAUSTED: the image is %d B, which is %d B over `diskii mksd`'s "+
-			"%d B limit. Raising internal/delivery.Base by one page buys 256 B here and "+
-			"costs 256 B of MARGIN 2 -- but MARGIN 2 has only %d B, so at $%04X there is "+
-			"nowhere left to raise it to.",
-			l.ImageBytes, -l.SDSpare, delivery.MaxImage, l.UIRoom, delivery.Base)
+		t.Errorf("MARGIN 1: the image is %d B, %d B over `diskii mksd`'s %d B limit, so "+
+			"8fish has outgrown the SIMPLE SINGLE-SHOT Standard Delivery layout.\n"+
+			"This is a decision point, not a dead end. Raising internal/delivery.Base by "+
+			"one page buys 256 B here at the cost of 256 B of MARGIN 2 (%d B left); when "+
+			"that runs out, the answer is a different LOADER, not a smaller program -- "+
+			"chain-load in two stages, or move to ProRWTS2 (which also lifts the "+
+			"contiguous-span constraint and gives the UI its full LC budget back).",
+			l.ImageBytes, -l.SDSpare, delivery.MaxImage, l.UIRoom)
 	}
 	if l.UIRoom < 0 {
-		t.Errorf("MARGIN 2 EXHAUSTED: the staged UI payload ends at $%04X, %d B INTO the "+
-			"resident opening book at $%04X. The boot loader would deliver the payload "+
-			"over the book's first %d bytes and the engine would probe garbage.",
+		t.Errorf("MARGIN 2: the staged UI payload ends at $%04X, %d B INTO the resident "+
+			"opening book at $%04X. In THIS layout the loader would deliver the payload "+
+			"over the book's first %d bytes and the engine would probe garbage. The fix "+
+			"is a delivery mechanism that does not have to stage the payload below the "+
+			"book -- see MARGIN 1's note -- not a smaller UI.",
 			l.PayloadEnd, -l.UIRoom, delivery.BookOrg, -l.UIRoom)
 	}
 	// The book blob on disk must be the one the Go side ships, or the UI's

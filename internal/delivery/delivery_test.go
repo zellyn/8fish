@@ -8,11 +8,13 @@ import (
 // TestBaseTradeoff re-derives the staging-base decision table from the REAL
 // file sizes rather than restating it. Both margins move 256 bytes in opposite
 // directions per page, $0C00 is the lowest base that fits, and $0F00 already
-// overruns the book — so there is exactly one page of choice left, and it is
-// spent.
+// overruns the book.
 //
-// This is also the test that says what to do when MARGIN 1 runs out: nothing.
-// At that point the only lever left is making something smaller.
+// The table describes the SIMPLE SINGLE-SHOT layout only. When it runs out,
+// the answer is a different loader (chain-load, or ProRWTS2), not a smaller
+// program — it is our disk and it can do whatever we want. What this test
+// protects is that, for as long as the simple path is the one in use, the base
+// is the best available choice rather than a historical one.
 func TestBaseTradeoff(t *testing.T) {
 	var firstFit, lastRoom int
 	t.Logf("%-6s %8s %9s %15s", "base", "image", "SD spare", "UI growth room")

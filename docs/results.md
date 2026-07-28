@@ -71,7 +71,7 @@ flashing punctuation the primary character set would have produced. That was
 the defect found earlier today by reasoning; this is the first time a
 character generator other than goapple2's `chargen` has been asked.
 
-### The two margins, and why they are a TEST and not a comment
+### The two margins — a TRIPWIRE, not a wall
 
 Standard Delivery loads **one contiguous image**, so the gaps between the four
 pieces cost sectors, and `diskii mksd` refuses anything over **45,056 bytes**.
@@ -85,13 +85,22 @@ staging room, 256 bytes at a time:
 | **`$0C00` (chosen)** | **44,954** | **102** | **642** |
 | `$0F00` | 44,186 | 870 | −126 |
 
-744 bytes of total slack, split between two budgets that grow from opposite
-ends: the **engine** spends the SD spare, the **UI** spends the growth room.
-`TestDiskLedger` prints both on every run and fails when either goes negative,
-naming which one and by how much. `TestDiskRoundTrip` reads the built `.dsk`
-back sector by sector and requires it to equal the image handed to `mksd`
-(Standard Delivery's interleave is `sector 0, 14, 13 … 1, 15` per track, with
-track 0 sector 0 the boot sector).
+744 bytes of slack in this layout, split between two budgets that grow from
+opposite ends: the **engine** spends the SD spare, the **UI** spends the growth
+room. `TestDiskLedger` prints both on every run and fails when either goes
+negative, naming which one and by how much.
+
+**But neither is a wall, and the test says so.** zellyn: *"It's our disk. We
+can do whatever we want. We can load one thing that loads another, etc."* The
+44 KB cap and the contiguous span are properties of the *simplest* Standard
+Delivery layout, not of the medium. So the ledger's failure message is "the
+one-shot path no longer fits, pick a mechanism" — chain-load, or **ProRWTS2** —
+and explicitly not "make 8fish smaller". The layout was chosen because it fits
+today and boots today, and it was deliberately **not** optimised further.
+
+`TestDiskRoundTrip` reads the built `.dsk` back sector by sector and requires
+it to equal the image handed to `mksd` (Standard Delivery's interleave is
+`sector 0, 14, 13 … 1, 15` per track, with track 0 sector 0 the boot sector).
 
 ### No fork of the UI
 
@@ -103,11 +112,50 @@ are two links of one object file. `TestDiskLayout` asserts the consequence:
 `asm/m8.bin` and `asm/m8boot.bin` are `cmp`-identical to a `git archive HEAD`
 build, and `asm/engine.bin` is still md5 `58ef9645…`.
 
+### What this does NOT do: save/load
+
+**Standard Delivery is READ-ONLY.** It boots and it loads; it has no file
+system and no writer, so a saved game is impossible on this mechanism, full
+stop. That is the reason ProRWTS2 (peterferrie) is the intended successor
+rather than merely a nicer option: it reads *and writes* ProDOS files, so one
+mechanism covers boot, load and save — and it incidentally removes the
+contiguous-span squeeze, handing the UI back its full 5,888-byte LC budget.
+
+Deliberately **not** started here, and deliberately not worked around:
+
+- **No chain-loader.** Once you are chain-loading you have written most of a
+  sector reader, and at that point taking a good one beats hand-rolling.
+- **No hand-rolled sector WRITER, ever.** Writing a Disk II means 6-and-2
+  nibble encoding and write-splice timing; getting it wrong corrupts the disk
+  rather than failing cleanly. This is the last thing this project should
+  write itself.
+
+#### Reconnaissance for that task (read from `PRORWTS2.S`, not measured here)
+
+Not started, but read, so the follow-on begins informed. Source:
+[peterferrie/prorwts2](https://github.com/peterferrie/prorwts2), BSD-3-Clause,
+3,928 lines, © 2013-2022. Everything below is quoted or read out of the config
+block at the top of that file; **none of it has been run**.
+
+| finding | why it matters to 8fish |
+|---|---|
+| **Assembled with ACME**, not ca65 | a real cost this project has not paid before — either add ACME to the toolchain (a2audit already uses it, so there is precedent in zellyn's own repos) or port it |
+| driver size is a build option: `one_page` / **`two_pages` (default)** / `three_pages`, "set to 1 if verbose mode says that you should" | the driver itself is ~512 B of relocated code, not a library |
+| buffers `dirbuf`, `encbuf`, `treebuf`, 512 B each, "independent of each other so they can be placed separately", defaulting just below `reloc` | budget ~512 B (read) to ~1,024 B (read+write) of buffers on top of the driver |
+| default `reloc = $D000` with `load_banked = 1, lc_bank = 1` | **would land on top of 8fish**: `$D000` is the engine's `LCCODE` and `$E000-$FFEF` is the UI. But `reloc` is any page the caller picks, and `lc_bank = 2` is supported — and **8fish leaves all 4,096 B of LC bank 2 free** (§2), which is enough for a two-page driver plus both buffers. That is the obvious home |
+| `enable_floppy = 0` by default | must be set to 1; the default build is hard-disk only |
+| `enable_write = 1`: *"file must exist already and its size cannot be altered; writes occur in multiples of block size"* | a saved game must be a **pre-created fixed-size file** shipped on the disk and overwritten in place — not a file created at save time. That shapes the UI's save feature before a line of it is written |
+| `allow_aux = 1` exists ("read/write directly to/from aux memory"), but *"requires `load_high`… else driver must be running from same memory target"*, and `swap_scrn` is "recommended if `allow_aux` is used, to avoid device reset" | the TT in aux `$0200-$81FF` is search scratch and never needs saving, so `allow_aux` is probably **not** needed — which avoids the SmartPort screen-hole complication entirely |
+| `init` "unhook[s] ProDOS, detect[s] drive type, and relocate[s] code if needed" | ProDOS does **not** have to be resident, so its `$BF00` global page and LC residency do not collide with 8fish |
+
+Open question the source does not answer: whether a ProDOS-formatted volume
+plus a ProRWTS2 boot chain still delivers the engine as cheaply as Standard
+Delivery does today (6.15 s for 44,954 B), or whether boot time regresses.
+
 **Still not de-risked:** nobody has run this on a real Apple IIe. What is new
 is that there is now something to put in the drive, and that everything
 between the drive head and the painted board has been executed rather than
-assumed. Save/load stays deferred and unpriced — Standard Delivery has no file
-system; ProRWTS2 is the successor when it lands.
+assumed.
 
 ## 2026-07-28 — Book WIDENED (3,866 → 7,407 B): coverage transformed, Elo **+3 ± 10**. The null is an INSTRUMENT LIMIT, not a verdict on the book.
 

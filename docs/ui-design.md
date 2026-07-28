@@ -754,6 +754,14 @@ file sizes** on every run and fails if `Base` is not the lowest base that fits,
 so the choice stays the choice the sizes justify rather than the one that was
 right in July.
 
+**Neither number is a wall.** It is our disk: the 44 KB cap and the contiguous
+span are properties of the *simplest* Standard Delivery layout — one shot, one
+span — not of the medium. When they run out the answer is a different LOADER,
+not a smaller program (chain-load, or **ProRWTS2**, which reads *and writes*
+ProDOS files and would hand the UI back its full 5,888-byte LC budget). The
+ledger below is a **tripwire** that forces that choice to be made deliberately;
+it is not a budget to be defended. See §12.6 on save/load.
+
 So the disk layout is **copier `$0C00`, payload staged `$0D00`** — the lowest
 base that fits, i.e. the one that leaves the UI the most room. The staging
 address is a **linker symbol** (`asm/m8sd.cfg`), not a constant in `asm/m8.s`,
@@ -779,11 +787,12 @@ MAME's emulated IIe keyboard — with the pieces rendered by the real 342-0265-a
 character ROM, which is the first independent confirmation that the
 `ALTCHARSET` encoding is right.
 
-**Both margins are now gated, not commented.** There are 744 bytes of total
-slack and the two budgets grow from opposite ends — the engine spends the SD
-spare, the UI spends the growth room, and raising the base trades one for the
-other 256 bytes at a time. `internal/ui`'s **`TestDiskLedger`** prints both
-numbers on every run and fails when either goes negative, naming which.
+**Both margins are gated, not commented.** There are 744 bytes of slack in
+this layout and the two budgets grow from opposite ends — the engine spends the
+SD spare, the UI spends the growth room, and raising the base trades one for
+the other 256 bytes at a time. `internal/ui`'s **`TestDiskLedger`** prints both
+numbers on every run and fails when either goes negative, naming which one and
+saying what to do about it (change the loader).
 
 ### 12.3 Measured byte budget
 
@@ -908,7 +917,7 @@ Nothing below is needed to play a game.
 | **`FT2_ADAPT`'s per-GAME bank** | the host bridge banks unspent time across a game; on device each move gets a flat allocation | ~120 B: a signed 24-bit bank, income accrual and `min(4*base, income+bank)` |
 | **Position setup / FEN entry** | two-player mode plus takeback covers replaying a game | ~250 B for a FEN parser, or ~150 B for a cursor-driven piece placer |
 | **Cursor / joystick move entry** | typed entry wins on code, notation, entropy and errors (§5.1) | ~200-260 B on top of the same validator |
-| **A saved game / disk I/O** | Standard Delivery has no file system to save into. ProRWTS2 is the intended successor when this lands; until then the disk is read-only and read-once | unpriced |
+| **A saved game / disk I/O** | **Standard Delivery is READ-ONLY** — it boots and loads, and has no file system and no writer, so this is impossible on the shipped mechanism rather than merely unimplemented. **ProRWTS2** (peterferrie) is the intended successor because it reads *and writes* ProDOS files: one mechanism for boot + load + save, and it drops the contiguous-span squeeze (§12.2.1) as a side effect. Explicitly NOT to be hand-rolled: a Disk II *writer* means 6-and-2 nibble encoding and write-splice timing, and getting it wrong corrupts disks instead of failing cleanly | unpriced; a separate task |
 | **Real-hardware validation** | **narrowed again 2026-07-28.** The disk exists and boots (§12.2.1): `TestDiskBoots` runs the real Disk II boot ROM against the real nybblised image on an Apple IIe memory model, `TestDiskPlays` plays a move on it, and MAME's `apple2ee` boots the same disk with the real character ROM. What remains is genuinely a hardware question: video timing, drive speed, and Ctrl-Reset | **`make dsk`**, then a IIe |
 | **80-column / `80STORE`** | goapple2's `iie` deliberately leaves `80STORE` unmodelled (a compare on the hottest path for a switch nobody throws); `m8main` writes `PAGE1`, which pulls `$0400-$07FF` back to MAIN if firmware left it on | an emulator feature, not a UI one |
 | **MouseText glyphs** | `chargen` names MouseText but has no shapes for it; this UI does not use `$40-$5F` | 32 glyph bitmaps in goapple2 |

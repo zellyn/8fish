@@ -117,6 +117,7 @@ m8entry: jmp m8main
 ; $C000-$C00F READS as the keyboard), so each is reached with a store.
 ; Deliberately declared here and not in defs.inc: that file is engine
 ; source, and the UI does not touch engine source.
+CLR80STORE  = $C000     ; w: 80STORE off
 SET80COLOFF = $C00C     ; w: 40-column display
 SETALTCHAR  = $C00F     ; w: ALTERNATE character set
 TXTSET      = $C051     ; text, not graphics
@@ -128,7 +129,21 @@ TXTPAGE1    = $C054     ; display page 1 (and, under 80STORE, map it to MAIN)
 m8main:
         ldx #$FF
         txs
-        ; TAKE THE DISPLAY. Five stores, and the first two are not optional.
+        ; TAKE THE DISPLAY. Six stores, and the first three are not optional.
+        ;
+        ; 80STORE is the one that corrupts memory rather than pixels. With
+        ; 80STORE ON, $0400-$07FF (and, if HIRES is also on, $2000-$3FFF)
+        ; follows PAGE2 and IGNORES RAMRD/RAMWRT — so the engine's aux
+        ; transposition table, which spans $0200-$81FF in AUX, would have
+        ; its $0400-$07FF slots land on the MAIN text page instead: garbage
+        ; characters spraying across the board on every search, and a TT
+        ; reading the screen back as entries. A IIe powers up with 80STORE
+        ; off, so the disk boot is safe, but the 80-column FIRMWARE turns it
+        ; ON — which is exactly the state a BLOAD/BRUN from BASIC.SYSTEM in
+        ; 80-column mode (the default on a IIc, and on any IIe booted with
+        ; PR#3) inherits. goapple2's iie model does not implement 80STORE
+        ; (it counts $C000/$C001 in Unhandled), so no test can catch this:
+        ; it is a hardware-only failure, and the store costs three bytes.
         ;
         ; ALTCHARSET is the load-bearing one. A IIe powers up on the PRIMARY
         ; character set, in which $60-$7F is FLASHING PUNCTUATION — so every
@@ -142,8 +157,10 @@ m8main:
         ; with the 80-column hardware live, this 40-column screen is shown
         ; one column out of two. TEXT / NOMIX / PAGE1 are three bytes each
         ; and remove the remaining assumptions about the state a BRUN
-        ; inherits; PAGE1 also pulls $0400-$07FF back to MAIN if the
-        ; 80-column firmware left 80STORE on.
+        ; inherits. PAGE1 is what makes the 80STORE store above complete:
+        ; 80STORE off puts $0400-$07FF back under RAMRD/RAMWRT, PAGE1 makes
+        ; the DISPLAY read main page 1.
+        sta CLR80STORE
         sta SET80COLOFF
         sta SETALTCHAR
         sta TXTSET
@@ -152,10 +169,19 @@ m8main:
         ; The 6502 vectors at $FFFA-$FFFF are RAM once LC read is enabled, so
         ; they are ours to write and MUST be written: with LC RAM in, a BRK or
         ; a stray interrupt would otherwise vector through whatever garbage
-        ; powered up there.
+        ; powered up there. NMI and IRQ/BRK are the two that can actually
+        ; fire here.
+        ;
+        ; RESET is NOT: on a IIe (unlike a ][+ with a Language Card) a
+        ; hardware reset DISABLES the built-in language card, so Ctrl-Reset
+        ; fetches $FFFC from ROM and this copy is never read. It is written
+        ; for the sake of the machines where it would be, and because a
+        ; half-written vector table is worse than a whole one. What actually
+        ; happens on Ctrl-Reset is the Autostart handler's warm/cold decision
+        ; on the power-up byte at $03F4 — see docs/ui-design.md §11 risk 3.
         lda #<m8main
         sta $FFFA               ; NMI
-        sta $FFFC               ; RESET
+        sta $FFFC               ; RESET (see above: unreachable on a IIe)
         lda #>m8main
         sta $FFFB
         sta $FFFD

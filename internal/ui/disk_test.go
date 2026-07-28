@@ -281,9 +281,21 @@ func TestDiskBoots(t *testing.T) {
 	if !m.Mem.Text || m.Mem.Mixed || m.Mem.Page2 {
 		t.Errorf("display state wrong: TEXT=%v MIXED=%v PAGE2=%v", m.Mem.Text, m.Mem.Mixed, m.Mem.Page2)
 	}
-	if len(m.Unhandled()) != 0 {
-		t.Errorf("the boot touched $C0xx locations the IIe model does not implement: %v",
-			m.Unhandled())
+	// $C000 (80STORE OFF) is the ONE allowed exception. goapple2's iie model
+	// implements neither 80STORE state and counts both switch addresses in
+	// Unhandled; "off" is the state it does model, so the store is a no-op
+	// there and a necessity on hardware (asm/m8.s m8main). Everything else
+	// straying outside the modelled subset is still a failure.
+	for addr, n := range m.Unhandled() {
+		if addr == 0xC000 {
+			continue
+		}
+		t.Errorf("the boot touched $%04X (%d times), which the IIe model does not implement", addr, n)
+	}
+	if m.Unhandled()[0xC000] == 0 {
+		t.Error("m8main never wrote $C000 (80STORE OFF): with the 80-column firmware's " +
+			"80STORE left on, the engine's AUX transposition table at $0400-$07FF would " +
+			"land on the MAIN text page instead")
 	}
 
 	// ---- 3. the screen is the gated screen ---------------------------------

@@ -3,6 +3,119 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-28 — `adaptmaybe`'s score-drop overflow: CONFIRMED and fixed, and it fires ZERO times in 530 games
+
+The four-lens review's one SUSPECTED item (§5). `adaptmaybe` computed
+`scoreDrop = PREVSC - SCORE` as a bare 16-bit subtract and branched on `bmi`,
+with no `bvc`/`eor #$80` correction. Root scores span `[-MATE, MATEZONEHI*256)`
+= `[-30000, +29695]` — `idok` reports a WINNING mate before `adaptmaybe` runs,
+but a LOSING mate falls straight through — so the true difference reaches
+±59695 and does not fit in 16 bits.
+
+**CONFIRMED, both directions, on the real 6502 routine**
+(`chesstest.TestAdaptiveMateScoreDrop`, which drives the shipped `adaptmaybe`
+through the same stub `TestAdaptiveParity` uses and compares it against
+`mirror.SearchTimed`'s policy, whose drop is full-width `int`):
+
+| prev | score | true drop | wraps to | asm (before) | mirror |
+|---|---|---|---|---|---|
+| +3072 | −29990 | **+33062** | −32474 | ceiling 100 (**no panic**) | ceiling 400 |
+| +20000 | −29990 | +49990 | −15546 | no panic | panic |
+| +29695 | −30000 | +59695 | −5841 | no panic | panic |
+| −29990 | +3072 | **−33062** | +32474 | ceiling 400 (**spurious panic**) | ceiling 100 |
+| −29990 | +29695 | −59685 | +5851 | spurious panic | no panic |
+
+The first direction is the bad one: "up three pawns last iteration, forced mate
+against us this one" is the textbook panic case, and the wrap **suppressed** the
+extension exactly where the engine most wants the extra time. This was a real
+asm/mirror divergence, not a difference of intent, and `TestAdaptiveParity`
+could never have caught it — it only ever feeds ±200cp scores.
+
+Fixed with the house idiom (`bvc`/`eor #$80`, the same correction the TT-bound
+and window compares in `search.s` use), plus a `bpl @dopanic` because the panic
+test is a threshold (≥25) and not just a sign test: on overflow the true |drop|
+is ≥ 32768, so a positive one is a panic outright. **+8 bytes.** `T1:T0` keep the
+WRAPPED value for the `@easy` `|drop| ≤ 30` test, which is provably safe: a wrap
+needs |true drop| > 32767 and the widest reachable is 59695, so the wrapped
+magnitude is always ≥ 65536−59695 = 5841 and can never read as flat.
+
+### How often it fires in real games: ZERO in 530 games / 51,314 searches
+
+The wrap needs |PREVSC − SCORE| > 32767 with both in [−30000, +29695], which
+forces one iteration to be a **mate score** and the adjacent one to be **≥ 2768cp**
+(≈ three queens) on the far side. Legal; not game-like. Measured with a **canary
+build** — byte-identical to the shipped one except that the overflow branch does
+`lda #3 / sta EXIT_TRAP / brk`, so any firing surfaces as an `engine exit code 3`
+error line naming the FEN. Positive control: the same build with `bvc`→`bvs`
+errors on the very first search, so the instrument is live.
+
+| control | games | searches | firings |
+|---|---:|---:|---:|
+| 4000 ms/move, `-pergame -adaptA -adaptB` | 500 | 48,310 | **0** |
+| 15000 ms/move, same | 30 | 3,004 | **0** |
+
+### Spend first, then Elo
+
+A/B is the fixed binary vs a **size-identical control** carrying the OLD wrapping
+behaviour in exactly the same bytes and the same cycles on the non-overflow path
+(`bvc` + 6 bytes of pad), so the two differ in NOTHING but the overflow decision
+— no layout shift, no cycle shift, no bank drift. `go run ./cmd/sprt`, never a
+cached binary.
+
+    -a 0x5f -b 0x5f -a2 0x30 -b2 0x30 -pergame -adaptA -adaptB -budget 4000 -pairs 250
+    A_total = 96,421,363,809 (24,155 moves, adherence 0.9784)
+    B_total = 96,421,363,809 (24,155 moves, adherence 0.9784)
+    equal-total-spend A/B = 1.0000 (0.00%)   <- EXACT, to the cycle
+    +160 =180 -160   score 50.0%   elo -0 +/- 24   llr(0,10) -0.32
+
+Spend is not merely close, it is **bit-identical**, and so is the result table:
+the paired design means two functionally identical engines produce exactly
+mirrored games, so `A_total == B_total` to the cycle is the strongest possible
+statement that the panic decision never once differed over 500 games. The Elo of
+−0 ± 24 carries no information beyond that; it is quoted only to show the run
+was real. This is the expected outcome given zero firings — **the fix is a
+correctness change with no measurable behavioural consequence at either device
+level.** It is kept anyway: the standing rule is that the code does what we
+intend and the tuning is then a real choice, and this one costs 8 bytes, is now
+pinned by a test, and removes an asm/mirror divergence.
+
+### The one real side effect: +8 bytes moved `LCCODE_LOAD`, worth +8 cycles/search
+
+`TestMicroAB` is **fingerprint-identical** — all 18 searches match on
+search/make/eval/attacked/ttprobe/generate entry counts, score and move (the
+default config has FT2_ADAPT off, so this is the tree-identity check). Every
+search costs exactly **+8 cycles**, all of it in the one-time LC install loop:
+`LCCODE_LOAD` moved `$BB59` → `$BB61`, and `lda (ZPTR),y` over 256 iterations
+pays the indexed page-crossing penalty on `lo` of them — 89 before, 97 after.
+Grand total 3,819,284,672 → 3,819,284,816 (+144 = 18 × 8). Under FT2_SOFTCLK
+the engine reads its own node-based estimate, so those 8 cycles are invisible to
+every on-device decision.
+
+Measured for the record against the **actual pre-fix binary** (not the control):
+over 8 games the layout shift moved total spend by 4455 cycles in 3.6 × 10⁹
+(0.0001%) — 2856 of it the 8 cycles × 357 searches, the rest second-order bank
+drift, since the host bank settles on true cycles.
+
+### The other two review items, re-checked (both confirmed harmless, unchanged)
+
+- **`TTBT[ply]` is never reset at node entry.** Confirmed exactly as described:
+  `search.s` clears `TTBF,y` to `NOSQ` on both the full-width and the evasion
+  entry paths but not `TTBT,y`, so a moveless `TT_UPPER` store at `sret` carries
+  a stale `to` byte. Safe because every reader keys on `from == NOSQ`
+  (`TTFROMA`/`ttmovevalid`), and not worse than described. Left alone.
+- **RFP is skipped whenever alpha is still −INF.** Confirmed: `INF = 32000` is
+  `$7D00`, and `-INF`'s high byte `$83` is below `NMATEZONEHI` `$8C`, so ±INF
+  classify as mate scores and the guard skips futility at any full-window node,
+  the root included. The mirror does the identical thing
+  (`search.go` `alpha > nmateZoneHi && alpha < mateZoneLo`), so this is
+  mirror-matched and deliberate. Left alone.
+
+Gates, all green with the fix in: `TestMicroAB` (fingerprints identical),
+`TestAdaptiveParity`, `TestAdaptiveEngineBehavior`, `TestIDIterationParity`,
+`TestTTSequenceParity`, `TestFullGameMirrorParity`, `TestBudgetModeParity`,
+`TestGenDeferTreeIdentity`, `TestSoftClockAdherence` (soft 0.9447 / exact
+0.9107), and all of `internal/ucibridge` and `internal/ui`.
+
 ## 2026-07-28 — FOUR-LENS ADVERSARIAL REVIEW: the shipping disk was ~24 Elo weaker than everything we measured, and would have sprayed garbage on a IIe
 
 Four independent reviewers, one lens each (hardware fidelity, engine asm,
@@ -105,9 +218,10 @@ both SMC sites, and a scripted zero-page overlap check. Nothing found.
   presses Q.
 - **Move numbers ≥ 100 render as punctuation** (`uidec2` is two-digit); and a
   legal game is **force-drawn at ply 250** regardless of position.
-- **`adaptmaybe`'s score-drop test lacks overflow correction** (SUSPECTED) —
+- ~~**`adaptmaybe`'s score-drop test lacks overflow correction** (SUSPECTED) —
   time management only, same class as the `cmp #$74` bug, in code nobody
-  re-audited after that fix.
+  re-audited after that fix.~~ **CONFIRMED and FIXED** the same day; it fires
+  zero times in 530 games. See the entry above.
 
 ### 6. Gate weaknesses found (several fixed)
 

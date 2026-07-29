@@ -3,6 +3,261 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-29 — ★★ IN THE DISK'S OWN TIME MANAGEMENT THE SHIPPED CLOCK COSTS **0.4% OF COMPUTE AND NO DEPTH**. The −64's proposed mechanism is falsified, and half the gauntlet's 8fish compute is a feature the disk does not have.
+
+Follow-up to the entry below, which measured the shipped clock at −64 [−120, −8]
+Elo and named the ponder-spend gap (0.9374 harness vs 0.8916 soft) as the lead,
+with "the margin table reads high at 29 s" as the mechanism.
+
+Four instruments say otherwise. The estimate does not read high at 29 s (it reads
+5-6% LOW at 4 s and is exact at 29 s). The ponder gap is real but worth ≈2 Elo,
+and the **shipped disk does not ponder at all**. And measured for the first time
+in the DISK's actual time-management configuration — on-device `FT2_ADAPT`, no
+bank, LEVEL 8 — the soft clock delivers **1.0033 [0.982, 1.030]** and, on a
+disjoint replicate, **0.9895 [0.962, 1.019]** of what an exact clock delivers on
+identical positions, completing slightly MORE depth in both runs and playing the
+same move 98% of the time.
+
+**No engine, margin-table or UI code was changed.** There is nothing there to fix.
+What changed is the acceptance gate, which certified an octave the product does
+not use; a new paired instrument ~20x sharper than the one the margin table has
+been fitted against; and a header on `cmd/sargon-symmatch` saying what its Elo
+does and does not describe.
+
+### 0. ★★ THE SHIPPED CONFIGURATION, MEASURED — and it is clean
+
+Everything below was chased in the FLAT search configuration, because that is
+what the gauntlet and the acceptance gate both run. The disk does not: `asm/m8.s
+uilimits` turns **FT2_ADAPT** on for every timed level and derives CEILMAX = 4x,
+UNSTCEIL = 3x, MINSPEND = base/4 straight off the level's budget, with NO bank.
+That configuration had never been measured against an exact clock.
+
+`sprt.TestPairedClockProbe` with `PROBE_ADAPT=1`, LEVEL 8 (30 s/move), 1177
+position-paired searches:
+
+| config | openings | n | soft adh | exact adh | **paired soft/exact** | bootstrap 95% | completed depth soft / exact | same move |
+|---|---|---:|---:|---:|---:|---|---:|---:|
+| **FT2_ADAPT, 30 s (the disk)** | 1-8 | 1177 | 1.1313 | 1.1276 | **1.0033** | **[0.982, 1.030]** | 4.798 / 4.793 | 98.1% |
+| **FT2_ADAPT, 30 s (replicate)** | 9-16 | 1107 | 1.1624 | 1.1747 | **0.9895** | **[0.962, 1.019]** | 4.993 / 4.971 | 97.7% |
+| flat, 29.4 s (the gauntlet) | 1-8 | 671 | 0.9202 | 0.9397 | 0.9792 | [0.945, 1.017] | 4.744 / 4.756 | 97.5% |
+| flat, 30 s (replicate, disjoint openings) | 9-16 | 879 | 0.8534 | 0.8746 | 0.9758 | [0.951, 1.001] | 4.356 / 4.345 | 97.4% |
+
+**Under the disk's own time management the estimated clock and a real clock are
+indistinguishable, on two disjoint opening sets.** Per-ply p10 = p50 = p90 =
+1.000 in both: the overwhelming majority of positions cost the SAME true cycles
+either way, and the soft arm completes slightly MORE depth in both runs (4.798 vs
+4.793, and 4.993 vs 4.971).
+
+The FLAT deficit is real and replicates on disjoint openings — 0.9792 and 0.9758,
+so call it 2.3% — but it does not cost DEPTH in either run (4.744 vs 4.756, and
+4.356 vs 4.345, the second one in the soft arm's favour). The mechanism is easy
+to see once measured: FT2_ADAPT's movable ceiling, and the ABORTL = 2 x CEILMAX
+that comes with it, give the search room to absorb a noisy clock, so a stop
+decision landing a few percent early or late is re-absorbed instead of truncating
+an iteration. A flat search has no such slack. **The 2.3% therefore lives in the
+gauntlet's configuration, not the product's.**
+
+### 1. FALSIFIED — the estimate does not read high at ~29 s. It reads *low* at 4 s.
+
+The hypothesis was that the cost table, fitted at 4 s and 15 s, over-prices nodes
+in a 29 s search (deeper trees take more nearly-free TT-cutoff nodes), so the
+engine believes its window is up before it is. `cmd/softclkdiag` measures exactly
+this under game conditions — warm TT, real per-move allocation, the shipped
+table:
+
+| budget | in-game estimate/truth | per-move bias | per-move RMS | adherence | n moves |
+|---|---:|---:|---:|---:|---:|
+| 4 000 ms (margin 127%) | **0.9376** | −3.9% | 29.0% | 0.9550 | 830 |
+| 15 000 ms (margin 100%) | **0.9500** | +1.6% | 35.6% | 0.8947 | 650 |
+| 29 397 ms (margin 100%) | **0.9929** | +3.4% | 26.0% | 0.8592 | 992 |
+
+The estimate reads 5-6% **LOW** at the short octaves — which is what the 127%
+margin exists to counteract, since reading low means the engine keeps going and
+overruns — and is essentially **exact** at 29 s. The 100% bucket is not an
+unmeasured extrapolation that happens to be wrong; it is the octave where the
+raw table needs no correction at all. The variance half of the hypothesis dies
+with it: relative RMS does not grow with budget (29.0% at 4 s, 26.0% at 29 s).
+
+### 2. ★ The new instrument: position-paired, and it is what should have been used
+
+`sprt.TestPairedClockProbe`. At every ply of a self-play game the SAME machine
+state — same position, same halfmove clock, same carried TT, same poked limits —
+is searched TWICE, exact clock and FT2_SOFTCLK, and both TRUE cycle costs,
+completed depths and chosen moves are recorded. The exact run decides the move,
+so the two arms walk an identical trajectory and game composition cancels.
+
+| budget | margin | n | soft adh | exact adh | **paired soft/exact** | bootstrap 95% | mean completed depth soft / exact | same move |
+|---|---:|---:|---:|---:|---:|---|---:|---:|
+| 4 000 ms | 127% | 853 | 0.9408 | 0.9161 | **1.0269** | [0.996, 1.061] | 2.517 / 2.533 | 95.2% |
+| 29 397 ms | 100% | 671 | 0.9202 | 0.9397 | **0.9792** | [0.945, 1.017] | 4.744 / 4.756 | 97.5% |
+| 30 000 ms (disjoint openings) | 100% | 879 | 0.8534 | 0.8746 | **0.9758** | [0.951, 1.001] | 4.356 / 4.345 | 97.4% |
+
+**In the FLAT configuration the soft clock delivers ~97.7% of the exact clock's
+compute at the gauntlet's budget (replicated on disjoint openings), completes the
+same depth to within 0.012 iterations — in the replicate, slightly MORE — and
+plays the same move 97.5% of the time.** That is an upper bound on the whole
+effect even before §0 removes it: even charging every one of the 2.5% changed
+moves a full 30 cp costs under 1 cp per move.
+
+Why this matters as a method point: the unpaired gate divides two independent
+runs' totals, so its ratio carries the entire variance of game composition. At 3
+pairs and 29 s the two arms produced 654 and 444 moves and a soft/exact of 1.01
+— a number with no resolving power, which disagreed by 10 points with a 6-pair
+run. The paired probe gets a ±3-point interval for the same wall time, and it
+reports depth and move agreement, which the gate cannot.
+
+**★ And it has a trap that cost a false positive.** The first version carried ONE
+transposition table forward across plies, so every search started on the table
+its immediate predecessor built. That inflated BOTH arms' adherence (exact 1.26
+at 4 s against the 0.92 the same build shows in real games), because a one-ply-old
+table already covers the tree the search is about to build and idloop's "the next
+iteration costs 2x the last" gate stops holding. It moved the paired ratio by 11
+points — 0.913 vs 1.027 at 4 s — and would have reported a soft-clock deficit at
+EVERY octave that does not exist. Two auxes alternating by side, which is what
+`sprt.Run` does, and (see §3) what the disk does.
+
+### 3. ★★ The disk does not ponder — so 49% of the gauntlet's 8fish compute is not in the product
+
+`asm/m8.s`'s main loop is `uisync` / `uipaint` / `m8engine` on our turn, and on
+the human's turn `uiread` → `entkey`, a **blocking** keyboard poll. There is no
+ponder path anywhere in `asm/`, and `docs/plan.md` M8 says so on purpose:
+"Pondering stays out of scope even here (it would invalidate the calibration
+story)."
+
+So a ponder-specific safety margin — the leading candidate fix — would be dead
+code on the artifact. More importantly, decomposing the 504-game run's own
+published totals (8fish = own + ponder, Sargon = own + think; ponder =
+r × asked, asked ≈ think):
+
+| arm | 8fish own | 8fish ponder | Sargon think | ponder share of 8fish compute |
+|---|---:|---:|---:|---:|
+| harness clock | ≈ 332 G | ≈ 316 G | ≈ 337 G | **48.7%** |
+| soft clock | ≈ 423 G | ≈ 401 G | ≈ 450 G | **48.7%** |
+
+(Derived, not separately measured: the entry below publishes the two per-side
+totals and the two ponder ratios, and the four components are then determined —
+`8fish_total − sargon_total = ponder − think` with `ponder = r × think`, taking
+`asked ≈ think` since Sargon's instant book replies are ~1.3M cycles against
+~35M thinks. Both rows re-derive the published totals to within 0.1%. A 6-game
+diagnostic pair rerun today reproduces the ingredients: per-game ponder ratios
+0.928/0.992/0.861/0.866 on the exact clock and 0.826/0.866/0.963/0.916 on the
+soft one — the same gap, and a vivid demonstration of why 252 games were needed
+to see it.)
+
+**Half of 8fish's compute in both arms is a component the shipped disk does not
+have.** Neither +116 nor +51 describes the artifact a user boots.
+
+And the ponder gap, closed, is worth what the entry below already implies:
+lifting the soft arm's ponder ratio from 0.8916 to the harness arm's 0.9374 adds
+≈21 G to 824.3 G, i.e. **+2.5% total compute**, moving spend_ratio 0.9442 →
+0.968 (the harness arm's 0.9684). At ~60-70 Elo per doubling that is **≈ +2
+Elo**. The entire spend asymmetry between the arms IS the ponder gap, and the
+entire ponder gap is ≈2 Elo.
+
+### 4. Why own-move adherence being 0.9982 was never evidence of anything
+
+`cmd/sargon-symmatch` runs the bridge with `Banked=false, Adaptive=false` and
+keeps its OWN host-side `chesstest.BankedClock`, settled on TRUE cycles
+(`clock.Settle(sr.cycles)`). Every under-spend is therefore refunded into the
+next move's allocation and own-move total compute telescopes to income × moves
+BY CONSTRUCTION, whatever the clock does. Measured on a 6-game diagnostic pair:
+own-move adherence 0.9990 (exact) and 1.0034 (soft). The 0.9982 soft/exact in
+the entry below is not evidence that own moves are unaffected; it is evidence
+that this instrument cannot see them. The ponder path has no bank, which is the
+only reason the estimator's signature showed up there.
+
+That is also a third shipped/tested gap in the same family: the disk runs
+`FT2_ADAPT` with **no bank at all** (`asm/m8.s uilimits` derives CEILMAX = 4x,
+UNSTCEIL = 3x, MINSPEND = base/4 straight from the level's budget), while the
+gauntlet runs flat searches fed by a host bank. `sprt.Run`'s adaptive mode cannot
+model it either — its `pokeAlloc` caps the hard ceiling at `income + bank`, which
+with a fresh bank is `income`, i.e. no headroom. Filed, not fixed.
+
+### 5. What DID change: the acceptance gate now covers the octave the product uses
+
+`sprt.TestSoftClockAdherence` ran at **4000 ms only**. `asm/m8.s` ships levels
+5-9 at 4 s, 8 s, 15 s, 30 s and 60 s, and every Sargon number is measured at 30M
+cycles ≈ 29 s. So the gate certified margin-table octave 13 while the product
+lived in octaves 16-17 — the flat, never-measured 100% tail. Same shape as the
+harness clock the hardware lacks, the pool that was not game conditions, and the
+disk that shipped `FEATURES=$1F`.
+
+The gate is now a loop over `{4000, 30000}` ms, applying all three assertions
+(forfeit ≤ 1.00, a collapse alarm, soft/exact ∈ [0.90, 1.10]) at each.
+`TestPairedClockProbe` runs the same two octaves and asserts the paired ratio in
+the same band.
+
+| budget | margin | SOFT adherence | EXACT adherence | soft/exact | (1) ≤1.00 | (3) ∈[0.90,1.10] |
+|---|---:|---:|---:|---:|---|---|
+| 4 000 ms | 127% | **0.9447** (1212 mv) | 0.9107 (1138 mv) | 1.0373 | PASS | PASS |
+| 30 000 ms | 100% | **0.8496** (1254 mv) | 0.8964 (882 mv) | 0.9478 | PASS | PASS |
+
+**Own-move adherence stays ≤ 1.0 at both octaves** — 0.9447 and 0.8496 — which is
+the deliverable's hard constraint, and nothing was changed that could move it.
+
+★ **Extending the gate immediately caught a defect in the gate itself.** Assertion
+(2), "not so conservative it throws the budget away", was a bare
+`softAdh < 0.85` — a constant calibrated when the gate ran at 4000 ms only, and
+the 30 s soft arm trips it at 0.8496. It is the wrong test at that octave:
+
+- The FLAT predictive gate leaves more of a LONG budget unspent by design, so the
+  EXACT clock's own adherence falls too, 0.9107 → 0.8964. A floor of 0.85 sits
+  5.5% under its own control.
+- That is inside this instrument's composition noise, because the arms play
+  different games: 1254 moves vs 882, a 42% difference, against an adherence that
+  falls steeply with game ply (softclkdiag at 29 s: 0.96 at plies 0-19, 0.75 at
+  plies 120-139).
+- The paired probe, same build and budget with zero composition noise, puts
+  soft/exact at 0.9792 [0.945, 1.017] — i.e. the estimator did not do what 0.85
+  accused it of.
+
+So (2) is now documented as a COLLAPSE ALARM with its constant moved clear of
+every measured exact-clock adherence plus that noise (0.75), and the
+estimator-vs-control judgement is left to (3), which has the control in the same
+run. Loosening a gate needs a reason; the reason is that at 30 s it was measuring
+which arm played longer games.
+
+### 6. The Elo re-measurement, and why it was not run
+
+There is no code change to measure. And the instrument could not resolve one:
+the paired gauntlet's difference came in at ±56 Elo over 252 games per arm, so
+resolving the ≈2 Elo the only real mechanism is worth would need (56/2)² ≈ 800x
+the games — roughly 200,000 games per arm. Re-running it would have produced a
+number with the same ±56 and no information.
+
+**On the −64 itself.** It stands as measured, and its SIGN may well be right, but
+nothing found here supports its magnitude. The compute difference between the
+arms is 2.4 points (≈2 Elo, all of it ponder). On identical positions in the
+gauntlet's own flat configuration the soft clock changes 2.5% of moves and loses
+0.012 completed iterations; in the disk's adaptive configuration it changes ~2%
+of moves, delivers 99.6% of the compute across two disjoint opening sets, and
+completes MORE depth in both. A z of −2.23 with an interval of [−120, −8] is
+exactly the shape that produces an inflated point estimate, and the honest
+reading is that the truth sits near the top of that interval.
+
+**What would still be worth chasing**, if the −64 is real at all: it is not a
+SPEND effect, so it can only be an allocation-QUALITY one — the estimator's
+per-move relative RMS is 26-36%, so a flat-configuration search's effective
+budget is randomly scaled move to move, uncorrelated with how hard the position
+is. That is a real cost and it is the one thing here that is not bounded by a
+measurement. It would be tested with a soft-vs-exact SELF-PLAY SPRT at 30 s
+(no Sargon, no ponder), which is the same instrument the 2026-07-27 entry used at
+4 s to get −23 ± 27. §0 says the adaptive ceiling should absorb most of it.
+
+**If a fix ever is warranted**, the shape is known and so is its price. The two
+flat-configuration measurements at octave 16 (paired 0.9792 and 0.9758, unpaired 0.9478)
+would put the octave's margin entry near 96-98% rather than 100%. That cannot be
+expressed in today's `asm/m8.s KTAB`, which stores K = 25600/margin for a
+`(BUDGET * K) >> 8` multiply: any margin below 100% needs K > 255. The 6502-side
+change is to rescale the table to `>> 7` (K = 12800/margin, so 127% -> 101,
+113% -> 113, 100% -> 128, 96% -> 133), which is **one extra 32-bit shift after
+the existing multiply loop: 4 zero-page ASL/ROL, +8 bytes**, no division, and
+inside the 1% slack `internal/ui TestSoftClockLimits` already allows between the
+device rule and the host rule. It is NOT being taken: the better instrument's
+interval contains 1.0, the configuration that ships measures 1.0033, and this
+project's rule is that margin entries are measured anchors, not extrapolations
+fitted to one run.
+
 ## 2026-07-29 — ★★ THE SHIPPED CLOCK COSTS **−64 ± 57 Elo**: the disk beats Sargon III by **+51**, not **+116**. Paired control, 504 games.
 
 Every Sargon number in this log — the headline **+110 over 600 games** (pool

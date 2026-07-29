@@ -26,6 +26,30 @@
 // This is deliberately NOT cutechess-orchestrated: cutechess runs the two
 // engines as independent OS processes and cannot interleave their emulated
 // clocks cycle-accurately (which is the whole point here).
+//
+// ★ WHAT THIS COMMAND'S Elo DOES NOT DESCRIBE (2026-07-29). `-softclock` makes
+// the FEATURES/FEATURES2 bytes byte-identical to the shipped disk, but the
+// TIME MANAGEMENT around them is still not the disk's, in two ways that are
+// worth stating before anyone attaches one of these numbers to the artifact:
+//
+//   - PONDERING. Step 5 above is roughly HALF of 8fish's total compute in a
+//     match (measured: 316 of 648 Gcyc on the exact clock, 401 of 824 on the
+//     soft one). `asm/m8.s` NEVER PONDERS — its main loop blocks in `uiread` ->
+//     `entkey` on the opponent's turn — and docs/plan.md M8 keeps it out of
+//     scope on purpose. So the disk plays with about half the compute per move
+//     pair that these games give 8fish, and a change that only moves the ponder
+//     path (e.g. a ponder-specific clock margin) moves nothing a user can boot.
+//   - THE BANK. `newEightfish` leaves the bridge on `Banked=false,
+//     Adaptive=false` and this file runs its own host-side
+//     `chesstest.BankedClock`, settled on TRUE cycles. That refunds every
+//     under-spend into the next move, so own-move total compute telescopes to
+//     income x moves BY CONSTRUCTION and the own-move adherence line cannot
+//     show a clock error however large. The disk runs on-device FT2_ADAPT with
+//     NO bank at all (`uilimits`: CEILMAX 4x, UNSTCEIL 3x, MINSPEND base/4,
+//     straight off the level's budget).
+//
+// The spend-symmetry audit below is still exact for what it measures; this is a
+// note about what the measured configuration IS.
 package main
 
 import (

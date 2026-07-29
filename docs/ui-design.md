@@ -940,7 +940,7 @@ Nothing below is needed to play a game.
 | **Real-hardware validation** | **narrowed again 2026-07-28.** The disk exists and boots (§12.2.1): `TestDiskBoots` runs the real Disk II boot ROM against the real nybblised image on an Apple IIe memory model, `TestDiskPlays` plays a move on it, and MAME's `apple2ee` boots the same disk with the real character ROM. What remains is genuinely a hardware question: video timing, drive speed, and Ctrl-Reset | **`make dsk`**, then a IIe |
 | **80-column / `80STORE`** | goapple2's `iie` deliberately leaves `80STORE` unmodelled (a compare on the hottest path for a switch nobody throws); `m8main` writes `PAGE1`, which pulls `$0400-$07FF` back to MAIN if firmware left it on | an emulator feature, not a UI one |
 | **MouseText glyphs** | `chargen` names MouseText but has no shapes for it; this UI does not use `$40-$5F` | 32 glyph bitmaps in goapple2 |
-| **Ctrl-Reset behaviour** (§11 risk 3) | the UI writes `$FFFA-$FFFF`, but whether a IIe forces ROM back in before the reset vector fetch is a hardware question | nothing to write; a hardware answer |
+| **Ctrl-Reset behaviour** (§11 risk 3) | **no longer deferred: see §12.7.** A IIe's reset disables the language card, so the vector comes from ROM and Autostart's power-up byte decides everything; `m8main` invalidates it, making Ctrl-Reset a cold boot. What is still a hardware answer is only the CONFIRMATION — no emulator here models the reset line | **done**; confirm on a IIe |
 
 ### 12.7 The hardware pass (2026-07-28)
 

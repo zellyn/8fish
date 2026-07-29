@@ -279,8 +279,9 @@ func TestShippingFullGame(t *testing.T) {
 		if ref.HalfmoveClock() < 100 {
 			t.Errorf("the UI claims the 50-move rule at halfmove clock %d", ref.HalfmoveClock())
 		}
-	case ui.ResRep, ui.ResLong:
-		// Both are real terminations, checked by construction.
+	case ui.ResRep:
+		// A real termination, checked by construction against the UI's own
+		// hash history.
 	default:
 		t.Errorf("unexpected termination %s", ui.ResultName(result))
 	}

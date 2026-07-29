@@ -118,17 +118,34 @@ m8entry: jmp m8main
 ; Deliberately declared here and not in defs.inc: that file is engine
 ; source, and the UI does not touch engine source.
 CLR80STORE  = $C000     ; w: 80STORE off
+KBDSTROBE   = $C010     ; r: clear the keyboard strobe
+RAMRDOFF    = $C002     ; w: read MAIN $0200-$BFFF
+RAMRDON     = $C003     ; w: read AUX
+RAMWRTOFF   = $C004     ; w: write MAIN $0200-$BFFF
+RAMWRTON    = $C005     ; w: write AUX
 SET80COLOFF = $C00C     ; w: 40-column display
 SETALTCHAR  = $C00F     ; w: ALTERNATE character set
 TXTSET      = $C051     ; text, not graphics
 MIXCLR      = $C052     ; full screen, no four-line text window
 TXTPAGE1    = $C054     ; display page 1 (and, under 80STORE, map it to MAIN)
 
+; Autostart's power-up byte (docs/ui-design.md §11 risk 3). The reset
+; handler takes the WARM path — jmp ($03F2) — only when $03F4 equals
+; $03F3 EOR $A5; anything else is a cold boot.
+PWRUPLO     = $03F3
+PWRUPBYTE   = $03F4
+
 ; m8main: cold start. Runs at $E000 with LC RAM read+write enabled and the
 ; engine image already resident at $4000.
 m8main:
         ldx #$FF
         txs
+        cld                     ; D is undefined after a 6502 reset. The
+                                ;  Autostart ROM clears it in practice, so
+                                ;  this is hardening, not a fix — but every
+                                ;  ADC/SBC in the UI's arithmetic (and in the
+                                ;  engine) is binary, and one byte is cheap
+                                ;  next to debugging decimal-mode scores.
         ; TAKE THE DISPLAY. Six stores, and the first three are not optional.
         ;
         ; 80STORE is the one that corrupts memory rather than pixels. With
@@ -166,25 +183,39 @@ m8main:
         sta TXTSET
         sta MIXCLR
         sta TXTPAGE1
-        ; The 6502 vectors at $FFFA-$FFFF are RAM once LC read is enabled, so
-        ; they are ours to write and MUST be written: with LC RAM in, a BRK or
-        ; a stray interrupt would otherwise vector through whatever garbage
-        ; powered up there. NMI and IRQ/BRK are the two that can actually
-        ; fire here.
+        bit KBDSTROBE           ; a key held down while the disk loads is
+                                ;  latched before the UI ever polls, and
+                                ;  would arrive as the first character typed
+        jsr m8machine           ; refuse to run where the engine cannot
+        ; CTRL-RESET. On a IIe (unlike a ][+ with a Language Card) a hardware
+        ; reset DISABLES the built-in language card — that is exactly why
+        ; Apple Pascal could use Ctrl-Reset as a warm start — so $FFFC is
+        ; fetched from ROM and any copy written here is dead. The Autostart
+        ; handler then makes its own warm/cold decision on the power-up byte:
+        ; it takes the WARM path, jmp ($03F2) into Applesoft, iff
+        ; $03F4 == $03F3 EOR $A5. 8fish uses only $0300-$030C and Standard
+        ; Delivery never touches page 3, so that test would PASS on a booted
+        ; disk and hand the machine to a BASIC whose entire zero page the
+        ; engine has trampled: neither 8fish nor a reboot.
         ;
-        ; RESET is NOT: on a IIe (unlike a ][+ with a Language Card) a
-        ; hardware reset DISABLES the built-in language card, so Ctrl-Reset
-        ; fetches $FFFC from ROM and this copy is never read. It is written
-        ; for the sake of the machines where it would be, and because a
-        ; half-written vector table is worse than a whole one. What actually
-        ; happens on Ctrl-Reset is the Autostart handler's warm/cold decision
-        ; on the power-up byte at $03F4 — see docs/ui-design.md §11 risk 3.
+        ; So invalidate it. Ctrl-Reset then COLD boots, which restarts 8fish
+        ; off the disk still in the drive. On the BLOAD path it is strictly
+        ; better still: ProDOS's own language-card image is long gone by
+        ; then, so a warm start there is a guaranteed crash.
+        lda #0
+        sta PWRUPLO
+        lda #$FF                ; != $00 EOR $A5, so: cold start
+        sta PWRUPBYTE
+        ; The other 6502 vectors ARE ours: $FFFA-$FFFF is RAM once LC read is
+        ; enabled, so with LC RAM in, a BRK or a stray interrupt would vector
+        ; through whatever garbage powered up there. NMI and IRQ/BRK are the
+        ; two that can actually fire here; RESET, per the note above, is
+        ; deliberately NOT written — it is unreachable, and writing it
+        ; invited the belief that Ctrl-Reset came back to m8main.
         lda #<m8main
         sta $FFFA               ; NMI
-        sta $FFFC               ; RESET (see above: unreachable on a IIe)
         lda #>m8main
         sta $FFFB
-        sta $FFFD
         lda #<m8irq
         sta $FFFE               ; IRQ / BRK
         lda #>m8irq
@@ -243,6 +274,63 @@ mengine:
         jmp mloop
 
 m8irq:  rti
+
+; ---------------------------------------------------------------------------
+; m8machine: this program needs a 128K Apple IIe. Prove it, or refuse.
+;
+; The transposition table lives in AUXILIARY RAM at $0200-$81FF, and the two
+; machines that cannot provide it fail in ways a player would never diagnose:
+;
+;   Apple ][+ (or a IIe with the aux switches absent). $C002-$C005 are not
+;   soft switches there, so every "aux" access goes to MAIN — straight over
+;   the resident book at $2000 and the engine image at $4000. THE ENGINE
+;   OVERWRITES ITSELF MID-SEARCH.
+;
+;   64K IIe (no auxiliary card). The switches exist but there is no RAM
+;   behind them: writes vanish, reads float. At ~10^7 probes a game, a
+;   24-bit verify lets roughly ONE false hit through per game — a silent
+;   blunder, not a crash.
+;
+; The probe is two-sided, and that is the whole trick: write $A5 to MAIN
+; $0300 and $5A to AUX $0300, then require BOTH that aux reads back $5A and
+; that MAIN still reads $A5. A ][+ passes the first half (the switch was a
+; no-op, so the $5A landed in main) and fails the second; a 64K IIe fails
+; the first, because a floating read is not $5A.
+;
+; $0300 is CEILMAX0 — engine scratch that uilimits rewrites before every
+; timed search — so the probe costs no storage at all.
+; ---------------------------------------------------------------------------
+m8machine:
+        sta RAMRDOFF            ; start from MAIN whatever the firmware that
+        sta RAMWRTOFF           ;  ran before us left the switches at
+        lda #$A5
+        sta $0300               ; MAIN
+        sta RAMRDON
+        sta RAMWRTON
+        lda #$5A
+        sta $0300               ; AUX
+        lda $0300               ; read AUX back before switching away
+        ldy #0                  ; ...and put the slot back: aux $0300 is
+        sty $0300               ;  INSIDE the transposition table ($0200-
+                                ;  $81FF), and internal/ui TestDiskPlays
+                                ;  requires the TT to be untouched until
+                                ;  something actually searches
+        sta RAMRDOFF            ; (the switches ignore the value stored)
+        sta RAMWRTOFF
+        cmp #$5A
+        bne m8nope              ; no aux RAM behind the switches
+        lda $0300
+        cmp #$A5
+        beq m8ok                ; main survived: the switches are real
+m8nope: jsr uicls
+        lda #10
+        ldx #6
+        jsr uigotorc
+        lda #<m_needsiie
+        ldx #>m_needsiie
+        jsr uiputs
+m8halt: jmp m8halt              ; nothing safe is left to do
+m8ok:   rts
 
 ; uimyturn: C=1 if the human is to move — either the side to move is his, or
 ; the UI is in two-player mode (UIHUMAN = $FF), where it referees a game
@@ -308,6 +396,7 @@ uspp:   lda STSQ,x
 m8new:  jsr uistartpos
         lda #0
         sta UIHCNT
+        sta UIHFULL
         sta UIRESULT
         sta CUROPENING
         sta UIBOOKB
@@ -343,6 +432,26 @@ uiplay: lda UIMFROM
 
 ; uiapply: commit the staged move to the game. Appends it to the history,
 ; makes it at PLY 0, re-derives the position state, and pushes the new hash.
+;
+; THE FULL-HISTORY CASE. The history and hash arrays are 256 entries — one
+; page each, which is what keeps the index in X with no multiply — and a
+; legal game CAN outrun them: 255 plies is 128 moves, and the 50-move rule
+; permits far longer games than that. The UI used to declare "DRAW: TOO
+; LONG" at ply 250, which is a result the rules do not license and one a
+; player could reach while a piece up (internal/ui TestLongGameIsNotDrawn).
+;
+; So instead the game GOES ON and the RECORDING degrades. At ply 255 the
+; move is played, the last slot is reused for it and UIHCNT stays at 255 —
+; nothing is ever written past index 255 and nothing wraps to index 0. The
+; current position's hash still lands at index UIHCNT, so uireps still
+; compares like with like: it can only see the game's first 255 plies, and
+; therefore only ever UNDER-counts repetitions. The 50-move rule is a
+; counter, not a history, so it is untouched — as are mate and stalemate,
+; which is everything needed to finish the game.
+;
+; What is lost is exact: the move panel stops growing, and takeback is
+; refused for the rest of the game (cmd_take) rather than replaying to a
+; position that is not the one before the last move. UIHFULL says which.
 uiapply:
         jsr uiplay
         ldx UIHCNT
@@ -358,8 +467,14 @@ uiapply:
         jsr ENG_make            ; PLY -> 1
         lda #0
         sta PLY
+        lda UIHCNT
+        cmp #255                ; the arrays are full: stop recording, but
+        beq uafull              ;  keep playing
         inc UIHCNT
-        jsr ENG_evalinit
+        bne uapush              ; always (UIHCNT is now 1..255)
+uafull: lda #1
+        sta UIHFULL
+uapush: jsr ENG_evalinit
         jmp uipushhash
 
 ; ===========================================================================
@@ -592,14 +707,8 @@ usymv:  lda HALFMOVE
 :       jsr uireps
         lda UISEEN
         cmp #2
-        bcc :+
-        lda #RES_REP
-        sta UIRESULT
-        rts
-:       lda UIHCNT              ; the history arrays are one page each
-        cmp #250
         bcc usyx
-        lda #RES_LONG
+        lda #RES_REP
         sta UIRESULT
 usyx:   rts
 
@@ -1191,10 +1300,15 @@ cmd_new:
         jmp uiclrmsg
 
 cmd_take:
+        lda UIHFULL             ; past ply 255 the plies are no longer
+        bne ctfull              ;  recorded, so there is nothing to replay TO
         lda UIHCNT
         bne :+
         lda #<m_noback
         ldx #>m_noback
+        jmp uisetmsg
+ctfull: lda #<m_histfull
+        ldx #>m_histfull
         jmp uisetmsg
 :       lda #0                  ; a takeback un-ends a finished game
         sta UIRESULT
@@ -1319,12 +1433,29 @@ cmd_help:
         ldx #>m_help2
         jmp uisetmsg
 
-; cmd_quit: on real hardware $BFFF is plain RAM, so this stores a byte and
-; starts a new game; under the harness it is the exit trap and ends the run.
+; cmd_quit: Q QUITS. On an Apple II with no resident operating system there
+; is nowhere to quit TO, so quitting is a cold boot — which, with a disk
+; still in the drive, is how you start a fresh 8fish, and otherwise is the
+; machine's own start-up state. (It used to store a byte to $BFFF and fall
+; into m8new: under the harness that was the exit trap, but on HARDWARE
+; $BFFF is plain RAM, so Q silently DISCARDED the game under a label
+; promising the opposite.)
+;
+; The switch to ROM cannot be made from here: this code is executing IN the
+; language card at $E000, so the instruction after `lda $C082` would be
+; fetched from ROM. So the last three instructions run from MAIN — six
+; bytes copied to $0300, which is engine scratch (CEILMAX0) and is exactly
+; the region m8machine already borrows.
 cmd_quit:
-        lda #0
-        sta EXIT_TRAP
-        jmp m8new
+        ldx #qstubend-qstub-1
+cqcl:   lda qstub,x
+        sta $0300,x
+        dex
+        bpl cqcl
+        jmp $0300
+qstub:  lda $C082               ; bank the ROM back in over $D000-$FFFF
+        jmp ($FFFC)             ; ...and take its RESET vector: a cold boot,
+qstubend:                       ;  since m8main invalidated the power-up byte
 
 ; ===========================================================================
 ; Painting
@@ -1439,6 +1570,8 @@ usrput: sta UICNT2
 ; uiresultmsg: fill the message row with the outcome in words.
 uiresultmsg:
         ldx UIRESULT
+        cpx #RES_ERR
+        beq urmx                ; not a draw: m8engine's own message stands
         cpx #RES_MATE
         beq urmwin
         cpx #RES_RESIGN
@@ -1454,6 +1587,7 @@ urmwin: lda UIWIN
 :       lda #<m_whitewins
         ldx #>m_whitewins
         jmp uisetmsg
+urmx:   rts
 
 ; uichkrow: row 13 — check, while the game is live.
 uichkrow:
@@ -1714,28 +1848,10 @@ usddot: lda #'.'|$80
         sta (SCRPTR),y
         iny
         lda UISCR0
-        ; fall through
-
-; uid2z: A = 0..99 -> two digits at (SCRPTR),y, leading zero PRINTED (unlike
-; ui.s's uidec2, which blanks it — a hundredths field needs the zero).
-uid2z:  ldx #0
-ud2zl:  cmp #10
-        bcc ud2zd
-        sbc #10
-        inx
-        bne ud2zl
-ud2zd:  pha
-        txa
-        clc
-        adc #'0'|$80
-        sta (SCRPTR),y
-        iny
-        pla
-        clc
-        adc #'0'|$80
-        sta (SCRPTR),y
-        iny
-        rts
+        ; uid2z (two digits, leading zero PRINTED — a hundredths field needs
+        ; it) lives in ui.s, which the three-column move-number field also
+        ; needs it for and which is linked standalone by asm/uitest.s.
+        jmp uid2z
 
 ; ===========================================================================
 ; Tables and strings
@@ -1790,9 +1906,9 @@ cmdhi:  .byte >(cmd_new-1),  >(cmd_take-1),  >(cmd_resign-1), >(cmd_draw-1)
 stmlo:  .byte <s_white, <s_black
 stmhi:  .byte >s_white, >s_black
 reslo:  .byte <s_white, <s_mate2, <s_stale, <s_d50, <s_drep, <s_resign
-        .byte <s_agreed, <s_toolong, <s_err
+        .byte <s_agreed, <s_err
 reshi:  .byte >s_white, >s_mate2, >s_stale, >s_d50, >s_drep, >s_resign
-        .byte >s_agreed, >s_toolong, >s_err
+        .byte >s_agreed, >s_err
 
 TITLELVL  = 20          ; column of the level digit in s_title
 TITLEWHO  = 26          ; column of the 13-character "who plays what" field
@@ -1814,7 +1930,6 @@ s_d50:     SCRSTR "DRAW: 50 MOVES"
 s_drep:    SCRSTR "DRAW: REPETITION"
 s_resign:  SCRSTR "RESIGNED"
 s_agreed:  SCRSTR "DRAW AGREED"
-s_toolong: SCRSTR "DRAW: TOO LONG"
 s_err:     SCRSTR "INTERNAL ERROR"
 s_movq:    SCRSTR "YOUR MOVE? "
 s_cmdq:    SCRSTR "COMMAND?   "
@@ -1836,3 +1951,5 @@ m_whitewins: SCRSTR "WHITE WINS - N STARTS A NEW GAME"
 m_blackwins: SCRSTR "BLACK WINS - N STARTS A NEW GAME"
 m_help2:    SCRSTR "MOVES ARE e2e4 / e7e8q. RETURN SENDS."
 m_enginebad: SCRSTR "ENGINE RETURNED AN ILLEGAL MOVE"
+m_histfull: SCRSTR "MOVE LIST FULL - CANNOT TAKE BACK"
+m_needsiie: SCRSTR "8FISH NEEDS A 128K APPLE IIE"

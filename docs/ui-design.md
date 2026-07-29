@@ -26,7 +26,7 @@ labelled *derived*.
 | `FT2_ADAPT` | **now runnable on device** via `FT2_SOFTCLK`; exposing it is still a UI decision (its ceilings are host-computed). See §6.3 |
 | progress during search | printed **between iterative-deepening iterations**, from the UI's own driver loop. **Zero lines of `search.s` change** |
 | MAIN-RAM cost | **0 bytes permanent** (a run-once 57-byte copier lives in soon-to-be-overwritten RAM) |
-| LC budget | **6,278 B of 8,176 B measured** (4,230 B code+data, 2,048 B RAM arrays, 256 B variables); **1,898 B free** |
+| LC budget | **6,476 B of 8,176 B measured** (4,428 B code+data, 2,048 B RAM arrays, 256 B variables); **1,700 B free** |
 
 The single most important finding is in §2: this project has never used its
 Language Card. The UI does not have to compete for the 1,622 bytes.
@@ -665,10 +665,17 @@ is the only thing outstanding, and it is the only thing that needs hardware.
    *nothing on the whole screen* would flash or render as MouseText, which
    is what fails if the store is ever removed. The §3.2 fallback table
    remains available if a real IIe still disagrees.
-3. **The 6502 vectors at `$FFFA-$FFFF` are RAM** once LC read is enabled. The UI
-   must write them (RESET → UI entry, IRQ/BRK → a safe handler). Whether Ctrl-Reset
-   on a IIe forces ROM back in before the vector fetch needs hardware
-   confirmation; the emulator will not settle it.
+3. ~~**The 6502 vectors at `$FFFA-$FFFF` are RAM** once LC read is enabled.~~
+   **RESOLVED 2026-07-28 (§12.7).** NMI and IRQ/BRK are RAM and are written.
+   RESET is not reachable: a hardware reset on a IIe DISABLES the built-in
+   language card — which is exactly why Apple Pascal could use Ctrl-Reset as
+   a warm start — so `$FFFC` is fetched from ROM and the UI's copy was dead
+   code. What Ctrl-Reset actually does is Autostart's warm/cold decision on
+   the power-up byte at `$03F4`, and that decision was landing on WARM: a
+   `jmp ($03F2)` into an Applesoft whose entire zero page the engine had
+   trampled. `m8main` now invalidates the byte, so Ctrl-Reset is a
+   deterministic COLD boot — i.e. it restarts 8fish off the disk in the
+   drive.
 4. **Symbol drift.** The UI links against addresses from `engine.lbl`, which move
    on every engine rebuild. The Makefile regenerates `engsyms.inc`, so the failure
    mode is a stale build, not a wrong one — but the rule must be a real
@@ -710,7 +717,7 @@ Two BLOADable files, essentially as designed:
 m8boot.bin   57 B   BRUN at $0800   latch $C08B, copy $0900 -> $E000,
                                     install the engine's LC aux primitives
                                     at $D000, JMP $E000
-m8.bin    4,230 B   BLOAD at $0900  the UI payload
+m8.bin    4,428 B   BLOAD at $0900  the UI payload
 ```
 
 `$0800` is `PIECESQ` and `$0900-$1FFF` is the per-ply undo/search arrays and
@@ -744,10 +751,10 @@ sectors, and `diskii mksd` refuses an image over **45,056 bytes**:
 
 | base | image ($base to `engine.bin`'s last byte, `$BB99`) | SD spare | UI growth room |
 |---|---:|---:|---:|
-| `$0800` (the BLOAD layout) | 45,978 | **−922** | 1,658 |
-| **`$0C00`** | **44,954** | **102** | **634** |
-| `$0D00` | 44,698 | 358 | 378 |
-| `$0F00` | 44,186 | 870 | **−134** (payload lands on the book) |
+| `$0800` (the BLOAD layout) | 45,978 | **−922** | 1,460 |
+| **`$0C00`** | **44,954** | **102** | **436** |
+| `$0D00` | 44,698 | 358 | 180 |
+| `$0F00` | 44,186 | 870 | **−332** (payload lands on the book) |
 
 `internal/delivery`'s `TestBaseTradeoff` **re-derives that table from the real
 file sizes** on every run and fails if `Base` is not the lowest base that fits,
@@ -771,7 +778,7 @@ the payload's page. `TestDiskLayout` asserts both.
 
 ```
 $0C00  m8sdboot.bin                  57 B   the copier (= --start)
-$0D00  m8.bin                     4,230 B   staged; copied to $E000
+$0D00  m8.bin                     4,428 B   staged; copied to $E000
 $2000  internal/book/bookblob.bin  7,407 B  the resident opening book
 $4000  engine.bin                31,642 B   the engine
        ------------------------------------
@@ -787,7 +794,7 @@ MAME's emulated IIe keyboard — with the pieces rendered by the real 342-0265-a
 character ROM, which is the first independent confirmation that the
 `ALTCHARSET` encoding is right.
 
-**Both margins are gated, not commented.** There are 736 bytes of slack in
+**Both margins are gated, not commented.** There are 538 bytes of slack in
 this layout and the two budgets grow from opposite ends — the engine spends the
 SD spare, the UI spends the growth room, and raising the base trades one for
 the other 256 bytes at a time. `internal/ui`'s **`TestDiskLedger`** prints both
@@ -802,31 +809,32 @@ From the linker's segment size and label deltas (`internal/ui`
 | component | bytes |
 |---|---|
 | entry vector (fixed at `$E000`) | 3 |
-| `asm/ui.s` renderer | 508 |
+| `asm/ui.s` renderer (incl. `uidec3`/`uid2z`) | 569 |
 | `asm/entropy.inc` | 56 |
-| cold start, main loop, whose-turn-is-it | 126 |
-| position bookkeeping (new game, apply, hash history) | 164 |
+| cold start, main loop, machine check, whose-turn-is-it | 208 |
+| position bookkeeping (new game, apply, hash history) | 181 |
 | move generation / validation / legality | 333 |
-| game state (legal count, mate/stalemate/50/repetition) | 105 |
+| game state (legal count, mate/stalemate/50/repetition) | 92 |
 | the engine's turn (seed, book probe, apply) | 147 |
 | level table + the soft-clock margin rule | 296 |
 | the UI's own iterative-deepening driver | 267 |
 | line editor, move parsing, promotion prompt | 349 |
-| commands | 238 |
-| painting | 470 |
-| think line + signed centipawn formatting | 280 |
-| tables and strings | 888 |
-| **UICODE total (measured)** | **4,230** |
+| commands | 262 |
+| painting | 475 |
+| think line + signed centipawn formatting | 256 |
+| tables and strings | 934 |
+| **UICODE total (measured)** | **4,428** |
 | UI variables + screen buffers (`$F700`) | 256 |
 | game history from/to/flags (`$F800-$FAFF`) | 768 |
 | game hash history (`$FB00-$FEFF`) | 1,024 |
-| **TOTAL** | **6,278 of 8,176 (77%)** |
-| **FREE** | **1,898** |
+| **TOTAL** | **6,476 of 8,176 (79%)** |
+| **FREE** | **1,700** |
 
 **MAIN cost 0 B. TT cost 0 B. Book unmoved.** The design's estimate was
-~4,011 B; the real thing is 6,278 B, the difference being almost entirely
+~4,011 B; the real thing is 6,476 B, the difference being almost entirely
 strings, the level/limit arithmetic and the ID driver coming in heavier than
-their *derived* rows.
+their *derived* rows. The 2026-07-28 hardware pass (§12.7) added 195 B of
+that total.
 
 ### 12.4 The gates
 
@@ -861,7 +869,11 @@ All under `internal/ui`, plus the two engine-side ones:
 | `TestRulesCorpus` / `TestRulesRandomSweep` / `TestRulesPlaythrough` | the UI's own referee **differentially against refchess**: 28 hand-built castling / en-passant / promotion / mate corners, ~800 random positions, and 12 random games TYPED IN with the whole position — rights, ep square, halfmove clock — compared every ply |
 | `TestThreefoldExactPly` / `TestThreefoldRespectsCastlingRights` | the draw fires on the THIRD occurrence, and the repetition hash is position-based: identical placement with different castling rights is not a repetition |
 | `TestFiftyMoveBoundary` | halfmoves not fullmoves, reset on capture and on a pawn move, and **checkmate on the hundredth halfmove is a mate, not a draw** |
-| `TestHistoryCapEndsALiveGameInADraw` | the `RES_LONG` boundary (§12.6): a legal 250-ply game that meets no draw rule is nonetheless drawn, and the cap is a hard stop rather than a wrap |
+| `TestLongGameIsNotDrawn` | a legal 262-ply game that meets no draw rule is NEVER declared over; the position still tracks refchess after the arrays fill; `UIHCNT` pins at 255 instead of wrapping; canaries prove nothing is written past any array's last byte; and takeback is refused in words rather than replaying to the wrong position |
+| `TestMoveNumberOverNinetyNine` | the move panel's three-column number field: 99 stays right-aligned, 100 renders as `100` and not `1 0`, and no panel line exceeds its 19 columns |
+| `TestRefusesMachinesWithoutAuxRAM` | the machine check (§12.7), on three modelled machines: a 128K IIe comes up, an Apple ][+ (aux switches that are not switches) and a 64K IIe (switches with no RAM behind them) both get `8FISH NEEDS A 128K APPLE IIE` and halt with the engine image untouched |
+| `TestColdStartHardening` | `CLD` is in the first bytes of `m8main`; a key held down through the boot is not eaten as the first character typed; and the Autostart power-up byte is INVALID, so Ctrl-Reset cold boots instead of warm-starting into a trashed Applesoft |
+| `TestDiskQuitReboots` | `Q` really quits: on the disk-booted machine it leaves the language card through the ROM's own RESET vector, and (with the ][+ Autostart ROM, whose reset path this emulator can execute end to end) comes all the way back round through the Standard Delivery copier to a fresh 8fish |
 | `TestTakebackAgainstTheEngine` / `TestTakebackAcrossABookMove` | the two-plies-at-a-time branch of `cmd_take`, which referee mode cannot reach (`UIHUMAN` is `$FF` there, so it always steps back one) |
 | `TestResignAwardsTheRightSide` / `TestDrawOfferIsNotAnsweredFromARetractedSearch` | the two result-reporting bugs found by that pass, in all three side modes |
 | `TestCommands` | N / T / R / L / S / ? |
@@ -916,10 +928,10 @@ Nothing below is needed to play a game.
 | deferred | why | price to add |
 |---|---|---|
 | **Board flip when the human plays Black** | `uiboard` walks `a8` downward with a fixed square-colour phase | ~40 B: a direction byte and a phase seed in `uiboard`, plus reversing `uicoords` |
-| **Hi-res board** (§3.1) | costs information, not bytes: mixed mode leaves 4 text rows and the panel/status/prompt no longer fit at once | ~1,850 B, fits in the 1,898 B free; book moves to LC bank 2 |
+| **Hi-res board** (§3.1) | costs information, not bytes: mixed mode leaves 4 text rows and the panel/status/prompt no longer fit at once | ~1,850 B, fits in the 1,700 B free only just; book moves to LC bank 2 |
 | **Insufficient-material draw** (KK, KNK, KBK) | the engine detects it *inside* the search; at the root the UI does not | ~50 B: the same piece-list scan `search.s` already has, hoisted |
 | **Fivefold / 75-move automatic ends** | threefold and 50 already adjudicate | ~15 B (two constants) |
-| **Games longer than 250 plies** | the history and hash arrays are one page each, so `uisync` declares `RES_LONG` ("DRAW: TOO LONG") at ply 250 **in any position**, winning or not. It is a hard stop, not a wrap — no further move is accepted — but 125 moves is not a draw under any rule, and `TestHistoryCapEndsALiveGameInADraw` builds a legal game that reaches it with White up a bishop, a knight and two pawns | 4 B of LC RAM per extra ply (1 history byte is already spare in each of three pages; the four hash pages are the cost). The 1,898 free bytes are room for ~470 more plies, but the arrays stop being page-indexable — that is the real price, not the RAM |
+| **RECORDING games longer than 255 plies** | no longer a draw and no longer a stop (§12.7): past ply 255 the game continues and the RECORD degrades — the move panel stops growing, takeback is refused in words, and repetition detection can only see the first 255 plies (so it can only UNDER-count). Mate, stalemate and the 50-move rule are untouched, which is everything needed to finish the game | 4 B of LC RAM per extra recorded ply (1 history byte is already spare in each of three pages; the four hash pages are the cost). The 1,700 free bytes are room for ~420 more plies, but past 256 the arrays stop being page-indexable — that is the real price, not the RAM |
 | **Mate distance in the think line** | shows `+MATE` / `-MATE`, not `#4` | ~40 B: one subtract from `MATE` and a halve |
 | **`FT2_ADAPT`'s per-GAME bank** | the host bridge banks unspent time across a game; on device each move gets a flat allocation | ~120 B: a signed 24-bit bank, income accrual and `min(4*base, income+bank)` |
 | **Position setup / FEN entry** | two-player mode plus takeback covers replaying a game | ~250 B for a FEN parser, or ~150 B for a cursor-driven piece placer |
@@ -929,3 +941,28 @@ Nothing below is needed to play a game.
 | **80-column / `80STORE`** | goapple2's `iie` deliberately leaves `80STORE` unmodelled (a compare on the hottest path for a switch nobody throws); `m8main` writes `PAGE1`, which pulls `$0400-$07FF` back to MAIN if firmware left it on | an emulator feature, not a UI one |
 | **MouseText glyphs** | `chargen` names MouseText but has no shapes for it; this UI does not use `$40-$5F` | 32 glyph bitmaps in goapple2 |
 | **Ctrl-Reset behaviour** (§11 risk 3) | the UI writes `$FFFA-$FFFF`, but whether a IIe forces ROM back in before the reset vector fetch is a hardware question | nothing to write; a hardware answer |
+
+### 12.7 The hardware pass (2026-07-28)
+
+The four-lens adversarial review's open findings, applied. **+195 B of UI**
+(4,233 -> 4,428), which spends the disk's UI growth room down from 631 B to
+436 B; the SD spare is untouched at 102 B, and `engine.bin` is byte-identical
+to a `git archive HEAD` build.
+
+| finding | what shipped | bytes |
+|---|---:|---:|
+| **Ctrl-Reset returned to a trashed Applesoft.** A IIe's hardware reset disables the language card, so `$FFFC` comes from ROM and the UI's copy was dead code. Autostart then passed its power-up test (8fish uses only `$0300-$030C`, and Standard Delivery never touches page 3) and warm-started into an Applesoft whose zero page the engine had trampled | `m8main` invalidates the power-up byte (`$03F3` = 0, `$03F4` = `$FF`), so Ctrl-Reset is a deterministic COLD boot: it restarts 8fish off the disk. The dead `$FFFC/$FFFD` writes are gone | **+4** |
+| **No machine detection.** On a ][+ the aux switches are no-ops, so every TT access at aux `$0200-$81FF` lands in MAIN — over the book at `$2000` and the engine at `$4000`: the engine overwrites itself mid-search. On a 64K IIe the switches work but nothing is behind them, and at ~10^7 probes a game roughly one false hit per game slips the 24-bit verify | `m8machine`: a TWO-SIDED probe (`$A5` to MAIN `$0300`, `$5A` to AUX `$0300`; aux must read back `$5A` **and** main must still read `$A5`). On failure, `8FISH NEEDS A 128K APPLE IIE` and halt — display switches thrown first, so the message is visible. The probe forces the switches to MAIN before it starts, and puts aux `$0300` back to zero afterwards, because that address is INSIDE the transposition table | **+100** |
+| **`Q-QUIT` did not quit.** It stored to `$BFFF` (the harness exit trap; plain RAM on hardware) and fell into `m8new`, silently discarding the game | `cmd_quit` copies six bytes to `$0300` — the switch to ROM cannot be made from code executing IN the language card — reads `$C082` and jumps through the ROM's RESET vector: with the power-up byte invalidated, a clean cold boot, which is what QUIT means on a machine with no resident OS | **+12** |
+| **Move numbers >= 99 rendered as punctuation.** `uidec2` is a two-digit routine, so move 100 came out `:0` | `uidec3`, a three-column right-aligned field in `ui.s` (it cannot call `m8.s`'s `uid2z`, because `ui.s` is also linked standalone by `uitest.s` — so `uid2z` moved to `ui.s` and is now shared). `uimoves` also had to `ROR` rather than `LSR`: at `UIHCNT` = 255 the `+1` carries out | **+37** |
+| **A legal game was force-drawn at ply 250.** `RES_LONG` in any position — a wrong RESULT, not a cosmetic limit | The result code is GONE. The game continues and the RECORD degrades: at ply 255 the move is played into the last slot, `UIHCNT` pins there (nothing wraps, nothing is written past index 255), `UIHFULL` comes up, and takeback is refused in words. Repetition can then only under-count; the 50-move rule, mate and stalemate are unaffected | **+33** |
+| **Minor hardening.** No `CLD` at entry; a key held through the boot was eaten as the first character typed; `RES_ERR` printed `INTERNAL ERROR` *and* `GAME DRAWN` | `cld`, `bit $C010`, and a `RES_ERR` guard in `uiresultmsg` | **+9** |
+
+What is deliberately NOT claimed: the emulator cannot perform a real
+Ctrl-Reset (goapple2's IIe model does not implement the reset line's effect
+on the language card), so finding 1 is gated on the STATE it leaves — the
+power-up byte — plus the `Q` path, which exercises the same ROM decision by
+jumping through the same vector. And `TestDiskQuitReboots` can only complete
+the round trip with the Apple ][+ Autostart ROM: a real IIe ROM's cold start
+calls into the `$C100-$CFFF` internal firmware, which this emulator
+deliberately does not model.

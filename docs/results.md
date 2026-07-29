@@ -3,6 +3,150 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-28 — THE REVIEW'S OPEN FINDINGS, APPLIED: Ctrl-Reset, machine detection, Q, three-digit move numbers, and the draw that no rule licensed
+
+Everything §5 of the review below left filed, fixed. **+195 B of UI**
+(4,233 -> 4,428 B; LC free 1,895 -> 1,700; disk UI growth room 631 -> 436 B,
+SD spare unchanged at 102 B). `engine.bin` md5 `58ef9645...`, byte-identical
+to a `git archive HEAD` build; no engine source touched; `FEATURES` and
+`FEATURES2` unchanged and still gated.
+
+### 1. Ctrl-Reset is now a deterministic COLD boot (+4 B)
+
+The IIe language card **is** disabled by a hardware reset — that is exactly
+why Apple Pascal could use Ctrl-Reset as a warm start — so `$FFFC` is fetched
+from ROM and `m8main`'s `sta $FFFC/$FFFD` was dead code. What actually
+decided the outcome was Autostart's power-up test, and it PASSED: 8fish uses
+only `$0300-$030C` and Standard Delivery never touches page 3, so
+`jmp ($03F2)` handed the machine to an Applesoft whose entire zero page the
+engine had trampled — neither 8fish nor a reboot.
+
+`m8main` now writes `$03F3` = 0 and `$03F4` = `$FF` (the test is
+`$03F4 == $03F3 EOR $A5`), so Ctrl-Reset cold boots and restarts 8fish off
+the disk still in the drive. On the BLOAD path it is better still: ProDOS's
+language-card image is long gone by then, so a warm start there was a
+guaranteed crash. The dead vector writes are gone.
+
+**What the gate can and cannot do.** goapple2 does not model the reset line's
+effect on the language card, so no test can press Ctrl-Reset.
+`TestColdStartHardening` gates the STATE the fix leaves — the power-up byte
+is invalid — and `TestDiskQuitReboots` (below) exercises the same ROM
+decision through the same vector, end to end.
+
+### 2. 8fish now refuses machines that cannot host the engine (+100 B)
+
+There was no detection at all, and the two failure modes are both invisible
+to the person holding the disk:
+
+- **Apple ][+ (or anything without the aux switches).** `$C002-$C005` are not
+  soft switches, so every TT access at aux `$0200-$81FF` goes to MAIN — over
+  the book at `$2000` and the engine image at `$4000`. **The engine
+  overwrites itself mid-search.**
+- **64K IIe.** The switches exist, but there is no RAM behind them: writes
+  vanish, reads float. At ~10^7 probes a game against a 24-bit verify, that
+  is roughly **one false TT hit per game** — a silent blunder, not a crash.
+
+`m8machine` runs a **two-sided** probe: `$A5` to MAIN `$0300`, `$5A` to AUX
+`$0300`, and BOTH must hold — aux reads back `$5A` *and* main still reads
+`$A5`. The two-sidedness is what separates the two machines: a ][+ passes the
+first half (the switch was a no-op, so its own `$5A` is what comes back) and
+fails the second. `$0300` is `CEILMAX0`, engine scratch `uilimits` rewrites
+every move, so the probe costs no storage. It forces the switches to MAIN
+before it starts (whatever the firmware that ran before us left them at) and
+puts aux `$0300` back to zero afterwards, because that address is INSIDE the
+transposition table and `TestDiskPlays` requires the TT to be untouched until
+something actually searches. On failure: `8FISH NEEDS A 128K APPLE IIE`, then
+halt — with the display switches thrown FIRST, so the message is actually
+visible on a machine whose firmware left the screen elsewhere.
+
+`TestRefusesMachinesWithoutAuxRAM` boots the SHIPPING image on all three
+machines, modelled by sabotaging exactly one fact about goapple2's IIe: the
+control comes up and plays, and both bad machines get the message, halt, and
+leave the engine image unmodified.
+
+### 3. `Q-QUIT` quits (+12 B)
+
+It stored to `EXIT_TRAP` (`$BFFF`) and fell into `m8new`. On hardware `$BFFF`
+is plain RAM, so Q **silently discarded the game** under a label promising
+the opposite, and no test pressed the key.
+
+The switch to ROM cannot be made from code executing IN the language card —
+the instruction after `lda $C082` would be fetched from ROM — so `cmd_quit`
+copies six bytes to `$0300` and runs them from MAIN: `lda $C082`,
+`jmp ($FFFC)`. With finding 1 applied that is a clean cold boot, which on a
+machine with no resident OS is exactly what QUIT means.
+
+`TestDiskQuitReboots` presses Q on the DISK-booted machine. It always asserts
+that control leaves the language card through the ROM's own RESET vector;
+with the Apple ][+ Autostart ROM — whose reset path this emulator can execute
+end to end, unlike a real IIe ROM's, which calls into the unmodelled
+`$C100-$CFFF` firmware — it follows the whole round trip back through the
+Standard Delivery copier at `$0C00` to a fresh 8fish, screen-identical to the
+first boot.
+
+### 4. Move numbers past 99 (+37 B)
+
+`uidec2` is a two-digit routine, so move 100 rendered as `:0` and 123 as
+`;3` — its tens digit is a raw counter and `10 + '0'` is `':'`. `uidec3` is a
+three-column right-aligned field; the panel is 19 columns and the line is now
+13, so it fits. It **cannot** call `m8.s`'s `uid2z` (`ui.s` is also linked
+standalone by `uitest.s`), so `uid2z` moved into `ui.s` and is now shared with
+`uiscore`'s hundredths field — net cost of the move, 3 bytes.
+
+One bug found while fixing it: `uimoves` computed the first panel row with
+`lda UIHCNT / clc / adc #1 / lsr`, which **carries out at `UIHCNT` = 255** and
+showed move 1 instead of move 128. Unreachable while the ply cap existed, and
+reachable the moment finding 5 removed it. `ROR` instead of `LSR`, 0 bytes.
+
+`TestMoveNumberOverNinetyNine` was the characterization test that pinned the
+defect; it now asserts the fix.
+
+### 5. A legal game is never drawn for being long (+33 B)
+
+`uisync` set `RES_LONG` ("DRAW: TOO LONG") in **any** position at
+`UIHCNT == 250`. 125 moves is not a draw under any rule — the FIDE ceiling is
+the 75-MOVE rule, a counter — so this was a wrong RESULT, not a cosmetic
+limit, and `TestHistoryCapEndsALiveGameInADraw` had it drawing a game with
+White up a bishop, a knight and two pawns.
+
+**The result code is gone.** The game continues and the RECORD degrades
+instead. At ply 255 the move is played into the last slot, `UIHCNT` pins at
+255 (nothing wraps to index 0, nothing is written past index 255) and
+`UIHFULL` comes up. The current position's hash still lands at index
+`UIHCNT`, so `uireps` keeps comparing like with like and can only ever
+UNDER-count repetitions; the 50-move rule is a counter, not a history, and
+mate and stalemate are untouched — which is everything needed to FINISH the
+game. What is lost is exact and stated: the move panel stops growing, and
+takeback is refused **in words** (`MOVE LIST FULL - CANNOT TAKE BACK`) rather
+than replaying to a position that is not the one before the last move.
+
+That last point is why the alternative — sliding a window over the arrays, or
+wrapping — was rejected: both need a saved replay BASE (~164 B of position
+snapshot plus the code to save and restore it) or they silently take back to
+the wrong position, and both restart the move numbering.
+
+`TestLongGameIsNotDrawn` types a 262-ply draw-free game and requires: no
+result ever declared; the position still tracking refchess after the arrays
+fill; `UIHCNT` pinned at 255; canaries intact past the end of every array;
+the takeback refusal; and the game still playable after it.
+
+### 6. Minor hardening (+9 B)
+
+`cld` at entry (D is undefined after reset on NMOS; the ROM clears it in
+practice); `bit $C010`, so a key held down while the disk loads is not eaten
+as the first character typed; and a `RES_ERR` guard in `uiresultmsg`, which
+used to print `INTERNAL ERROR` **and** `GAME DRAWN`.
+
+### Ledger
+
+| | before | after |
+|---|---:|---:|
+| UICODE | 4,233 B | **4,428 B** |
+| LC total ($E000-$FFEF, 8,176 B) | 6,281 B | **6,476 B** |
+| LC free | 1,895 B | **1,700 B** |
+| disk SD spare | 102 B | **102 B** |
+| disk UI growth room | 631 B | **436 B** |
+
 ## 2026-07-28 — FOUR-LENS ADVERSARIAL REVIEW: the shipping disk was ~24 Elo weaker than everything we measured, and would have sprayed garbage on a IIe
 
 Four independent reviewers, one lens each (hardware fidelity, engine asm,
@@ -90,7 +234,7 @@ found no permissiveness; also make/unmake symmetry path-by-path, every
 signed/unsigned score compare, the TT depth/bound proof, page alignment and
 both SMC sites, and a scripted zero-page overlap check. Nothing found.
 
-### 5. Open, NOT fixed (filed)
+### 5. Open, NOT fixed (filed) — ALL FIXED 2026-07-28, see the entry above
 
 - **Ctrl-Reset does not return to 8fish.** The IIe language card *is*
   disabled by a hardware reset, so `$FFFC` comes from ROM and `m8main`'s
@@ -104,10 +248,10 @@ both SMC sites, and a scripted zero-page overlap check. Nothing found.
 - **`Q-QUIT` does not quit** — it silently starts a new game, and no test
   presses Q.
 - **Move numbers ≥ 100 render as punctuation** (`uidec2` is two-digit); and a
-  legal game is **force-drawn at ply 250** regardless of position.
+  legal game is **force-drawn at ply 250**.
 - **`adaptmaybe`'s score-drop test lacks overflow correction** (SUSPECTED) —
   time management only, same class as the `cmp #$74` bug, in code nobody
-  re-audited after that fix.
+  re-audited after that fix. **STILL OPEN**: it was not in the applied set.
 
 ### 6. Gate weaknesses found (several fixed)
 

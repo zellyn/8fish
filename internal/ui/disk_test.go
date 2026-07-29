@@ -464,3 +464,114 @@ func TestDiskPlays(t *testing.T) {
 			"table: the copier's LCCODE install or the RAMWRT path is broken")
 	}
 }
+
+// TestDiskQuitReboots: Q QUITS.
+//
+// On an Apple II with no resident operating system there is nowhere to quit
+// TO, so quitting means a cold boot — which, with the disk still in the
+// drive, restarts 8fish. `cmd_quit` copies six bytes to $0300 (it cannot bank
+// the ROM back in while executing FROM the language card: the very next
+// instruction fetch would come from ROM), reads $C082 to put ROM over
+// $D000-$FFFF, and jumps through the ROM's own RESET vector. Because m8main
+// invalidated the Autostart power-up byte, that RESET takes the COLD path,
+// which scans the slots and boots the disk.
+//
+// Until 2026-07-28 Q stored a byte to the harness exit trap at $BFFF and fell
+// into m8new. On hardware $BFFF is plain RAM, so the only thing Q did there
+// was silently DISCARD the game — under a label promising the opposite, and
+// with no test pressing the key. This is that test.
+func TestDiskQuitReboots(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: boots a disk twice")
+	}
+	const budget = 600_000_000
+
+	// bootAndQuit boots the disk, plays a move so that "it came back to a
+	// start position" is a claim about a RESTART rather than about nothing
+	// having happened, and presses Q.
+	bootAndQuit := func(t *testing.T) (*ui.DiskMachine, ui.Screen) {
+		t.Helper()
+		m, err := ui.NewDiskMachine(dskPath(t), ui.RomDir())
+		if err != nil {
+			t.Skipf("SKIP: no Apple II machine available: %v", err)
+		}
+		t.Logf("booted from disk, ROM = %s", m.ROMName)
+		if ok, err := m.RunToKeyboard(budget); err != nil || !ok {
+			t.Fatalf("boot: ok=%v err=%v (PC $%04X)", ok, err, m.CPU.PC())
+		}
+		first := *m.Screen()
+		if err := m.Enter("e2e4", budget); err != nil {
+			t.Fatalf("typing e2e4: %v\n%v", err, m.Screen())
+		}
+		if s := m.Screen(); s.Raw == first.Raw {
+			t.Fatalf("the screen did not change when a move was played\n%v", s)
+		}
+		if err := m.Key('q', budget); err != nil { // typed and echoed; still polling
+			t.Fatalf("typing q: %v", err)
+		}
+		m.SendKey(0x0D) // RETURN submits the line and cmd_quit runs
+		return m, first
+	}
+
+	// The part 8fish is responsible for: control leaves the language card
+	// through the ROM's RESET vector. Nothing in the UI writes $FFFC any
+	// more, so reaching that address is proof the ROM was banked back in
+	// and its vector — not a leftover byte of LC RAM — was taken.
+	t.Run("jumps through the ROM RESET vector", func(t *testing.T) {
+		m, _ := bootAndQuit(t)
+		reset := uint16(m.Mem.ROM[0xFFFC-0xD000]) | uint16(m.Mem.ROM[0xFFFD-0xD000])<<8
+		ok, err := m.RunUntilPC(reset, 10_000_000)
+		if err != nil {
+			t.Fatalf("after Q: %v", err)
+		}
+		if !ok {
+			t.Fatalf("after Q the CPU never reached the ROM's RESET vector $%04X "+
+				"(PC $%04X) — Q did not reboot\n%v", reset, m.CPU.PC(), m.Screen())
+		}
+		t.Logf("Q reached the ROM RESET handler at $%04X", reset)
+	})
+
+	// ...and the whole way round, when the ROM's reset path is one this
+	// emulator can execute. goapple2's iie model deliberately implements no
+	// $C100-$CFFF internal ROM (see internal/ui/diskboot.go), and a real IIe
+	// ROM's cold start calls into it, so that machine cannot complete a
+	// reboot here for reasons that have nothing to do with 8fish. The Apple
+	// ][+ Autostart ROM makes the same two decisions this fix depends on —
+	// the power-up byte test and the slot scan — without the IIe firmware,
+	// so it is the one that can prove the round trip.
+	t.Run("cold boots the disk", func(t *testing.T) {
+		plus := filepath.Join(ui.RomDir(), "apple2+.rom")
+		if _, err := os.Stat(plus); err != nil {
+			t.Skipf("SKIP: no Apple ][+ ROM at %s", plus)
+		}
+		t.Setenv("CHESS6502_A2E_ROM", plus) // ui.FindROM's explicit-image hook
+		m, first := bootAndQuit(t)
+		ok, err := m.RunUntilPC(uint16(delivery.CopierOrg), budget)
+		if err != nil {
+			t.Fatalf("after Q: %v", err)
+		}
+		if !ok {
+			t.Fatalf("after Q the machine never re-entered the disk copier at $%04X "+
+				"(PC $%04X after %d cycles) — Q did not cold boot\n%v",
+				delivery.CopierOrg, m.CPU.PC(), m.Cycles, m.Screen())
+		}
+		t.Logf("Q reached the Standard Delivery copier at $%04X again: the ROM cold "+
+			"start re-read the disk", delivery.CopierOrg)
+		if ok, err := m.RunToKeyboard(budget); err != nil || !ok {
+			t.Fatalf("reboot: ok=%v err=%v (PC $%04X)\n%v", ok, err, m.CPU.PC(), m.Screen())
+		}
+		got := *m.Screen()
+		if got.Raw != first.Raw {
+			for row := range 24 {
+				if got.Raw[row] != first.Raw[row] {
+					t.Errorf("row %d after the reboot:\n got:  %q\n want: %q",
+						row, got.Text(row), first.Text(row))
+				}
+			}
+			t.Fatalf("the machine came back to a different screen:\n%v", &got)
+		}
+		if n := m.Mem.Main[ui.UIHCNT]; n != 0 {
+			t.Errorf("UIHCNT = %d after the reboot, want a fresh game", n)
+		}
+	})
+}

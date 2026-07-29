@@ -369,9 +369,9 @@ func TestFullGame(t *testing.T) {
 		if p.HalfmoveClock() < 100 {
 			t.Errorf("the UI claims the 50-move rule at halfmove clock %d", p.HalfmoveClock())
 		}
-	case ui.ResRep, ui.ResLong:
-		// Repetition is checked by construction (the UI's own hash history)
-		// and "too long" is the array bound; both are real terminations.
+	case ui.ResRep:
+		// Repetition is checked by construction, against the UI's own hash
+		// history; refchess does not track occurrences here.
 	default:
 		t.Errorf("unexpected termination %s", ui.ResultName(result))
 	}

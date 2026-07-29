@@ -197,6 +197,20 @@ SETKBD/SETVID/INIT/HOME first, like a real boot.
   gauntlet wall time (~4 min/game at 40/4) — ~35 core-hours per
   500-game gauntlet, parallelizable across cores.
 
+## Running the tests inside a `.claude/worktrees/` worktree
+
+`make test` (and any plain `go build ./...`) **fails there**, in a way that
+reads like a build error: `go.work` at the repo root lists `.`, `../go6502`
+and `../goapple2`, and a worktree is inside the repo but outside that
+workspace, so every sibling import goes unresolved. It is not your change.
+
+Write a worktree-local `go.work` before running anything — it is gitignored,
+so it never leaves the worktree:
+
+```sh
+printf 'go 1.26.2\n\nuse (\n\t.\n\t/Users/zellyn/gh/go6502\n\t/Users/zellyn/gh/goapple2\n)\n' > go.work
+```
+
 ## Known infrastructure gaps (from adversarial review)
 
 - **No CI anywhere** (chess6502, goapple2, go6502, a2audit) — the

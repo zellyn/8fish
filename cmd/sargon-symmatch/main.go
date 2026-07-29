@@ -89,6 +89,7 @@ func main() {
 		dither      = flag.String("dither", ucibridge.DitherEntropy, "8fish eval-dither seed source: entropy (hardware-faithful keystroke-timing collector), prng (host PCG), off")
 		ditherSeed  = flag.Uint64("dither-seed", 0, "with -dither prng: pin the stream for a reproducible run (0 = random)")
 		softclock   = flag.Bool("softclock", false, "8fish runs on its own ESTIMATED elapsed-cycle clock (FT2_SOFTCLK, $BFF4 read trap off) — the SHIPPED device configuration (asm/m8.s), which an Apple IIe requires because it has no readable clock")
+		noPonder    = flag.Bool("noponder", false, "remove pondering from BOTH sides: 8fish runs no ponder search (asm/m8.s never ponders — it blocks in uiread/entkey on the opponent's turn) and Sargon is NOT advanced during 8fish's think, so Hard Mode gets no ponder window either. Symmetry is preserved (each side spends only its own-move budget B); dropping only 8fish's ponder would hand Sargon a ~2:1 compute edge and the Elo would measure that, not chess")
 		openings    = flag.String("openings", "", "EPD file of opening positions (one per line); games cycle through it")
 		stdStart    = flag.Bool("standard-start", false, "every game starts from the STANDARD chess start position with no setboard, so BOTH engines use their opening books (8fish's resident book, Sargon III's built-in book); overrides -openings")
 		games       = flag.Int("games", 2, "number of games to play")
@@ -167,8 +168,12 @@ func main() {
 	if *softclock {
 		clockMode = "SOFTCLOCK (FT2_SOFTCLK, trap off) — the SHIPPED device config"
 	}
-	lg("=== sargon-symmatch: %d game(s), budget B=%d cyc (%d ms), book=%v, mode=%s, clock=%s, symmetric ponder ===",
-		*games, *budget, *budget/cyclesPerMs, *usebook, mode, clockMode)
+	ponderMode := "symmetric ponder"
+	if *noPonder {
+		ponderMode = "NO PONDER on either side (device-faithful: asm/m8.s never ponders; Sargon not advanced during 8fish's think)"
+	}
+	lg("=== sargon-symmatch: %d game(s), budget B=%d cyc (%d ms), book=%v, mode=%s, clock=%s, %s ===",
+		*games, *budget, *budget/cyclesPerMs, *usebook, mode, clockMode, ponderMode)
 
 	// Sargon III cannot record a game longer than 127 full moves: at move 128 its
 	// move-list numbering restarts at 1 and its screen record — the only
@@ -191,7 +196,7 @@ func main() {
 		if len(openingList) > 0 {
 			fen = openingList[g%len(openingList)]
 		}
-		res := playGame(lg, eng, *dsk, *budget, sargonWhite, fen, *maxMoves, g, &sess)
+		res := playGame(lg, eng, *dsk, *budget, sargonWhite, fen, *maxMoves, g, &sess, *noPonder)
 		switch res {
 		case resWin:
 			wins++
@@ -214,7 +219,7 @@ func main() {
 		"| 8fish_own=%d 8fish_ponder=%d ponder_asked=%d ponder_ratio=%.4f ponders=%d sargon_own=%d sargon_ponder=%d",
 		*games, sess.eightfishTotal(), sess.sargonTotal(), sess.spendRatio(),
 		sess.ownCyc, sess.ponderCyc, sess.ponderAsked, sess.ponderRatio(), sess.ponders,
-		sess.sargonThink, sess.ownCyc)
+		sess.sargonThink, sess.sargonPonder)
 	lg("SYMMATCH-BOOK-SESSION-SUMMARY games=%d 8fish_book_moves=%d/%d 8fish_book_cyc=%d sargon_instant_replies=%d/%d",
 		*games, sess.bookMoves, sess.moves, sess.bookCyc, sess.sargonBook, sess.sargonMoves)
 	lg("SYMMATCH-DONE games=%d 8fish_wins=%d 8fish_losses=%d draws=%d", *games, wins, losses, draws)
@@ -252,6 +257,12 @@ type timeAcct struct {
 	ponderAsked uint64 // window 8fish's ponders were asked to burn
 	sargonThink uint64 // cycles Sargon spent on its own moves (all of them)
 	ponders     int    // ponder searches actually run
+	// sargonPonder is the ponder window Sargon was actually advanced through
+	// (runSargonCycles). Under the default symmetric mode this equals ownCyc by
+	// construction; under -noponder it stays 0, because Sargon is not advanced
+	// during 8fish's think at all. Tracking it explicitly — instead of assuming
+	// it equals ownCyc — is what keeps spendRatio honest in BOTH modes.
+	sargonPonder uint64
 }
 
 func (t *timeAcct) add(spent, income uint64) {
@@ -273,7 +284,7 @@ func (t *timeAcct) addPonder(asked, spent uint64) {
 
 // eightfishTotal / sargonTotal are the two sides' whole-match compute.
 func (t timeAcct) eightfishTotal() uint64 { return t.ownCyc + t.ponderCyc }
-func (t timeAcct) sargonTotal() uint64    { return t.ownCyc + t.sargonThink }
+func (t timeAcct) sargonTotal() uint64    { return t.sargonPonder + t.sargonThink }
 
 // spendRatio is THE number to read before any Elo: 8fish's total compute over
 // Sargon's. 1.0 means the mirror held. Anything past a few percent means the
@@ -304,6 +315,7 @@ func (t *timeAcct) fold(o timeAcct) {
 	t.ponderCyc += o.ponderCyc
 	t.ponderAsked += o.ponderAsked
 	t.sargonThink += o.sargonThink
+	t.sargonPonder += o.sargonPonder
 	t.ponders += o.ponders
 }
 
@@ -540,7 +552,7 @@ func parseNodes(line string) (uint64, bool) {
 // The game loop
 // ---------------------------------------------------------------------------
 
-func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64, sargonWhite bool, fen string, maxMoves, gameNo int, sess *timeAcct) gameResult {
+func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64, sargonWhite bool, fen string, maxMoves, gameNo int, sess *timeAcct, noPonder bool) gameResult {
 	// Per-game debt-bank governing 8fish's own-move budget. Income per move is B;
 	// each move spends B + bank/8, and an iteration-boundary overshoot drives the
 	// bank NEGATIVE so later moves' shrunken allocations repay it — the same
@@ -691,8 +703,14 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		moves = append(moves, sr.move)
 		usPly := len(moves)
 
-		// Sargon ponder window == 8fish's exact think (T_us).
-		runSargonCycles(m, sr.cycles)
+		// Sargon ponder window == 8fish's exact think (T_us). Under -noponder the
+		// window is zero on BOTH sides, so Sargon is simply not advanced here.
+		var sargonWindow uint64
+		if !noPonder {
+			sargonWindow = sr.cycles
+			runSargonCycles(m, sargonWindow)
+			gt.sargonPonder += sargonWindow
+		}
 
 		if term, r, why := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
 			lg("MOVE g%d ply%d 8fish move=%s think=%d -> %s", gameNo, usPly, sr.move, sr.cycles, r)
@@ -737,7 +755,7 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		// --- Step 5: 8fish ponders EXACTLY T_sargon on the predicted reply. ---
 		var ponderCyc uint64
 		hit := "n/a"
-		if sr.ponder != "" && reply.ThinkCycles > 0 {
+		if !noPonder && sr.ponder != "" && reply.ThinkCycles > 0 {
 			ponderCyc = eng.ponder(base, moves, sr.ponder, reply.ThinkCycles)
 			gt.addPonder(reply.ThinkCycles, ponderCyc)
 			if sr.ponder == s {
@@ -764,7 +782,7 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		// Auditable symmetry line: 8fish think == Sargon ponder-window (exact),
 		// and Sargon think ~= 8fish ponder (budget-matched).
 		lg("MOVE g%d ply%d 8fish move=%s think=%d | sargon_ponder_window=%d || ply%d SARGON move=%s think=%d | 8fish_ponder=%d pred=%s(%s) 8fish_book=%v sargon_instant=%v",
-			gameNo, usPly, sr.move, sr.cycles, sr.cycles,
+			gameNo, usPly, sr.move, sr.cycles, sargonWindow,
 			sargonPly, s, reply.ThinkCycles, ponderCyc, sr.ponder, hit, sr.book, instant)
 
 		// Periodic full-screen capture: cheap (~1 KB of emulator RAM) and the only

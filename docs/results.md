@@ -3382,15 +3382,26 @@ the mirror to reproduce an asm oddity.
 
 ## 2026-07-26 — ★★ CONFIRMED DECISIVE across 600 games: +110 Elo (335-151-114)
 
-> **⚠ SUPERSEDED FOR THE SHIPPED ARTIFACT (2026-07-29).** This number is
-> correct and reproducible **for the harness configuration it measures** —
-> a later 252-game re-run of the same mode returned +116 [+75, +160], which
-> contains it, 220 commits on. But it was measured with `FT2_SOFTCLK` OFF,
-> and **the device runs the soft clock**, because an Apple IIe has no
-> readable clock. A paired 504-game control found the shipped configuration
-> beats Sargon III by **+51 [+13, +91]** — a difference of **−64 [−120, −8]**.
-> 8fish still wins, but quote **+51** for the disk and **+116** for the
-> harness engine. See the 2026-07-29 entry at the top of this file.
+> **⚠ READ WITH THE 2026-07-29 ENTRIES.** This number is correct and
+> reproducible **for the harness configuration it measures** — a later
+> 252-game re-run of the same mode returned +116 [+75, +160], containing it,
+> 220 commits on.
+>
+> A paired 504-game control then found the **soft-clock** arm at +51 [+13,
+> +91], a difference of −64 [−120, −8]. **My first correction here said
+> "quote +51 for the disk". That was wrong and is retracted**: the follow-up
+> investigation established that **the shipped disk does not ponder at all**
+> (`asm/m8.s` blocks in `uiread`/`entkey` on the opponent's turn; there is no
+> ponder path in `asm/`, and docs/plan.md excludes it from M8 deliberately),
+> while ponder is ~49% of 8fish's compute in a symmatch game. So **neither
+> gauntlet arm is the shipped artifact** — both ponder, and it does not.
+>
+> What is established: the −64 stands as measured, its sign may be right, and
+> **its magnitude is unexplained**. The ponder-spend gap accounts for ~2 Elo,
+> not 64. A paired same-state probe puts the shipped ADAPTIVE configuration
+> at soft/exact **1.0033** — no spend deficit at all. Quote **+116** for the
+> harness engine; for the disk, the honest answer is that no number has been
+> measured yet.
 
 A second, INDEPENDENT 300-game match — this one STANDARD-START, so both
 engines played from move 1 with their own opening books (the mode built

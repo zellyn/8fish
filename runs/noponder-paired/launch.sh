@@ -32,25 +32,25 @@ JOBS=${JOBS:-8}          # concurrency cap: this box has 8 cores
 # Build the engine ONCE up front. Shards racing to assemble it would collide.
 make engine >/dev/null || exit 1
 
-running=0
+# Concurrency via xargs -P. NOT a `wait -n` semaphore: macOS ships bash 3.2,
+# which has no `wait -n`, so that construct silently degrades to plain `wait`
+# (wait for ALL jobs) and the gauntlet collapses to ONE shard at a time. That
+# happened on the first attempt at this run and cost ~2 hours.
 for seed in $SEEDS; do
   for arm in soft off; do
-    d=$OUT/$arm-$seed
-    mkdir -p "$d"
-    flags=""
-    [ "$arm" = soft ] && flags="-softclock"
-    nohup go run ./cmd/sargon-symmatch \
-      -games "$GAMES" -budget-cycles "$BUDGET" \
-      -standard-start -book \
-      -dither prng -dither-seed "$seed" \
-      -noponder $flags -out "$d" > "$d/stdout.log" 2>&1 &
-    echo "launched arm=$arm seed=$seed pid=$! -> $d"
-    running=$((running + 1))
-    if [ "$running" -ge "$JOBS" ]; then
-      wait -n 2>/dev/null || wait
-      running=$((running - 1))
-    fi
+    echo "$arm $seed"
   done
-done
-wait
+done | xargs -P "$JOBS" -n 2 sh -c '
+  arm=$1; seed=$2
+  d='"$OUT"'/$arm-$seed
+  mkdir -p "$d"
+  flags=""
+  [ "$arm" = soft ] && flags="-softclock"
+  echo "launched arm=$arm seed=$seed -> $d"
+  go run ./cmd/sargon-symmatch \
+    -games '"$GAMES"' -budget-cycles '"$BUDGET"' \
+    -standard-start -book \
+    -dither prng -dither-seed "$seed" \
+    -noponder $flags -out "$d" > "$d/stdout.log" 2>&1
+' sh
 echo "ALL-SHARDS-DONE"

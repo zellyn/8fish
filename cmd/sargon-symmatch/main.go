@@ -64,6 +64,7 @@ func main() {
 		bookFile    = flag.String("bookfile", "", "load 8fish's resident book from this blob instead of the embedded one (for book A/B against the same Sargon)")
 		dither      = flag.String("dither", ucibridge.DitherEntropy, "8fish eval-dither seed source: entropy (hardware-faithful keystroke-timing collector), prng (host PCG), off")
 		ditherSeed  = flag.Uint64("dither-seed", 0, "with -dither prng: pin the stream for a reproducible run (0 = random)")
+		softclock   = flag.Bool("softclock", false, "8fish runs on its own ESTIMATED elapsed-cycle clock (FT2_SOFTCLK, $BFF4 read trap off) — the SHIPPED device configuration (asm/m8.s), which an Apple IIe requires because it has no readable clock")
 		openings    = flag.String("openings", "", "EPD file of opening positions (one per line); games cycle through it")
 		stdStart    = flag.Bool("standard-start", false, "every game starts from the STANDARD chess start position with no setboard, so BOTH engines use their opening books (8fish's resident book, Sargon III's built-in book); overrides -openings")
 		games       = flag.Int("games", 2, "number of games to play")
@@ -128,7 +129,7 @@ func main() {
 		openingList = nil
 	}
 
-	eng, err := newEightfish(*binfile, *defsfile, *lblfile, *usebook, *bookFile, *bookSeed, *dither, *ditherSeed, logw)
+	eng, err := newEightfish(*binfile, *defsfile, *lblfile, *usebook, *bookFile, *bookSeed, *dither, *ditherSeed, *softclock, logw)
 	if err != nil {
 		log.Fatalf("8fish init: %v", err)
 	}
@@ -138,8 +139,12 @@ func main() {
 	if len(openingList) == 0 {
 		mode = "standard-start"
 	}
-	lg("=== sargon-symmatch: %d game(s), budget B=%d cyc (%d ms), book=%v, mode=%s, symmetric ponder ===",
-		*games, *budget, *budget/cyclesPerMs, *usebook, mode)
+	clockMode := "harness-exact ($BFF4 read trap live)"
+	if *softclock {
+		clockMode = "SOFTCLOCK (FT2_SOFTCLK, trap off) — the SHIPPED device config"
+	}
+	lg("=== sargon-symmatch: %d game(s), budget B=%d cyc (%d ms), book=%v, mode=%s, clock=%s, symmetric ponder ===",
+		*games, *budget, *budget/cyclesPerMs, *usebook, mode, clockMode)
 
 	// Sargon III cannot record a game longer than 127 full moves: at move 128 its
 	// move-list numbering restarts at 1 and its screen record — the only
@@ -178,6 +183,14 @@ func main() {
 	// lines, whose internal "income" is this harness's varying per-move alloc.
 	lg("SYMMATCH-TIME-SESSION-SUMMARY games=%d moves=%d own_total=%d own_intended=%d ratio=%.4f",
 		*games, sess.moves, sess.ownCyc, sess.intended, sess.ratio())
+	// THE gate. Read this before the result: a spend_ratio away from 1.0 means
+	// one engine got more compute than the other and the Elo below is not a
+	// measurement of chess strength.
+	lg("SYMMATCH-SPEND-SESSION-SUMMARY games=%d 8fish_total=%d sargon_total=%d spend_ratio=%.4f "+
+		"| 8fish_own=%d 8fish_ponder=%d ponder_asked=%d ponder_ratio=%.4f ponders=%d sargon_own=%d sargon_ponder=%d",
+		*games, sess.eightfishTotal(), sess.sargonTotal(), sess.spendRatio(),
+		sess.ownCyc, sess.ponderCyc, sess.ponderAsked, sess.ponderRatio(), sess.ponders,
+		sess.sargonThink, sess.ownCyc)
 	lg("SYMMATCH-BOOK-SESSION-SUMMARY games=%d 8fish_book_moves=%d/%d 8fish_book_cyc=%d sargon_instant_replies=%d/%d",
 		*games, sess.bookMoves, sess.moves, sess.bookCyc, sess.sargonBook, sess.sargonMoves)
 	lg("SYMMATCH-DONE games=%d 8fish_wins=%d 8fish_losses=%d draws=%d", *games, wins, losses, draws)
@@ -194,12 +207,66 @@ type timeAcct struct {
 	bookCyc     uint64 // cycles those book moves actually cost (probe + pred probe)
 	sargonBook  int    // Sargon replies that came near-instantly (its own book)
 	sargonMoves int    // Sargon replies counted
+
+	// --- Per-side TOTAL compute, for the spend-symmetry audit. ---
+	//
+	// sargon-symmatch is symmetric BY CONSTRUCTION only as long as each side's
+	// two components mirror the other's:
+	//
+	//	8fish  = ownCyc (its own searches)      + ponderCyc   (its ponders)
+	//	sargon = ownCyc (the mirrored ponder window) + sargonThink (its own thinks)
+	//
+	// The first components are EQUAL by construction: runSargonCycles advances
+	// Sargon by exactly the true cycles 8fish's search spent. The second pair is
+	// NOT: 8fish is merely ASKED to ponder for reply.ThinkCycles, and under
+	// FT2_SOFTCLK it decides for itself when that window is up. So a soft-clock
+	// estimator error shows up here, as ponderCyc drifting off sargonThink —
+	// free compute that would inflate Elo meaninglessly. ponderAsked records the
+	// windows actually requested (ponders are skipped when there is no predicted
+	// move or Sargon replied instantly), so the comparison is like-for-like.
+	ponderCyc   uint64 // true cycles 8fish's ponders actually burned
+	ponderAsked uint64 // window 8fish's ponders were asked to burn
+	sargonThink uint64 // cycles Sargon spent on its own moves (all of them)
+	ponders     int    // ponder searches actually run
 }
 
 func (t *timeAcct) add(spent, income uint64) {
 	t.moves++
 	t.ownCyc += spent
 	t.intended += income
+}
+
+// addPonder records one ponder search: the window it was asked for and what it
+// truly cost. asked == 0 means no ponder ran, and nothing is recorded.
+func (t *timeAcct) addPonder(asked, spent uint64) {
+	if asked == 0 {
+		return
+	}
+	t.ponders++
+	t.ponderAsked += asked
+	t.ponderCyc += spent
+}
+
+// eightfishTotal / sargonTotal are the two sides' whole-match compute.
+func (t timeAcct) eightfishTotal() uint64 { return t.ownCyc + t.ponderCyc }
+func (t timeAcct) sargonTotal() uint64    { return t.ownCyc + t.sargonThink }
+
+// spendRatio is THE number to read before any Elo: 8fish's total compute over
+// Sargon's. 1.0 means the mirror held. Anything past a few percent means the
+// Elo is measuring a compute edge, not chess.
+func (t timeAcct) spendRatio() float64 {
+	if s := t.sargonTotal(); s != 0 {
+		return float64(t.eightfishTotal()) / float64(s)
+	}
+	return 0
+}
+
+// ponderRatio isolates the only component that CAN break symmetry.
+func (t timeAcct) ponderRatio() float64 {
+	if t.ponderAsked == 0 {
+		return 0
+	}
+	return float64(t.ponderCyc) / float64(t.ponderAsked)
 }
 
 func (t *timeAcct) fold(o timeAcct) {
@@ -210,6 +277,10 @@ func (t *timeAcct) fold(o timeAcct) {
 	t.bookCyc += o.bookCyc
 	t.sargonBook += o.sargonBook
 	t.sargonMoves += o.sargonMoves
+	t.ponderCyc += o.ponderCyc
+	t.ponderAsked += o.ponderAsked
+	t.sargonThink += o.sargonThink
+	t.ponders += o.ponders
 }
 
 func (t timeAcct) ratio() float64 {
@@ -242,7 +313,7 @@ type eightfish struct {
 	cw  io.WriteCloser
 }
 
-func newEightfish(binfile, defsfile, lblfile string, usebook bool, bookFile string, bookSeed uint64, dither string, ditherSeed uint64, logw io.Writer) (*eightfish, error) {
+func newEightfish(binfile, defsfile, lblfile string, usebook bool, bookFile string, bookSeed uint64, dither string, ditherSeed uint64, softclock bool, logw io.Writer) (*eightfish, error) {
 	bin, err := os.ReadFile(binfile)
 	if err != nil {
 		return nil, err
@@ -270,11 +341,27 @@ func newEightfish(binfile, defsfile, lblfile string, usebook bool, bookFile stri
 	// The match therefore exercises the entropy plan that will ship instead of
 	// a host PRNG the IIe could never have. -dither prng -dither-seed N gets
 	// the old, reproducible stream back.
+	//
+	// SoftClock (-softclock) selects the SHIPPED device configuration: the
+	// engine runs on its own estimated elapsed-cycle clock (FT2_SOFTCLK)
+	// because an Apple IIe has no readable clock. One bool drives BOTH the
+	// feature bit and the $BFF4 read-trap disable (ucibridge.runEngine derives
+	// them together, the same single-source-of-truth rule internal/sprt uses
+	// in the other direction), so the two can never be set inconsistently.
+	//
+	// It does NOT weaken the mirror: the `info nodes` count the bridge
+	// publishes — and therefore the window this harness hands Sargon — is
+	// always m.Cycles, the emulator's TRUE cycle count, never the engine's
+	// estimate. What the soft clock CAN do is make 8fish's own searches and
+	// (crucially) its ponders overrun their windows in true cycles; the
+	// own-move overrun is mirrored to Sargon and stays symmetric, but a ponder
+	// overrun is NOT mirrored and is free compute. Audit SYMMATCH-SPEND-*.
 	b := &ucibridge.Bridge{
 		Bin: bin, Defs: defs, Ponder: true, Log: logw,
 		Dither:       dither != ucibridge.DitherOff,
 		DitherSource: dither,
 		DitherSeed:   ditherSeed,
+		SoftClock:    softclock,
 	}
 	if usebook {
 		bk, err := loadBookBlob(bookFile)
@@ -443,6 +530,8 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 			gameNo, gt.moves, gt.ownCyc, gt.intended, gt.ratio())
 		lg("SYMMATCH-BOOK-GAME-SUMMARY game=%d 8fish_book_moves=%d/%d 8fish_book_cyc=%d sargon_instant_replies=%d/%d",
 			gameNo, gt.bookMoves, gt.moves, gt.bookCyc, gt.sargonBook, gt.sargonMoves)
+		lg("SYMMATCH-SPEND-GAME-SUMMARY game=%d 8fish_total=%d sargon_total=%d spend_ratio=%.4f ponder_ratio=%.4f",
+			gameNo, gt.eightfishTotal(), gt.sargonTotal(), gt.spendRatio(), gt.ponderRatio())
 		sess.fold(gt)
 	}()
 
@@ -525,19 +614,23 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		if s == "" || !applyMove(ref, seen, &hist, s) {
 			lg("GAME %d: sargon opening move unreadable/illegal token=%q", gameNo, res.SargonText)
 			lg("%s", m.ScreenDump(fmt.Sprintf("g%d opening unreadable", gameNo)))
+			lg("TERMINATION g%d result=%s reason=quirk-opening-unreadable plies=0", gameNo, resDraw)
 			return resDraw
 		}
 		moves = append(moves, s)
 		gt.sargonMoves++
+		gt.sargonThink += res.ThinkCycles // Sargon's opening move: no 8fish ponder mirrors it
 		if sargonInstant(res.ThinkCycles, budget) {
 			gt.sargonBook++ // instant first move => straight out of Sargon's book
 		}
 		lg("MOVE g%d ply1 SARGON(open) move=%s think=%d sargon_instant=%v (no 8fish ponder: opening)",
 			gameNo, s, res.ThinkCycles, sargonInstant(res.ThinkCycles, budget))
 		if !crossCheck(lg, gameNo, 1, m, hist, firstPly) {
+			lg("TERMINATION g%d result=%s reason=quirk-desync plies=1", gameNo, resDraw)
 			return resDraw
 		}
-		if term, r := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
+		if term, r, why := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
+			lg("TERMINATION g%d result=%s reason=%s plies=%d", gameNo, r, why, len(moves))
 			return r
 		}
 	}
@@ -568,6 +661,7 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 			float64(sr.cycles)/float64(budget), clock.Bank(), clock.Alloc())
 		if !applyMove(ref, seen, &hist, sr.move) {
 			lg("MOVE g%d 8fish played illegal-to-referee move %q — aborting", gameNo, sr.move)
+			lg("TERMINATION g%d result=%s reason=quirk-8fish-illegal plies=%d", gameNo, resDraw, len(moves))
 			return resDraw
 		}
 		moves = append(moves, sr.move)
@@ -576,8 +670,9 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		// Sargon ponder window == 8fish's exact think (T_us).
 		runSargonCycles(m, sr.cycles)
 
-		if term, r := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
+		if term, r, why := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
 			lg("MOVE g%d ply%d 8fish move=%s think=%d -> %s", gameNo, usPly, sr.move, sr.cycles, r)
+			lg("TERMINATION g%d result=%s reason=%s plies=%d", gameNo, r, why, len(moves))
 			return r
 		}
 
@@ -585,6 +680,7 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		sargonTxt, err := coordToSargon(sr.move)
 		if err != nil {
 			lg("MOVE g%d bad move->sargon %q: %v", gameNo, sr.move, err)
+			lg("TERMINATION g%d result=%s reason=quirk-move-encoding plies=%d", gameNo, resDraw, len(moves))
 			return resDraw
 		}
 		reply, err := m.RequestMove(sargonTxt, budget)
@@ -619,12 +715,17 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		hit := "n/a"
 		if sr.ponder != "" && reply.ThinkCycles > 0 {
 			ponderCyc = eng.ponder(base, moves, sr.ponder, reply.ThinkCycles)
+			gt.addPonder(reply.ThinkCycles, ponderCyc)
 			if sr.ponder == s {
 				hit = "HIT"
 			} else {
 				hit = "MISS"
 			}
 		}
+		// Sargon's own think counts toward ITS side of the spend ledger whether
+		// or not we pondered over it (an instant book reply costs it ~nothing and
+		// buys us no ponder either, so both sides stay honest).
+		gt.sargonThink += reply.ThinkCycles
 
 		// --- Step 6: inject Sargon's move into 8fish (append to the line). ---
 		moves = append(moves, s)
@@ -652,8 +753,9 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 			nextDump = len(moves) + 2*screenDumpEvery
 		}
 
-		if term, r := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
+		if term, r, why := terminal(ref, seen, moves, maxMoves, sargonWhite); term {
 			lg("MOVE g%d after sargon %s -> %s (msg=%q)", gameNo, s, r, reply.Message)
+			lg("TERMINATION g%d result=%s reason=%s plies=%d", gameNo, r, why, len(moves))
 			return r
 		}
 	}
@@ -759,7 +861,12 @@ func crossCheck(lg func(string, ...any), gameNo, ply int, m *sargon.Machine, his
 
 // terminal reports whether the game is over from the referee's view (the
 // authoritative referee, cross-checked against Sargon's screen at adjudication).
-func terminal(ref *refchess.Position, seen map[uint64]int, moves []string, maxMoves int, sargonWhite bool) (bool, gameResult) {
+// It also returns the REASON, so the match log records how every game actually
+// ended and the audit does not have to re-derive draw classifications by
+// replaying move lists. Reasons are the grep keys in the audit table:
+// checkmate / stalemate / threefold / fifty-move / insufficient-material /
+// move-cap (plus the "quirk-*" reasons adjudicate() logs).
+func terminal(ref *refchess.Position, seen map[uint64]int, moves []string, maxMoves int, sargonWhite bool) (bool, gameResult, string) {
 	// Side to move has no legal move: checkmate (loss for stm) or stalemate.
 	if len(ref.LegalMoves()) == 0 {
 		if ref.InCheck() {
@@ -767,25 +874,25 @@ func terminal(ref *refchess.Position, seen map[uint64]int, moves []string, maxMo
 			stmWhite := ref.SideToMove() == 0
 			eightfishMated := stmWhite == (!sargonWhite)
 			if eightfishMated {
-				return true, resLoss
+				return true, resLoss, "checkmate"
 			}
-			return true, resWin
+			return true, resWin, "checkmate"
 		}
-		return true, resDraw // stalemate
+		return true, resDraw, "stalemate"
 	}
 	if seen[ref.ZobristKey()] >= 3 {
-		return true, resDraw // threefold repetition
+		return true, resDraw, "threefold"
 	}
 	if ref.HalfmoveClock() >= 100 {
-		return true, resDraw // fifty-move rule
+		return true, resDraw, "fifty-move"
 	}
 	if ref.InsufficientMaterial() {
-		return true, resDraw
+		return true, resDraw, "insufficient-material"
 	}
 	if len(moves)/2 >= maxMoves {
-		return true, resDraw // move-cap adjudication
+		return true, resDraw, "move-cap"
 	}
-	return false, resDraw
+	return false, resDraw, ""
 }
 
 // adjudicate resolves a game that ended without a clean referee-terminal (e.g.
@@ -793,6 +900,12 @@ func terminal(ref *refchess.Position, seen map[uint64]int, moves []string, maxMo
 // referee's terminal verdict first, then Sargon's on-screen message, and dumps
 // the screen for audit. eightfishStuck marks the case where 8fish had no move.
 func adjudicate(lg func(string, ...any), gameNo int, ref *refchess.Position, m *sargon.Machine, eightfishStuck bool) gameResult {
+	// Every exit logs a TERMINATION line with the same grep key the clean
+	// referee-terminal path uses, so one pass over the log classifies all games.
+	// The "quirk-" prefixed reasons are the HARNESS-ARTIFACT class (the
+	// 2026-07-26 audit's 5.7%): the game did NOT end by a rule of chess, it
+	// ended because Sargon's screen could not be read. They are counted
+	// separately and never silently folded in with real draws.
 	// Referee terminal?
 	if len(ref.LegalMoves()) == 0 {
 		if ref.InCheck() {
@@ -800,14 +913,17 @@ func adjudicate(lg func(string, ...any), gameNo int, ref *refchess.Position, m *
 			// eightfishStuck implies the side to move IS 8fish.
 			if eightfishStuck {
 				lg("GAME %d ADJUDICATE: 8fish checkmated (referee)", gameNo)
+				lg("TERMINATION g%d result=%s reason=checkmate-referee plies=-1", gameNo, resLoss)
 				return resLoss
 			}
 			// Sargon to move and mated -> 8fish wins.
 			lg("GAME %d ADJUDICATE: checkmate on the board (referee)", gameNo)
+			lg("TERMINATION g%d result=%s reason=checkmate-referee plies=-1", gameNo, resWin)
 			// Determine which side is mated by side-to-move.
 			return resWin
 		}
 		lg("GAME %d ADJUDICATE: stalemate (referee) -> draw", gameNo)
+		lg("TERMINATION g%d result=%s reason=stalemate-referee plies=-1", gameNo, resDraw)
 		return resDraw
 	}
 	msg := strings.ToUpper(m.Screen())
@@ -816,6 +932,7 @@ func adjudicate(lg func(string, ...any), gameNo int, ref *refchess.Position, m *
 	case strings.Contains(msg, "STALEMATE"), strings.Contains(msg, "DRAW"):
 		dump()
 		lg("GAME %d ADJUDICATE: Sargon declares draw/stalemate (reclassify) -> draw", gameNo)
+		lg("TERMINATION g%d result=%s reason=sargon-declares-draw plies=-1", gameNo, resDraw)
 		return resDraw
 	case strings.Contains(msg, "MATE"): // CHECKMATE / MATE
 		dump()
@@ -824,12 +941,15 @@ func adjudicate(lg func(string, ...any), gameNo int, ref *refchess.Position, m *
 		_ = stmWhite
 		lg("GAME %d ADJUDICATE: Sargon shows mate", gameNo)
 		if eightfishStuck {
+			lg("TERMINATION g%d result=%s reason=sargon-shows-mate plies=-1", gameNo, resLoss)
 			return resLoss
 		}
+		lg("TERMINATION g%d result=%s reason=sargon-shows-mate plies=-1", gameNo, resWin)
 		return resWin
 	default:
 		dump()
 		lg("GAME %d ADJUDICATE: unresolved (msg unclear) -> draw", gameNo)
+		lg("TERMINATION g%d result=%s reason=quirk-unresolved plies=-1", gameNo, resDraw)
 		return resDraw
 	}
 }

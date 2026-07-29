@@ -3,6 +3,122 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-29 — ★★ THE SHIPPED CLOCK COSTS **−64 ± 57 Elo**: the disk beats Sargon III by **+51**, not **+116**. Paired control, 504 games.
+
+Every Sargon number in this log — the headline **+110 over 600 games** (pool
++89, standard-start +132) — was measured through `cmd/sargon-symmatch`, whose
+`ucibridge.Bridge` runs `FEATURES = $5F, FEATURES2 = FT2_GENDEFER`. The soft
+clock is OFF there on purpose: the harness owns a real cycle counter.
+
+**The device also sets `FT2_SOFTCLK`** (`asm/m8.s:250`), because an Apple IIe
+has no readable clock — a difference `TestShippedFeatureConfig` already
+documents as deliberate. So the artifact a user boots had **never been played
+against Sargon III at all**. This is the same "test what you ship" gap that
+produced the harness clock the hardware lacks, the pool that was not game
+conditions, the `-D HARNESSKBD` build, and the disk that shipped `FEATURES=$1F`.
+
+`cmd/sargon-symmatch` now takes **`-softclock`**. One bool drives both the
+feature bit and the `$BFF4` read-trap disable (`ucibridge.runEngine` derives
+them together, the same single-source-of-truth rule `internal/sprt` applies in
+the other direction), so the two cannot disagree. With it set the harness config
+is byte-identical to the disk: `$5F` / `FT2_GENDEFER|FT2_SOFTCLK`.
+
+### ★ 1. SPEND SYMMETRY FIRST — the mirror held; there is no free compute
+
+`sargon-symmatch` is symmetric BY CONSTRUCTION only if each side's two
+components mirror the other's. An estimated clock can break that, and did once
+before: "+29 ± 26 Elo" three days ago was really a 26% overrun. So this is
+checked before the result, not after.
+
+| arm | 8fish Gcyc | Sargon Gcyc | spend_ratio | own-move adherence | ponder |
+|---|---|---|---|---|---|
+| harness clock | 648.5 | 669.6 | 0.9684 | 0.9871 | 0.9374 |
+| **soft clock (shipped)** | 824.3 | 873.1 | **0.9442** | 0.9853 | 0.8916 |
+
+**8fish takes LESS compute than Sargon in BOTH arms**, and slightly less still
+under the soft clock (−2.4 points). The estimator is mildly self-handicapping,
+not overrunning — the opposite of the failure that invalidated the earlier
+measurement, and the Elo below is therefore interpretable.
+
+Two further checks, both clean:
+
+- **Own-move adherence is IDENTICAL** (soft/exact = 0.9982, versus the
+  `sprt.TestSoftClockAdherence` acceptance band of [0.90, 1.10]). The entire
+  gap is **ponder** spend (0.8916 vs 0.9374). That is the one component the
+  harness does not mirror: 8fish is merely *asked* to ponder for
+  `reply.ThinkCycles` and under `FT2_SOFTCLK` decides for itself when the
+  window is up. Own-move spend is mirrored to Sargon exactly, and the
+  `sargon_ponder_window == think` assertion held on all ~25,700 logged moves.
+- Totals re-derived independently from the per-move log agree with the
+  harness's own accumulators to **0.03%**.
+
+A 2.4-point compute deficit is worth ≈ −2 Elo. It does not explain what follows.
+
+### ★ 2. The paired result — same gauntlet twice, only the clock changed
+
+Identical openings (`-standard-start`, both engines on their own books),
+identical seeds (`-dither prng`, seeds 101-106), identical budget (B = 30M
+cycles), identical colour alternation. 6 shards × 42 games per arm.
+
+| arm | record | score | Elo | 95% CI |
+|---|---|---|---|---|
+| harness clock (what this log measured) | 150−69−33 | 66.07% | **+116** | [+75, +160] |
+| **soft clock (what the disk runs)** | 118−81−53 | 57.34% | **+51** | [+13, +91] |
+| **paired difference** | | −8.73% | **−64** | **[−120, −8]**, z = −2.23 |
+
+**The instrument validates against history**: the harness arm's +116 [+75,
++160] contains the +132 the 2026-07-26 standard-start run recorded, on the same
+mode, after 220 commits. This is a like-for-like control, not a comparison to
+history — that comparison would have conflated deferred generation, the
+cost-model recalibration, the book widening and the `FEATURES` fix.
+
+**8fish still beats Sargon III on the shipped disk** (+51, CI excludes zero),
+but by roughly HALF the margin this log claims. The claim "+110 Elo over Sargon
+III" describes a configuration no user can boot.
+
+Robust to how the 10 quirk games are scored: −64 as measured, −68 scoring all
+quirks as 8fish wins, −66 dropping them. Between-seed spread (sd 0.101 on the
+per-seed delta) matches pure sampling noise for n = 42 (predicted 0.095), so
+there is no cluster structure to correct for; 4 of 6 seeds negative.
+
+**Do not over-claim the magnitude.** 252 games per arm puts the difference
+anywhere in [−120, −8]. The SIGN is established; the size is not.
+
+### 3. Audit — the cleanest Sargon run yet, and one bounded artifact
+
+| termination | harness arm | soft arm |
+|---|---|---|
+| checkmate, 8fish wins | 150 | 118 |
+| checkmate, 8fish loses | 69 | 81 |
+| threefold | 26 | 48 |
+| insufficient material | 1 | 1 |
+| quirk-adjudication (draw) | 6 | 4 |
+
+- **`CrossCheckHistory` DESYNC: 0 in 504 games.** The mid-search move-list
+  repaint class that desynced 17 of 300 games is GONE. No unreadable/illegal
+  Sargon tokens, no illegal book moves, no engine errors.
+- **Hard Mode + LEVEL 9 verified on every one of the 504 games** (0 warnings),
+  so no game was silently played against a weaker Sargon.
+- No resignations (the harness has no resign path), no stalemates, and **no
+  move-cap draws** — nothing hit the 160-move adjudication.
+- **All 10 quirk-adjudications are ONE bounded cause**, not a new failure
+  class: games that pass move 99, where Sargon III's two-digit move-number
+  column overflows to `:0` and it stops accepting injected moves. They are long
+  drawish games adjudicated as draws — conservative, and the result is robust
+  to all three treatments above. 2.4%/1.6%, down from the 5.7% of 2026-07-26.
+
+The soft arm played **27% more moves** (14,377 vs 11,290) and drew by
+threefold **nearly twice as often** (48 vs 26): the signature of an engine that
+converts won positions less reliably, which is what a noisier clock buys.
+
+**What this does NOT say.** It is not a verdict on `FT2_SOFTCLK` as a feature —
+the device has no alternative. It says the NUMBER attached to the product was
+measured on a configuration the product does not run, and the honest headline
+for the disk is **+51 [+13, +91]**, pending a larger run.
+
+Reproduce: `runs/softclock-paired/launch.sh` (12 shards) then
+`runs/softclock-paired/analyze.py`.
+
 ## 2026-07-28 — `adaptmaybe`'s score-drop overflow: CONFIRMED and fixed, and it fires ZERO times in 530 games
 
 The four-lens review's one SUSPECTED item (§5). `adaptmaybe` computed

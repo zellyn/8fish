@@ -245,7 +245,10 @@ func load(root, bootName, payloadName string, book []byte, realKbd bool) (*Machi
 	return &Machine{M: m, Defs: defs, Lbl: lbl, StepLimit: DefaultStepLimit, RealKbd: realKbd}, nil
 }
 
-// ErrExited reports that the image hit the exit trap (the Q command).
+// ErrExited reports that the image hit the harness exit trap at $BFFF.
+// Nothing in the shipping UI stores there any more — Q cold boots through
+// the ROM's RESET vector (asm/m8.s cmd_quit), because on hardware $BFFF is
+// plain RAM — so this now means the image went somewhere it should not have.
 type ErrExited struct{ Code byte }
 
 func (e *ErrExited) Error() string { return fmt.Sprintf("image exited with code %d", e.Code) }
@@ -349,13 +352,17 @@ const (
 	UIRESULT = 0xF703
 	UINLEGAL = 0xF704
 	UICHK    = 0xF705
+	UIHFULL  = 0xF7AA
 	UIHFROM  = 0xF800
 	UIHTO    = 0xF900
 	UIHFLAG  = 0xFA00
 	UIHASH0  = 0xFB00
 )
 
-// Game-over codes (RES_* in asm/ui.s).
+// Game-over codes (RES_* in asm/ui.s). There is deliberately no "too long"
+// code: a game is never over because of its length (docs/results.md
+// 2026-07-28). Past ply 255 the UI stops RECORDING and keeps refereeing —
+// UIHFULL is the flag that says so.
 const (
 	ResNone   = 0
 	ResMate   = 1
@@ -364,8 +371,7 @@ const (
 	ResRep    = 4
 	ResResign = 5
 	ResAgreed = 6
-	ResLong   = 7
-	ResErr    = 8
+	ResErr    = 7
 )
 
 // ResultName renders a UIRESULT code.
@@ -385,8 +391,6 @@ func ResultName(r byte) string {
 		return "resigned"
 	case ResAgreed:
 		return "draw agreed"
-	case ResLong:
-		return "draw: too long"
 	case ResErr:
 		return "internal error"
 	}

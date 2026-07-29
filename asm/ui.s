@@ -93,11 +93,14 @@ UIT0      = M8VARS+$1C  ; 24-bit temp for the per-move limit arithmetic
 UIT1      = M8VARS+$1D
 UIT2      = M8VARS+$1E
 UISEEN    = M8VARS+$1F  ; repetition count of the current position
+UIHFULL   = M8VARS+$AA  ; nonzero: the 256-ply history arrays filled up and
+                        ;  plies are no longer being RECORDED (the game goes
+                        ;  on; see uiapply and cmd_take)
 UIBUF     = M8VARS+$20  ; input line (UIBUFMAX bytes)
 UITHINK   = M8VARS+$30  ; think line: depth / score / best move
 UIMSGB    = M8VARS+$50  ; message row (40 B + terminator)
 UIBOOKB   = M8VARS+$80  ; opening-name row (40 B + terminator)
-                        ; $F7AA-$F7FF free
+                        ; UIHFULL is $F7AA; $F7AB-$F7FF free
 
 ; The game history is three PARALLEL 256-byte arrays so a ply index fits in
 ; X with no multiply: 256 plies = 128 full moves (Sargon III's own move list
@@ -111,6 +114,11 @@ UIHFLAG   = $FA00       ; 256 bytes: move flags per ply
 ; BEFORE ply i was played, so the CURRENT position is always at index
 ; UIHCNT. The engine's own repetition scan works off HASHSTK, which at the
 ; root holds nothing — the game history has to live here (design §5.3).
+;
+; 256 entries is a HARD limit — the index is one byte, which is what makes
+; every array above page-indexable — but it is NOT a game limit: at ply 255
+; the UI stops RECORDING and keeps refereeing (uiapply). Nothing is ever
+; written past index 255, and no game is ever drawn merely for being long.
 UIHASH0   = $FB00
 UIHASH1   = $FC00
 UIHASH2   = $FD00
@@ -118,15 +126,15 @@ UIHASH3   = $FE00
 
 UIBUFMAX  = 8           ; longest accepted input line ("e7e8q" + slack)
 
-; Game-over codes (UIRESULT).
+; Game-over codes (UIRESULT). There is deliberately NO "too long" code:
+; a game is never over because of its length (docs/results.md 2026-07-28).
 RES_MATE   = 1
 RES_STALE  = 2
 RES_50     = 3
 RES_REP    = 4
 RES_RESIGN = 5
 RES_AGREED = 6
-RES_LONG   = 7
-RES_ERR    = 8
+RES_ERR    = 7
 
 ; ---------------------------------------------------------------
 ; uigotorc: SCRPTR = the text-page-1 address of row A (0-23),
@@ -378,11 +386,75 @@ ud2put: sta (SCRPTR),y
         rts
 
 ; ---------------------------------------------------------------
+; uid2z: A = 0..99 -> two digits at (SCRPTR),y with the leading zero
+; PRINTED, advancing Y by 2. Clobbers A, X.
+;
+; It lives here rather than in m8.s because uidec3 (below) needs it
+; and asm/ui.s is also linked STANDALONE by asm/uitest.s, so a
+; renderer routine may not call into the m8.s half of the payload.
+; m8.s's hundredths field (uiscore) calls it too.
+; ---------------------------------------------------------------
+uid2z:  ldx #0
+ud2zl:  cmp #10
+        bcc ud2zd
+        sbc #10
+        inx
+        bne ud2zl
+ud2zd:  pha
+        txa
+        clc
+        adc #('0'|$80)
+        sta (SCRPTR),y
+        iny
+        pla
+        clc
+        adc #('0'|$80)
+        sta (SCRPTR),y
+        iny
+        rts
+
+; ---------------------------------------------------------------
+; uidec3: A = 0..255 -> THREE right-aligned digits at (SCRPTR),y,
+; advancing Y by 3. Leading zeros are printed as spaces, but a
+; nonzero hundreds digit forces the tens digit out, so 100 is "100"
+; and not "1 0". Clobbers A, X.
+;
+; The move panel needs three columns because a game can legally run
+; past move 99: with the ply cap gone (docs/results.md 2026-07-28)
+; the only ceiling on the move number is the 256-entry history array,
+; i.e. move 128. Two digits used to render 100 as ":0" — uidec2's
+; tens digit is a raw counter, and 10 + '0' is ':'.
+; ---------------------------------------------------------------
+uidec3: ldx #0
+ud3l:   cmp #100
+        bcc ud3d
+        sbc #100
+        inx
+        bne ud3l
+ud3d:   pha
+        txa
+        beq ud3sp
+        clc
+        adc #('0'|$80)
+        sta (SCRPTR),y
+        iny
+        pla
+        jmp uid2z               ; hundreds present: print the tens zero
+ud3sp:  lda #$A0                ; under 100: a blank hundreds column, and
+        sta (SCRPTR),y          ;  uidec2 blanks a leading tens zero too
+        iny
+        pla
+        jmp uidec2
+
+; ---------------------------------------------------------------
 ; uimoves: render the game move list into the side panel.
 ;
 ; UIHIST holds three bytes per ply (from, to, flags) and UIHCNT the
 ; number of plies played. The panel shows the last PANROWS full moves
-; as "nn ffff tttt". Clobbers A, X, Y and the borrowed ZP.
+; as "nnn ffff tttt" — a THREE-column right-aligned move number, so a
+; game past move 99 reads "100 e2e4 e7e5" rather than ":0 ...". The
+; panel is 19 columns (21-39) and the line is 13, so it fits.
+; Clobbers A, X, Y and the borrowed ZP.
 ; ---------------------------------------------------------------
 PANROWS = 13
 
@@ -397,7 +469,11 @@ uimoves:
         lda UIHCNT
         clc
         adc #1
-        lsr                     ; number of full moves touched
+        ror                     ; number of full moves touched. ROR, not
+                                ;  LSR: UIHCNT can be 255 (the history is
+                                ;  full and the game continues), and then
+                                ;  the +1 carries out — an LSR would drop it
+                                ;  and show move 1 instead of move 128
         sec
         sbc #PANROWS
         bcs :+
@@ -421,7 +497,7 @@ umrow:  lda UIMFIRST
         lda UITMP
         clc
         adc #1                  ; move NUMBER is 1-based
-        jsr uidec2              ; umply supplies the separating space
+        jsr uidec3              ; umply supplies the separating space
         lda UITMP               ; white's ply index = 2*move
         asl
         jsr umply

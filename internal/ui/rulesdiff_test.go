@@ -684,47 +684,108 @@ func longGame(t *testing.T, plies int) []string {
 	return nil
 }
 
-// TestHistoryCapEndsALiveGameInADraw documents what the 1,024-byte hash
-// history costs at the boundary. The UI's history arrays are one page each,
-// so uisync declares RES_LONG ("DRAW: TOO LONG") the moment UIHCNT reaches
-// 250 — in ANY position, including a completely winning one.
+// TestLongGameIsNotDrawn is the gate on the fix for the RES_LONG defect: a
+// legal game is never over because of its LENGTH.
 //
-// This is a real result the rules do not license: 125 moves is not a draw,
-// and the FIDE ceiling is the 75-move rule, not a ply count. The test exists
-// to (a) prove the boundary is reachable by legal play and (b) pin what
-// happens there, so that raising it is a decision and not a discovery.
-func TestHistoryCapEndsALiveGameInADraw(t *testing.T) {
+// The UI used to declare "DRAW: TOO LONG" the moment UIHCNT reached 250 — in
+// ANY position, including a completely winning one — because the history and
+// hash arrays are one page each. 125 moves is not a draw under any rule (the
+// FIDE ceiling is the 75-MOVE rule, a counter, not a ply count), so that was
+// a wrong RESULT, not a cosmetic limit.
+//
+// Now the game goes on and the RECORDING degrades instead. This test plays a
+// draw-free game PAST the old cap and past the array limit and requires:
+//
+//   - no result is ever declared, at ply 250 or anywhere else;
+//   - the position keeps tracking refchess after the arrays are full, so the
+//     UI is still refereeing rather than freewheeling;
+//   - UIHCNT stops at 255 and UIHFULL comes up, so nothing wraps to index 0;
+//   - nothing is written past the last byte of any array (canaries);
+//   - takeback is REFUSED, in words, rather than replaying to a position
+//     that is not the one before the last move.
+func TestLongGameIsNotDrawn(t *testing.T) {
 	if testing.Short() {
-		t.Skip("types 250 moves into the image")
+		t.Skip("types 262 moves into the image")
 	}
-	moves := longGame(t, 250)
+	const plies = 262 // 255 recorded + 7 played with the arrays full
+	moves := longGame(t, plies)
 	u := twoPlayer(t)
+
+	// Canaries: the byte after each array's last, and the start position's
+	// own hash entry at index 0, which nothing may ever rewrite.
+	hash0 := [4]byte{}
+	for i := range hash0 {
+		hash0[i] = u.Peek(ui.UIHASH0 + uint16(0x100*i))
+	}
+	for a := uint16(0xFF00); a < 0xFF10; a++ {
+		u.Poke(a, 0xC5) // free LC RAM just past UIHASH3
+	}
+
+	p, err := refchess.ParseFEN(refchess.StartFEN)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i, mv := range moves {
 		if err := u.Enter(mv); err != nil {
 			t.Fatalf("ply %d %q: %v", i+1, mv, err)
 		}
-		res := u.Peek(ui.UIRESULT)
-		if i < len(moves)-1 && res != ui.ResNone {
-			t.Fatalf("ply %d (%s): UIRESULT = %s in a game with no draw rule met "+
-				"(halfmove clock and repetitions were both kept clear)",
-				i+1, mv, ui.ResultName(res))
+		m, err := refchess.ParseMove(mv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Make(m); err != nil {
+			t.Fatalf("ply %d %q: refchess says %v", i+1, mv, err)
+		}
+		if res := u.Peek(ui.UIRESULT); res != ui.ResNone {
+			t.Fatalf("ply %d (%s): UIRESULT = %s in a game that meets NO draw rule "+
+				"(the halfmove clock and repetitions were both kept clear)\n%s",
+				i+1, mv, ui.ResultName(res), u.Screen())
+		}
+		if got, want := normFEN(u.FEN()), normFEN(p.FEN()); got != want {
+			t.Fatalf("ply %d (%s): UI position %q, refchess %q\n%s", i+1, mv, got, want, u.Screen())
 		}
 	}
-	if got := u.Peek(ui.UIHCNT); got != 250 {
-		t.Fatalf("UIHCNT = %d after 250 plies", got)
+	t.Logf("after %d legal plies (move %d) the game is still live:\n%s",
+		plies, (plies+1)/2, u.Screen())
+
+	if got := u.Peek(ui.UIHCNT); got != 255 {
+		t.Errorf("UIHCNT = %d after %d plies, want it pinned at 255 (0 would mean it WRAPPED)", got, plies)
 	}
-	res := u.Peek(ui.UIRESULT)
-	t.Logf("after 250 legal plies with NO draw rule met, the UI says %q:\n%s",
-		ui.ResultName(res), u.Screen())
-	if res != ui.ResLong {
-		t.Errorf("UIRESULT = %s, want the documented RES_LONG cap", ui.ResultName(res))
+	if u.Peek(ui.UIHFULL) == 0 {
+		t.Errorf("UIHFULL = 0 after %d plies: the UI does not know its history is full", plies)
 	}
-	// And the cap is a hard stop, not a wrap: the arrays must not be written
-	// past their last byte, so no further move may be accepted.
-	before := u.FEN()
-	mustEnter(t, u, moves[0])
-	if u.FEN() != before {
-		t.Errorf("a move was accepted after the history cap")
+	for i := range hash0 {
+		if got := u.Peek(ui.UIHASH0 + uint16(0x100*i)); got != hash0[i] {
+			t.Errorf("UIHASH%d[0] changed from $%02X to $%02X: something wrote past "+
+				"the end of the array below it", i, hash0[i], got)
+		}
+	}
+	for a := uint16(0xFF00); a < 0xFF10; a++ {
+		if got := u.Peek(a); got != 0xC5 {
+			t.Errorf("$%04X = $%02X: written past the end of UIHASH3", a, got)
+		}
+	}
+
+	// Takeback is refused, and says so, and leaves the game exactly alone.
+	before, cnt := u.FEN(), u.Peek(ui.UIHCNT)
+	mustEnter(t, u, "t")
+	if got := u.Screen().Text(17); !contains(got, "MOVE LIST FULL") {
+		t.Errorf("row 17 = %q, want the takeback refusal", strings.TrimSpace(got))
+	}
+	if u.FEN() != before || u.Peek(ui.UIHCNT) != cnt {
+		t.Errorf("takeback with a full history changed the game: %s", u.FEN())
+	}
+	// ...and the game is still playable after the refusal.
+	legal := p.LegalMoves()
+	if len(legal) == 0 {
+		t.Fatal("the constructed game ended in mate or stalemate")
+	}
+	mustEnter(t, u, legal[0].String())
+	if err := p.Make(legal[0]); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := normFEN(u.FEN()), normFEN(p.FEN()); got != want {
+		t.Errorf("a move played after the takeback refusal: UI %q, refchess %q", got, want)
 	}
 }
 

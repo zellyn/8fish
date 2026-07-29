@@ -193,7 +193,7 @@ func TestUIByteBudget(t *testing.T) {
 		{"m8entry", "entry vector (fixed at $E000 so m8boot.bin never changes)"},
 		{"uigotorc", "asm/ui.s renderer: board, panel, coords, screen primitives"},
 		{"entkey", "asm/entropy.inc: keyboard wait + entropy fold + seed"},
-		{"m8main", "cold start, main loop, whose-turn-is-it"},
+		{"m8main", "cold start, machine check, main loop, whose-turn-is-it"},
 		{"uistartpos", "position bookkeeping: new game, apply, hash history"},
 		{"uigen", "move generation/validation/legality (all borrowed from the engine)"},
 		{"uisync", "game state: legal-move count, mate/stalemate/50/repetition"},

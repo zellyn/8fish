@@ -24,10 +24,17 @@ func TestDitherEntropySeeds(t *testing.T) {
 		seeds = append(seeds, byte(s))
 		counts[byte(s)]++
 	}
-	// 60 uniform bytes: ~53 distinct expected; 40 is a very loose floor that
-	// still fails hard if the wait jitter were quantized or the fold broken.
+	// 60 uniform bytes: ~53 distinct expected. The floor STAYS at 40. It was
+	// not too tight — it was correctly reporting a real defect: under gauntlet
+	// load time.Sleep(1ms) quantizes hard, and the collector's old 8-bit
+	// ROL-then-EOR fold answered a constant arrival with an orbit of at most
+	// 16 states (measured: 32-long seed cycle, 28 distinct seeds, forever).
+	// With the 16-bit LFSR fold the WORST case over every constant arrival
+	// delta is 45 distinct in 60 — see entropy.TestQuantizedArrivals, which
+	// pins that deterministically and is the real guard. This test stays as
+	// the end-to-end check that the bridge is wired to the collector at all.
 	if len(counts) < 40 {
-		t.Errorf("only %d distinct seeds in %d moves: %v", len(counts), n, seeds)
+		t.Errorf("only %d distinct seeds in %d moves (quantized waits?): %v", len(counts), n, seeds)
 	}
 	t.Logf("%d moves: %d distinct seeds, first ten %v", n, len(counts), seeds[:10])
 }

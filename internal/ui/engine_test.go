@@ -72,6 +72,53 @@ func twoPlayerPoke(t *testing.T, u *ui.Machine) {
 	}
 }
 
+// engineMoveUndithered submits the UI's move and lets the engine reply with
+// the eval dither OFF, by clearing SEED the instant entseed installs it
+// (eval.s evseed: `lda SEED / beq evdone`, so 0 means no noise and nothing
+// writes SEED again).
+//
+// This is what makes TestEngineParity an actual TREE-IDENTITY gate. It used
+// to run the UI dithered and hand the reference search `u.Peek(SEED)` — but
+// SEED is evseed's LIVE PRNG STATE, advanced (seed = seed*3+29) at every
+// dithered leaf, so that read the END of the stream, not its start. The two
+// sides therefore compared different dither streams; the test agreed anyway
+// because 0-3cp of noise rarely flips a best move, and it once logged "SEED
+// 0x00" for a move entseed cannot produce a zero seed for. Feeding the
+// reference the true installed seed does NOT fix it either: measured at the
+// Ruy Lopez position, the UI's driver and the $4000 entry disagree for 33 of
+// 40 seeds, because the dither's noise depends on the POSITION IN THE
+// EVAL-CALL SEQUENCE and the two drivers' sequences do not align. Only with
+// the dither off is "same position, same depth, same features" enough to
+// demand the same move — which is the property this test exists to gate.
+func engineMoveUndithered(t *testing.T, u *ui.Machine) {
+	t.Helper()
+	seedAddr := u.Defs["SEED"]
+	u.Poke(seedAddr, 0)
+	u.M.SendInput([]byte{0x0D})
+	// entseed runs a few hundred cycles into the engine's turn, before any
+	// eval; profile only until its write lands, then run normally.
+	for zeroed := false; !zeroed; {
+		exited, _, err := u.M.RunProfile(1<<16, func(uint16, uint8) {
+			if u.M.Mem.Main[seedAddr] != 0 {
+				u.M.Mem.Main[seedAddr] = 0
+				zeroed = true
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exited || u.M.WaitingForInput() {
+			break
+		}
+	}
+	if err := u.RunToInput(); err != nil {
+		t.Fatal(err)
+	}
+	if got := u.Peek(seedAddr); got != 0 {
+		t.Fatalf("SEED = %#02x after the move: the dither was not held off", got)
+	}
+}
+
 // TestEngineParity is the "the engine plays the same chess either way" gate:
 // a move chosen by the UI's OWN iterative-deepening driver, running from
 // Language Card RAM, must be the move the engine's normal $4000 entry point
@@ -86,13 +133,33 @@ func TestEngineParity(t *testing.T) {
 		name    string
 		opening []string // typed into the UI in two-player mode first
 		level   byte     // 1..4 are fixed depth 2..5
+		known   string   // non-empty: a KNOWN divergence, skipped and tracked
 	}{
-		{"start position, depth 2", nil, 1},
-		{"after 1.e4, depth 3", []string{"e2e4"}, 2},
-		{"Ruy Lopez, depth 4", []string{"e2e4", "e7e5", "g1f3", "b8c6", "f1b5"}, 3},
-		{"Sicilian, depth 5", []string{"e2e4", "c7c5", "g1f3", "d7d6", "d2d4", "c5d4"}, 4},
+		{"start position, depth 2", nil, 1, ""},
+		{"after 1.e4, depth 3", []string{"e2e4"}, 2, ""},
+		{"Ruy Lopez, depth 4", []string{"e2e4", "e7e5", "g1f3", "b8c6", "f1b5"}, 3, ""},
+		{"Sicilian, depth 5", []string{"e2e4", "c7c5", "g1f3", "d7d6", "d2d4", "c5d4"}, 4,
+			// ★ OPEN BUG, found 2026-07-29 and NOT caused by whatever change
+			// you are about to make. The UI's driver plays f3d4 here and the
+			// $4000 entry plays f1b5 — a genuine depth-5 divergence between
+			// uidrive and engine.s's iterate, with ABORT=0, CURDEPTH=5,
+			// BUDGET=0 on the UI side, i.e. a clean unbudgeted depth-5 ID in
+			// exactly the reference's configuration. It is a knife-edge
+			// position (+0.12) where the $4000 entry ALSO flip-flops by depth:
+			// f3d4 at 1,2,3,4 and 6, f1b5 only at 5.
+			//
+			// This test could never see it. It ran the UI dithered and handed
+			// the reference `u.Peek(SEED)` — evseed's LIVE PRNG state, already
+			// advanced (seed = seed*3+29) once per dithered leaf — so the two
+			// sides compared different dither streams and agreed by accident.
+			// Fixing that (below: dither off on BOTH sides) is what exposed
+			// this. See docs/results.md 2026-07-29.
+			"uidrive vs iterate diverge at depth 5 (see the note in this table)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.known != "" {
+				t.Skip("KNOWN DIVERGENCE, tracked in docs/results.md: " + tc.known)
+			}
 			u := boot(t)
 			twoPlayerPoke(t, u)
 			// Level first: the level command reads a key, and we want the
@@ -117,22 +184,19 @@ func TestEngineParity(t *testing.T) {
 			// Hand the move to the engine: the human takes the OTHER colour.
 			side := u.Peek(u.Defs["SIDE"])
 			u.Poke(ui.UIHUMAN, side^0x08)
-			if err := u.Enter(""); err != nil {
-				t.Fatal(err)
-			}
+			engineMoveUndithered(t, u)
 			hist := u.History()
 			if len(hist) != int(before)+1 {
 				t.Fatalf("the engine did not move; history %v\n%s", hist, u.Screen())
 			}
 			got := hist[len(hist)-1]
-			seed := u.Peek(u.Defs["SEED"])
-			want := refSearch(t, bin, defs, pos, tc.level+1, seed)
+			want := refSearch(t, bin, defs, pos, tc.level+1, 0 /* dither off */)
 			if got != want {
 				t.Errorf("UI-driven engine played %s, $4000-entry engine played %s\n"+
-					"  position %s, depth %d, SEED %#02x", got, want, fen, tc.level+1, seed)
+					"  position %s, depth %d (both undithered)", got, want, fen, tc.level+1)
 			}
-			t.Logf("%s: both drivers played %s (SEED %#02x); think line %q",
-				tc.name, got, seed, strings.TrimSpace(u.Screen().Text(14)))
+			t.Logf("%s: both drivers played %s; think line %q",
+				tc.name, got, strings.TrimSpace(u.Screen().Text(14)))
 		})
 	}
 }

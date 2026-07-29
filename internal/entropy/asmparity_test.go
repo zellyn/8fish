@@ -40,7 +40,7 @@ type sim struct {
 
 // newSim builds the emulated collector with the given initial ENTCNT/ENTROPY
 // (arbitrary on purpose: hardware leaves them as RAM garbage).
-func newSim(t *testing.T, cnt uint16, ent byte, moves, keysPerMove byte) *sim {
+func newSim(t *testing.T, cnt, ent uint16, moves, keysPerMove byte) *sim {
 	t.Helper()
 	root := filepath.Join("..", "..")
 	if err := asmbuild.BuildStandalone(root, "entropytest"); err != nil {
@@ -71,7 +71,8 @@ func newSim(t *testing.T, cnt uint16, ent byte, moves, keysPerMove byte) *sim {
 	m.Mem.Main[keyspmAddr] = keysPerMove
 	m.Mem.Main[defs["ENTCNT"]] = byte(cnt)
 	m.Mem.Main[defs["ENTCNT"]+1] = byte(cnt >> 8)
-	m.Mem.Main[defs["ENTROPY"]] = ent
+	m.Mem.Main[defs["ENTROPY"]] = byte(ent)
+	m.Mem.Main[defs["ENTROPY"]+1] = byte(ent >> 8)
 	return &sim{t: t, m: m, out: out, entcnt: defs["ENTCNT"], entrop: defs["ENTROPY"]}
 }
 
@@ -88,9 +89,9 @@ func (s *sim) step() (exited bool) {
 	return exited
 }
 
-func (s *sim) state() (cnt uint16, ent byte) {
+func (s *sim) state() (cnt, ent uint16) {
 	return uint16(s.m.Mem.Main[s.entcnt]) | uint16(s.m.Mem.Main[s.entcnt+1])<<8,
-		s.m.Mem.Main[s.entrop]
+		uint16(s.m.Mem.Main[s.entrop]) | uint16(s.m.Mem.Main[s.entrop+1])<<8
 }
 
 // press plays one human keystroke that arrives after at least `wait` more
@@ -151,7 +152,7 @@ func TestASMParity(t *testing.T) {
 		moves       = 40
 		keysPerMove = 4 // "e2e4"
 		initCnt     = uint16(0x9F3C)
-		initEnt     = byte(0xC7)
+		initEnt     = uint16(0x39C7)
 	)
 	s := newSim(t, initCnt, initEnt, moves, keysPerMove)
 	model := entropy.New(initCnt, initEnt)
@@ -178,10 +179,10 @@ func TestASMParity(t *testing.T) {
 	acnt, aent := s.state()
 	mcnt, ment := model.State()
 	if acnt != mcnt || aent != ment {
-		t.Errorf("final state: asm ENTCNT=%#04x ENTROPY=%#02x, model ENTCNT=%#04x ENTROPY=%#02x",
+		t.Errorf("final state: asm ENTCNT=%#04x ENTROPY=%#04x, model ENTCNT=%#04x ENTROPY=%#04x",
 			acnt, aent, mcnt, ment)
 	}
-	t.Logf("%d moves x %d keystrokes: identical seed streams; final ENTCNT=%#04x ENTROPY=%#02x",
+	t.Logf("%d moves x %d keystrokes: identical seed streams; final ENTCNT=%#04x ENTROPY=%#04x",
 		moves, keysPerMove, acnt, aent)
 }
 

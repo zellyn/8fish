@@ -292,13 +292,39 @@ cycle boundary. `asm/entropy.inc`:
   every ~1.03s) — both far below human timing jitter, which makes the low
   byte uniform over 0..255 for any real keypress.
 - At **every** keypress (menus, move entry, confirmations — the UI reads
-  all keys through `entkey`) the counter's low byte folds into `ENTROPY`
-  ($0212) with `ENTROPY = ROL(ENTROPY) EOR ENTCNT` (`entfold`). A 4-5
-  character move entry therefore mixes several independent inter-keystroke
-  intervals, and the accumulator is never cleared: entropy accumulates
-  across the session.
-- `entseed` installs `SEED = ENTROPY`, forced nonzero ($5A fallback, since
-  `SEED` = 0 means dither off), leaving the accumulator to keep folding.
+  all keys through `entkey`) BOTH counter bytes fold into the 16-bit
+  `ENTROPY` ($0216) via `entfold`. A 4-5 character move entry therefore
+  mixes several independent inter-keystroke intervals, and the accumulator
+  is never cleared: entropy accumulates across the session.
+- `entseed` installs `SEED = ENTROPY`'s low byte, forced nonzero ($5A
+  fallback, since `SEED` = 0 means dither off), leaving the accumulator to
+  keep folding.
+- **AMENDED 2026-07-29 — the fold was rebuilt; the source was not.** As
+  landed, `ENTROPY` was ONE byte and `entfold` was `ENTROPY =
+  ROL(ENTROPY) EOR x`. That is affine over GF(2) on a 256-state space, so
+  a LOW-ENTROPY input does not degrade it gracefully — it cycles. An
+  exhaustive walk of all 256 inputs x all 256 states found **no orbit
+  longer than 16**: given a constant arrival delta the collector re-enters
+  a visited state within at most 16 folds and replays the same seeds
+  forever. `ucibridge`'s `TestDitherEntropySeeds` caught it (17 failures
+  in 400 runs under gauntlet load, seven at exactly 32 distinct seeds),
+  and the captured sequence is reproduced exactly by a constant 1.254 ms
+  arrival: a 32-long orbit of 28 distinct seeds. The fix widens `ENTROPY`
+  to 16 bits and makes the step a maximal-period Galois LFSR (poly $B400,
+  primitive), and folds the counter's high byte as well as its low byte.
+  **+13 B** of driver code, +1 B of RAM. Exhaustively verified: over all
+  256 constant inputs x all 65536 states every orbit is either the lone
+  fixed point of that input or the full 65535-cycle. On the dangerous
+  quantization class the collapse rate goes 100% → 0.00019%.
+  `entropy.TestFoldCannotCycleShort` and `TestQuantizedArrivals` pin it;
+  `TestASMParity` still proves the Go model is the asm's byte-for-byte
+  twin. **Blast radius: none.** A measured symmatch game's arrival deltas
+  span 465..230253 poll iterations (7.3 ms..3.6 s) because the interval
+  between `position` commands always contains a full emulated 8fish
+  search; the degenerate regime needs the delta constant to within ONE
+  iteration (15.7 us). Replaying the OLD fold over that measured
+  distribution gives 45.5 distinct seeds per 50 moves — exactly the ideal
+  uniform-RNG expectation.
 - `ENTCNT`/`ENTROPY` are deliberately **never initialized**: cold-boot RAM
   garbage and a warm-restart carryover of the previous session are free
   entropy. First move of a game is already covered because starting a game

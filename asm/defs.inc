@@ -504,7 +504,9 @@ SMODE      = $0DE0      ; child window mode for the move being searched:
                         ;  2/3 scout reduced by 1/2 (LMR)
 
 ; $0213-$0221 is free driver-scratch RAM (was FT_ROOKX's RKCNT[16] at
-; $0210 and XSTRUCT at $0220, removed 2026-07-23 with the feature).
+; $0210 and XSTRUCT at $0220, removed 2026-07-23 with the feature), less
+; $0216-$0217, which the entropy accumulator took 2026-07-29 (see ENTROPY
+; below).
 ; The `ca65 -D GDVERIFY` debug variant (FT2_GENDEFER's live equivalence
 ; assertion + its exhaustive-sweep entry) borrows the first three bytes;
 ; the shipped image assembles none of that code and leaves them free.
@@ -536,16 +538,28 @@ GDVBUF     = $3000      ; GDVERIFY: ttmvsweep's 32x128 result buffer.
 ; loop (16 cycles/iteration, so its low byte turns over every ~4ms — far
 ; below any human's timing jitter) and its low byte is folded into ENTROPY at
 ; every keypress. ENTROPY's low byte becomes SEED at move time (entseed).
-; ENGINE code never reads or writes these three bytes: the collector lives
+; ENGINE code never reads or writes these four bytes: the collector lives
 ; entirely in the driver, so the test harness (which pokes SEED directly)
 ; and the on-device collector cannot collide.
 ENTCNT     = $0210      ; 16-bit free-running keyboard-wait loop counter
                         ;  (LE; wraps every ~1.03s of waiting)
-ENTROPY    = $0212      ; accumulated entropy byte: ROL-then-EOR fold of
-                        ;  ENTCNT's low byte at each keypress. DELIBERATELY
-                        ;  never initialized — cold-boot RAM garbage and a
-                        ;  warm-restart carryover of the previous session's
-                        ;  value are both free entropy.
+                        ; $0212 is free (was the 1-byte ENTROPY). The
+                        ;  accumulator needs two CONTIGUOUS bytes for its
+                        ;  lsr/ror step and $0213-$0215 are borrowed by the
+                        ;  GDVERIFY debug build, so it lives at $0216.
+ENTROPY    = $0216      ; 2 bytes (LE): the accumulator. A maximal-period
+                        ;  16-bit Galois LFSR state, stepped once per fold
+                        ;  with the folded byte EORed into the low half; the
+                        ;  low byte becomes SEED (entseed). WIDENED from one
+                        ;  byte 2026-07-29: the old 8-bit ROL-then-EOR fold
+                        ;  had a state space of only 256, so a QUANTIZED
+                        ;  (constant-delta) arrival stream drove it round a
+                        ;  cycle of at most 16 states and the engine replayed
+                        ;  the same games. See asm/entropy.inc for the
+                        ;  measurement. DELIBERATELY never initialized —
+                        ;  cold-boot RAM garbage and a warm-restart carryover
+                        ;  of the previous session's value are both free
+                        ;  entropy.
 
 ; Resident-book probe I/O (asm/book.s). Free driver-scratch RAM between
 ; PWBITS/PBBITS ($0200-$020F) and ITSTART ($0230). Touched only by the book

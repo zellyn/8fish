@@ -155,6 +155,18 @@ type Bridge struct {
 	ent     *entropy.Collector
 	entLast time.Time
 
+	// Per-game dither audit (only accumulated when b.Log != nil). The whole
+	// point of the dither is that games do not repeat, and that is a property
+	// of the SEED STREAM, so the logs have to be able to answer "were the
+	// seeds diverse?" after the fact. They could not, which is why confirming
+	// the 2026-07-29 collector defect's blast radius needed a fresh match
+	// rather than a query over the runs we already had.
+	entSeeds   map[byte]bool // distinct seeds handed out this game
+	entMoves   int           // seeds handed out this game
+	entTicked  bool          // at least one arrival has been timed this game
+	entMinTick uint64        // shortest arrival, in poll iterations
+	entMaxTick uint64        // longest arrival
+
 	// Ponder bookkeeping (all only touched when Ponder is true).
 	ponderArgs      []string // go-command args (minus "ponder") for the pending ponder / its ponderhit budget
 	ponderBest      string   // best move the last ponder search found (held for the UCI stop reply)
@@ -266,7 +278,8 @@ func (b *Bridge) Run(r io.Reader, w io.Writer) error {
 					b.gameNo, b.ponderHits, b.ponderTotal,
 					float64(b.ponderHits)/float64(b.ponderTotal))
 			}
-			b.flushGameTime() // TIME-GAME-SUMMARY for the game just finished
+			b.flushGameTime()   // TIME-GAME-SUMMARY for the game just finished
+			b.flushGameDither() // DITHER-GAME-SUMMARY likewise
 			b.gameNo++
 			b.ponderHits, b.ponderTotal = 0, 0
 			b.posBase, b.posMoves = nil, nil
@@ -690,10 +703,33 @@ func (b *Bridge) ditherArrival() {
 	}
 	now := time.Now()
 	if !b.entLast.IsZero() {
-		col.WaitFor(now.Sub(b.entLast))
+		ticks := col.WaitFor(now.Sub(b.entLast))
+		if b.Log != nil {
+			if !b.entTicked || ticks < b.entMinTick {
+				b.entMinTick, b.entTicked = ticks, true
+			}
+			if ticks > b.entMaxTick {
+				b.entMaxTick = ticks
+			}
+		}
 	}
 	b.entLast = now
 	col.Key()
+}
+
+// flushGameDither reports the seed diversity of the game just finished: the
+// dither's entire job is to stop the engine replaying games, and this is the
+// line that lets a finished run be audited for it. A distinct count well below
+// the move count means the collector's input was low-entropy (quantized
+// arrivals) and the "N games" in that run were not N independent samples.
+func (b *Bridge) flushGameDither() {
+	if b.Log == nil || b.entMoves == 0 {
+		return
+	}
+	b.logf("DITHER-GAME-SUMMARY game=%d moves=%d distinct-seeds=%d minarrival=%d maxarrival=%d",
+		b.gameNo, b.entMoves, len(b.entSeeds), b.entMinTick, b.entMaxTick)
+	b.entSeeds, b.entMoves = nil, 0
+	b.entTicked, b.entMinTick, b.entMaxTick = false, 0, 0
 }
 
 // ditherFold folds a non-keyboard entropy byte in (asm: entfold).
@@ -722,7 +758,15 @@ func (b *Bridge) ditherSeed() int {
 		}
 		return int(b.rnd())
 	}
-	return int(b.collector().Seed())
+	s := b.collector().Seed()
+	if b.Log != nil {
+		if b.entSeeds == nil {
+			b.entSeeds = map[byte]bool{}
+		}
+		b.entSeeds[s] = true
+		b.entMoves++
+	}
+	return int(s)
 }
 
 // think runs the engine over the current position and returns the move

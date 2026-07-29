@@ -3,6 +3,138 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-29 — ★ OPEN BUG: the UI's ID driver and the engine's `iterate` DISAGREE at depth 5, and `TestEngineParity` was structurally unable to see it
+
+Found while fixing the entropy collector (entry below); **not caused by it**.
+
+`TestEngineParity` is the gate that makes the on-device UI safe to ship: a move
+chosen by `uidrive` (the UI's own ID driver, docs/ui-design.md §7) must be the
+move the engine's normal $4000 entry produces for the same position, depth and
+features. It ran the UI **dithered** and then handed the reference search
+`u.Peek(SEED)` — but `SEED` is not the seed, it is `eval.s evseed`'s LIVE PRNG
+STATE, advanced `seed = seed*3+29` at every dithered leaf. So the test read the
+END of the UI's dither stream and started the reference from there: two
+DIFFERENT streams, agreeing only because 0-3cp of noise rarely flips a best
+move. The tell was in its own log — it once printed `SEED 0x00` for a move,
+and `entseed` cannot install a zero seed.
+
+Handing the reference the TRUE installed seed does not rescue it either: at the
+Ruy Lopez position the two drivers disagree for **33 of 40 seeds**, because the
+dither's noise depends on the POSITION IN THE EVAL-CALL SEQUENCE and the two
+drivers' sequences do not align. The comparison is only well-posed with the
+dither OFF, which the test now does (it clears `SEED` the instant `entseed`
+installs it; `evseed`'s `lda SEED / beq evdone` then costs nothing and never
+writes it back).
+
+With that — a genuine, strictly stronger tree-identity gate — three of the four
+positions pass and **the Sicilian at depth 5 does not**:
+
+| driver | move |
+|---|---|
+| UI `uidrive`, depth 5, undithered | **f3d4** (`ABORT=0 CURDEPTH=5 BUDGET=0`) |
+| $4000 `iterate`, depth 5, undithered | **f1b5** |
+| $4000 `iterate`, depths 1, 2, 3, 4, 6 | f3d4 |
+
+The UI completed a clean, unbudgeted depth-5 iterative deepening in exactly the
+reference's configuration, and chose a different move. It is a knife-edge
+position (+0.12) where the reference itself flip-flops — f1b5 only at depth 5 —
+so the practical Elo cost is likely nil, but the INVARIANT the gate exists to
+enforce does not hold, and that is worth knowing before the disk ships.
+
+The subtest is `t.Skip`ped with the full explanation inline in the case table,
+so it stays visible; the other three are now a real gate rather than a lucky
+one. **Fixing `uidrive` is not attempted here** — it is UI/engine driver work
+with its own risk, and this task was the entropy collector.
+
+## 2026-07-29 — the entropy collector's fold CYCLED on quantized input (longest possible orbit: 16). Fixed for +13 B. **Blast radius on past measurements: NONE**, and that is measured, not assumed.
+
+`ucibridge.TestDitherEntropySeeds` failed 17 times in 400 runs under gauntlet
+load — never idle, never under synthetic CPU load. The seeds did not merely
+lose entropy, they REPEATED, with the distinct count clustering at exactly 32.
+
+**Mechanism — proven directly, no load required.** The collector's accumulator
+was ONE byte and its fold was `ENTROPY = ROL(ENTROPY) EOR x`. That is affine
+over GF(2), so with a CONSTANT input the fold is a deterministic affine map on
+256 states and its orbits are not merely finite, they are tiny. Exhaustive walk
+of all 256 inputs x all 256 states:
+
+| fold | longest possible orbit | orbits <= 16 |
+|---|---|---|
+| **old** `ROL8 + EOR` | **16** | all of them |
+| new `LFSR16 + EOR` | 65535 | none |
+
+The captured failing sequence is reproduced EXACTLY by a constant arrival of 80
+poll iterations (1.254 ms): the orbit is 32 long and contains 28 distinct
+seeds, and its 24-value tail matches the reporter's capture byte for byte. The
+"period 32" reading needed the caveat it was given — the *state* period is 32
+while the arrival's own period is 16, and the run only enters the orbit once
+the machine settles into the quantized regime, which is why a whole-sequence
+periodicity test refutes it.
+
+The cliff is razor-sharp: ±1 poll iteration of jitter (15.7 **microseconds**)
+restores full diversity even to the old fold. The defect needs the wait
+quantized to a 15.7 us window, held indefinitely.
+
+**Fix (asm/entropy.inc, driver-only).** `ENTROPY` widens to 16 bits ($0216;
+$0212 freed, and $0213-$0215 are the GDVERIFY debug build's) and `entfold`
+becomes one step of a maximal-period 16-bit Galois LFSR — polynomial $B400 =
+x^16+x^14+x^13+x^11+1, primitive — with the byte EORed into the low half.
+`entkey` also folds the counter's HIGH byte, so a repeating input now needs the
+whole 16-bit counter to repeat (a 1.03 s grid) instead of just its low byte (a
+4.01 ms grid). **+13 B** (m8.bin 4428 → 4441; UI growth room 436 → 423 B; SD
+spare unchanged at 94 B) and +1 B of RAM.
+
+Why it cannot cycle: exhaustively, over all 256 constant inputs x all 65536
+states, EVERY orbit is either the lone fixed point of that input or the full
+65535-cycle — nothing in between (`entropy.TestFoldCannotCycleShort`). On the
+dangerous quantization class (every arrival delta that is a multiple of 8, x 64
+start states) the rate of dropping below 40 distinct seeds per 60 moves:
+
+| | old fold | LFSR16 only | LFSR16 + fold both counter bytes |
+|---|---|---|---|
+| collapse rate | **100%** | 0.025% | **0.00019%** |
+
+Rejected on measurement: a 35-byte explicit fixed-point guard (clean worst case
+of 65535 but it moved the collapse rate by nothing — it only kills period-1);
+24- and 32-bit LFSRs (no improvement); and every non-linear perturbation tried
+(`+1` before or after the step, ADC instead of EOR) — all of them made things
+WORSE, creating 1500-2000 short cycles where the affine LFSR has 256.
+
+**★ BLAST RADIUS: NONE.** The harness feeds the collector the elapsed time
+between `position` commands — an interval that ALWAYS contains a full emulated
+8fish search, so it can never be small or quantized. Measured on a live
+symmatch (new `DITHER-GAME-SUMMARY` audit line), against a degenerate regime
+that needs arrivals constant to ONE iteration:
+
+| game | moves | distinct seeds | ideal expectation | arrival range (poll iterations) |
+|---|---|---|---|---|
+| 1 | 50 | 43 | 45.5 | 465 .. 230,253 (7.3 ms .. 3.6 s) |
+| 2 | 56 | 52 | 50.2 | 4,126 .. 1,345,907 (65 ms .. 21 s) |
+| 3 | 72 | 61 | 62.3 | 2,301 .. 1,069,634 (36 ms .. 17 s) |
+
+Three to five orders of magnitude of spread per game, and the distinct counts
+sit on the ideal expectation. Replaying the OLD fold over that measured arrival
+distribution gives **45.5 distinct seeds per 50 moves — exactly the ideal
+uniform-RNG expectation**. The old collector was never in trouble here.
+
+And most of the corpus never touched the collector at all: `internal/sprt`
+(every SPRT Elo number) draws its SEED from a host PCG, the 504-game paired
+softclock gauntlet ran `-dither prng` deliberately, and every cutechess PGN in
+`tools/pgn/` predates the collector (2026-07-25). Only `cmd/sargon-symmatch`
+and `cmd/uci` defaulted to it — and for those, the measurement above says the
+input was never in the failing regime. **No past result needs restating.**
+
+Floor NOT loosened: `TestDitherEntropySeeds` keeps `>= 40`. It was correctly
+reporting a real defect in shipped code, and the fix's worst case over EVERY
+constant arrival delta is 45 distinct in 60 (`entropy.TestQuantizedArrivals`,
+which pins the whole thing deterministically so the sleep-based test is no
+longer the only guard).
+
+**Unfixed, reported not changed:** `asm/m8.s uibookrnd` builds the book's
+32-bit weighted-pick random as `BOOKRND+3 = BOOKRND+0 EOR BOOKRND+2`, a linear
+dependency that caps it at 24 bits of entropy. Now that `ENTROPY` is 16 bits it
+is fixable at ZERO byte cost by using `ENTROPY+1` for the fourth byte.
+
 ## 2026-07-29 — ★★ IN THE DISK'S OWN TIME MANAGEMENT THE SHIPPED CLOCK COSTS **0.4% OF COMPUTE AND NO DEPTH**. The −64's proposed mechanism is falsified, and half the gauntlet's 8fish compute is a feature the disk does not have.
 
 Follow-up to the entry below, which measured the shipped clock at −64 [−120, −8]

@@ -619,7 +619,12 @@ the next starts.
 7. **Engine's turn.** Fixed-depth ID driver + between-iteration thinking line +
    apply the engine's move. *Verify:* a fixed FEN and depth must produce the same
    `BESTFROM/BESTTO/BESTFLAGS` as `chesstest.SearchMove` on the same position —
-   proving the UI-driven engine plays byte-identical chess.
+   proving the UI-driven engine plays byte-identical chess. **The comparison is
+   only well-posed with the dither OFF and the SHIPPED feature mask on both
+   sides**, and the reference's mask must be constructed from `defs.inc`, not
+   peeked out of the image under test; getting either wrong has now produced one
+   gate that passed by luck and one that reported a nonexistent bug
+   (docs/results.md 2026-07-29).
 8. **Book integration.** `jsr bookprobe` before searching; on a hit, play it and
    stream the `CUROPENING` name from the blob's name table to row 16.
    *Verify:* a booked position must reproduce
@@ -878,7 +883,8 @@ All under `internal/ui`, plus the two engine-side ones:
 | `TestResignAwardsTheRightSide` / `TestDrawOfferIsNotAnsweredFromARetractedSearch` | the two result-reporting bugs found by that pass, in all three side modes |
 | `TestCommands` | N / T / R / L / S / ? |
 | `TestDrawOffer` | the engine accepts a draw only when its last search said it was losing |
-| `TestEngineParity` | **the UI-driven engine plays the move the `$4000`-entry engine plays**, at four positions and depths 2-5 |
+| `TestEngineParity` | **the UI-driven engine plays the move the `$4000`-entry engine plays**, at four positions and depths 2-5, dither OFF on both sides and the SHIPPED feature mask on both sides. The reference's configuration is constructed from `defs.inc` and cross-checked against the booted image, never peeked from it: this gate had been comparing two different ENGINES (see docs/results.md 2026-07-29) |
+| `TestBookRandomIsFullWidth` | `uibookrnd`'s GF(2) matrix has rank 32, so all 32 bits of collected entropy reach the book's weighted pick |
 | `TestSoftClockLimits` | all five limits, at all nine levels, against `chesstest.SoftClockMargin`'s reference |
 | `TestTimedLevel` | one move on the ESTIMATED clock with the harness clock trap disabled — hardware semantics — coming in under its allocation |
 | `TestBookIntegration` | the resident book is probed instead of searched, and the opening name streamed from the blob matches `internal/book` |

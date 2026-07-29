@@ -3,13 +3,17 @@ package ui_test
 // shipconfig_test.go: DIAGNOSTIC — does the on-device build run the
 // configuration every Elo number was measured under?
 //
-// Every gate in this package compares the UI against a reference built by
-// chesstest.NewMachine, whose FEATURES default is 0x1F. But the GAMEPLAY
-// configuration — the one internal/ucibridge uses for SPRT, the Sargon
-// gauntlet, and every Elo figure in docs/results.md — is
-// FT_CKEXT|0x1F = 0x5F. If asm/m8.s ships 0x1F, the parity gates still pass
-// (both sides are 0x1F) while the disk plays weaker chess than anything
-// that was ever measured.
+// chesstest.NewMachine's FEATURES default is the TEST value 0x1F. The
+// GAMEPLAY configuration — the one internal/ucibridge uses for SPRT, the
+// Sargon gauntlet, and every Elo figure in docs/results.md — is
+// FT_CKEXT|0x1F = 0x5F. If asm/m8.s ships 0x1F, the disk plays weaker chess
+// than anything that was ever measured, and a parity gate whose reference
+// also defaults to 0x1F cannot see it.
+//
+// Both halves of that have now bitten (docs/results.md 2026-07-28 and
+// 2026-07-29). The reference mask therefore has exactly ONE definition in
+// this package — engine_test.go's shippedConfig, built from defs.inc — and
+// this file checks the booted image against it.
 
 import (
 	"path/filepath"
@@ -34,12 +38,11 @@ func TestShippedFeatureConfig(t *testing.T) {
 	gotF := u.Peek(defs["FEATURES"])
 	gotF2 := u.Peek(defs["FEATURES2"])
 
-	// ucibridge.runEngine's gameplay config.
-	wantF := byte(defs["FT_CKEXT"]) | 0x1F
-	// FEATURES2: the bridge uses FT2_GENDEFER; on device FT2_SOFTCLK is
-	// additionally REQUIRED (there is no hardware clock) — that difference
-	// is deliberate and documented.
-	wantF2 := byte(defs["FT2_GENDEFER"]) | byte(defs["FT2_SOFTCLK"])
+	// ucibridge.runEngine's gameplay config, plus the FT2_SOFTCLK the device
+	// additionally REQUIRES (there is no hardware clock) — that difference is
+	// deliberate and documented. Shared with the parity reference so the two
+	// can never describe different engines.
+	wantF, wantF2 := shippedConfig(defs)
 
 	t.Logf("on-device FEATURES  = $%02X   gameplay (ucibridge) = $%02X", gotF, wantF)
 	t.Logf("on-device FEATURES2 = $%02X   gameplay + SOFTCLK   = $%02X", gotF2, wantF2)

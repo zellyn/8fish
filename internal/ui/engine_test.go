@@ -27,6 +27,31 @@ func engineBin(t *testing.T) ([]byte, chesstest.Defs) {
 	return bin, defs
 }
 
+// shippedConfig returns the feature configuration the shipped machine plays,
+// built FROM defs.inc — never read out of the image under test.
+//
+// ★ WHY IT IS CONSTRUCTED HERE AND NOT PEEKED. A parity reference derived
+// from the thing it is meant to check cannot fail: it agrees by definition.
+// This package has now been bitten by that twice. The first time
+// (2026-07-28) the UI shipped FEATURES=$1F while every measured Elo number
+// was at $5F, and the gate could not see it because BOTH sides came from
+// chesstest.NewMachine's $1F test default. The second time is the bug this
+// comment exists to close: m8.s was fixed to $5F and the reference was left
+// at NewMachine's $1F, so the gate compared TWO DIFFERENT ENGINES and
+// reported the difference as a driver divergence (docs/results.md
+// 2026-07-29). Both bytes are therefore spelled out from the defs, and
+// TestEngineParity separately requires the booted image to match them.
+//
+// FEATURES  = the ucibridge gameplay mask, $1F|FT_CKEXT.
+// FEATURES2 = the bridge's FT2_GENDEFER plus FT2_SOFTCLK, which the device
+// additionally requires because an Apple IIe has no readable clock. That
+// difference is deliberate, and it is invisible at fixed depth: with
+// BUDGET=0 nothing ever compares the estimate against a limit.
+func shippedConfig(defs chesstest.Defs) (features, features2 byte) {
+	return 0x1F | byte(defs["FT_CKEXT"]),
+		byte(defs["FT2_GENDEFER"]) | byte(defs["FT2_SOFTCLK"])
+}
+
 // refSearchFEN runs the engine image the ordinary (UCI-bridge) way over a
 // FEN: same features, same depth, same eval-dither seed, cold TT.
 func refSearchFEN(t *testing.T, bin []byte, defs chesstest.Defs, fen string, depth, seed byte) string {
@@ -46,7 +71,9 @@ func refSearch(t *testing.T, bin []byte, defs chesstest.Defs, pos *chesstest.Pos
 	if err != nil {
 		t.Fatal(err)
 	}
-	chesstest.SetFeatures2(m, defs, byte(defs["FT2_GENDEFER"]|defs["FT2_SOFTCLK"]))
+	f1, f2 := shippedConfig(defs)
+	chesstest.SetFeatures(m, defs, f1) // NOT NewMachine's $1F test default
+	chesstest.SetFeatures2(m, defs, f2)
 	chesstest.SetBudget(m, defs, 0, depth)
 	m.Mem.Main[defs["HALFMOVE"]] = pos.Halfmove
 	m.Mem.Main[defs["SEED"]] = seed
@@ -127,40 +154,43 @@ func engineMoveUndithered(t *testing.T, u *ui.Machine) {
 // This is what makes the UI safe to add: docs/ui-design.md §7 supplies its
 // own ID driver so the screen can show the search deepening without touching
 // search.s, and this test is the evidence that the tree is unchanged.
+//
+// The gate is only as good as the reference, and the reference has to be
+// identical in EVERY input the tree depends on: position bytes (piece-list
+// slots included), depth, dither, and — the one that broke twice — the
+// feature mask. See shippedConfig.
 func TestEngineParity(t *testing.T) {
 	bin, defs := engineBin(t)
+	wantF, wantF2 := shippedConfig(defs)
 	for _, tc := range []struct {
 		name    string
 		opening []string // typed into the UI in two-player mode first
 		level   byte     // 1..4 are fixed depth 2..5
-		known   string   // non-empty: a KNOWN divergence, skipped and tracked
 	}{
-		{"start position, depth 2", nil, 1, ""},
-		{"after 1.e4, depth 3", []string{"e2e4"}, 2, ""},
-		{"Ruy Lopez, depth 4", []string{"e2e4", "e7e5", "g1f3", "b8c6", "f1b5"}, 3, ""},
-		{"Sicilian, depth 5", []string{"e2e4", "c7c5", "g1f3", "d7d6", "d2d4", "c5d4"}, 4,
-			// ★ OPEN BUG, found 2026-07-29 and NOT caused by whatever change
-			// you are about to make. The UI's driver plays f3d4 here and the
-			// $4000 entry plays f1b5 — a genuine depth-5 divergence between
-			// uidrive and engine.s's iterate, with ABORT=0, CURDEPTH=5,
-			// BUDGET=0 on the UI side, i.e. a clean unbudgeted depth-5 ID in
-			// exactly the reference's configuration. It is a knife-edge
-			// position (+0.12) where the $4000 entry ALSO flip-flops by depth:
-			// f3d4 at 1,2,3,4 and 6, f1b5 only at 5.
-			//
-			// This test could never see it. It ran the UI dithered and handed
-			// the reference `u.Peek(SEED)` — evseed's LIVE PRNG state, already
-			// advanced (seed = seed*3+29) once per dithered leaf — so the two
-			// sides compared different dither streams and agreed by accident.
-			// Fixing that (below: dither off on BOTH sides) is what exposed
-			// this. See docs/results.md 2026-07-29.
-			"uidrive vs iterate diverge at depth 5 (see the note in this table)"},
+		{"start position, depth 2", nil, 1},
+		{"after 1.e4, depth 3", []string{"e2e4"}, 2},
+		{"Ruy Lopez, depth 4", []string{"e2e4", "e7e5", "g1f3", "b8c6", "f1b5"}, 3},
+		// This case was skipped as a KNOWN DIVERGENCE on 2026-07-29: the UI
+		// played f3d4 and the reference f1b5. It was not a divergence. The
+		// reference was running FEATURES=$1F (chesstest.NewMachine's test
+		// default) against the UI's shipped $5F, i.e. WITHOUT check
+		// extensions — a different engine, not a different driver. With
+		// FT_CKEXT on both sides the two agree here (f3d4) and at every one
+		// of 60 position x depth cells swept in docs/results.md 2026-07-29.
+		{"Sicilian, depth 5", []string{"e2e4", "c7c5", "g1f3", "d7d6", "d2d4", "c5d4"}, 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.known != "" {
-				t.Skip("KNOWN DIVERGENCE, tracked in docs/results.md: " + tc.known)
-			}
 			u := boot(t)
+			// The reference is built from defs.inc, so it can only be a
+			// reference if the image really plays that configuration. Check
+			// it here rather than trusting it: this is the exact drift that
+			// turned this gate into a comparison of two different engines.
+			if gotF, gotF2 := u.Peek(defs["FEATURES"]), u.Peek(defs["FEATURES2"]); gotF != wantF || gotF2 != wantF2 {
+				t.Fatalf("the booted UI runs FEATURES=$%02X/$%02X but the reference is built "+
+					"for the shipped $%02X/$%02X. Whichever side moved, this gate is comparing "+
+					"two different ENGINES and can say nothing about the two DRIVERS.",
+					gotF, gotF2, wantF, wantF2)
+			}
 			twoPlayerPoke(t, u)
 			// Level first: the level command reads a key, and we want the
 			// engine's very first search to be at the depth under test.

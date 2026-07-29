@@ -774,6 +774,24 @@ mebad:  lda #RES_ERR
 ; uibookrnd: manufacture the book's 32-bit weighted-pick random from the
 ; keystroke entropy collector — the only unpredictable quantity an Apple IIe
 ; offers (asm/entropy.inc).
+;
+; The four output bytes must be a BIJECTION of the four input bytes, or the
+; book's 32-bit weighted pick is not really 32 bits. It was not: the last
+; byte read ENTROPY's LOW half, making
+;
+;       BOOKRND+3 = ENTROPY0 EOR ENTCNT1 = BOOKRND+0 EOR BOOKRND+2
+;
+; identically — a whole byte of linear dependency. Equivalently: ENTROPY's
+; HIGH byte reached BOOKRND nowhere at all, so the map had GF(2) rank 24 and
+; the reachable set was 2^24, not 2^32, no matter how good the collector got.
+; Reading ENTROPY's high half here removes it for ZERO bytes (both operands
+; are absolute), and is only possible because ENTROPY widened to 16 bits on
+; 2026-07-29. With E = ENTROPY, C = ENTCNT the map is now invertible:
+;
+;       B0 = E0            ->  E0 = B0
+;       B1 = C0 EOR E0     ->  C0 = B1 EOR B0
+;       B2 = C1            ->  C1 = B2
+;       B3 = E1 EOR C1     ->  E1 = B3 EOR B2
 uibookrnd:
         lda ENTROPY
         sta BOOKRND
@@ -782,7 +800,7 @@ uibookrnd:
         sta BOOKRND+1
         lda ENTCNT+1
         sta BOOKRND+2
-        lda ENTROPY
+        lda ENTROPY+1
         eor ENTCNT+1
         sta BOOKRND+3
         rts

@@ -3,7 +3,145 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
-## 2026-07-29 — ★ OPEN BUG: the UI's ID driver and the engine's `iterate` DISAGREE at depth 5, and `TestEngineParity` was structurally unable to see it
+## 2026-07-29 — ★ RESOLVED, and it was never a driver bug: the "uidrive vs iterate" divergence was the REFERENCE running a DIFFERENT ENGINE ($1F vs the shipped $5F)
+
+Closes the OPEN BUG filed earlier today (entry below). **The invariant holds.**
+`uidrive` and `engine.s`'s `$4000` entry produce the same move at every one of
+**60 position x depth cells** swept. Nothing in `asm/m8.s`'s driver was wrong,
+and nothing in it changed.
+
+**Root cause.** `internal/ui`'s `refSearch` built its reference with
+`chesstest.NewMachine`, whose FEATURES default is the **test** value `$1F`, and
+then only ever overrode FEATURES2. It never set FEATURES. Since 2026-07-28
+`asm/m8.s` ships the **gameplay** mask `$1F|FT_CKEXT = $5F`. So the gate was
+comparing an engine WITH check extensions (the UI) against an engine WITHOUT
+them (the reference) and reporting the difference as a divergence between two
+DRIVERS. The Sicilian at depth 5 is simply a position where FT_CKEXT changes
+the answer.
+
+| driver / config | d1 | d2 | d3 | d4 | d5 | d6 |
+|---|---|---|---|---|---|---|
+| UI `uidrive`, FEATURES `$5F` (shipped) | — | f3d4 | f3d4 | f1b5 | **f3d4** | f3d4 |
+| `$4000` `iterate`, FEATURES `$5F` | f3d4 | f3d4 | f3d4 | f1b5 | **f3d4** | f3d4 |
+| `$4000` `iterate`, FEATURES `$1F` (what the gate used) | f3d4 | f3d4 | f3d4 | f3d4 | **f1b5** | f3d4 |
+
+The two shipped-config rows agree everywhere. The old entry's "the reference
+itself flip-flops, f1b5 only at depth 5" was a property of the **$1F** engine,
+which is not the engine that ships.
+
+**This is the same defect the 07-28 fix was written about, half-applied.** That
+entry's own diagnosis reads: "internal/ui's reference searches go through
+`chesstest.NewMachine`, whose TEST default is also `$1F`, so `TestEngineParity`
+compared `$1F` against `$1F`." The `m8.s` side was raised to `$5F`; the
+reference side was left at `$1F`. A gate that had been passing for the wrong
+reason (both sides wrong, equally) started failing for the wrong reason (one
+side fixed). `shipconfig_test.go`'s header still said "every gate in this
+package compares the UI against a reference built by `chesstest.NewMachine`,
+whose FEATURES default is 0x1F" — accurate, and the bug. The shipped mask now
+has exactly ONE definition in the package (`engine_test.go shippedConfig`) and
+`shipconfig_test.go` consumes it, so the two cannot describe different engines
+again.
+
+**The driver state was audited anyway**, since a features explanation that
+happened to be sufficient is not the same as the drivers being equivalent.
+Everything `engine.s`'s ENTRY establishes before `iterate`, `uidrive`
+establishes too: `PSP0/1`, `ABORT`, `NODECNT`, `evalinit`, `BESTFROM=NOSQ`, the
+`ccsite` SMC operand and the `CLOCK_TRAP` PHASE prime under `FT2_SOFTCLK`,
+`MAXCAP`, `ABORTL = 2*BUDGET`, and the `adaptaborthi` override under
+`FT2_ADAPT`. Differences found, all benign:
+
+* `uidrive` ADDITIONALLY zeroes `PLY` and `HVALID` before `evalinit`. `engine.s`
+  does not, because its machine is fresh; the UI's is not. `uidrive` is the
+  more careful of the two, and `iterate` re-zeroes both regardless.
+* `SCORE` is stale on the UI side (the previous move's) where the reference's
+  is 0, so `iterate`'s `SCORE -> PREVSC0/1` snapshot differs at iteration 1.
+  Never consumed: abort recovery is gated on `PREVFROM != NOSQ` and the driver
+  sets `BESTFROM = NOSQ` before the loop, and `adaptmaybe` returns early at
+  `CURDEPTH < 2`.
+* Fixed-depth levels poke `BUDGET = 0`, and `search.s checkclock` is a no-op
+  when the budget is zero — so `ABORTL`, `CEILMAX`, `UNSTCEIL`, `MINSPEND` and
+  the whole `FT2_ADAPT` cluster are unreachable in every cell measured here,
+  and `uilimits` clears `FT2_ADAPT` for those levels in any case.
+* The TT and its aux bank persist across moves on device. So does the UCI
+  bridge's (it copies `Mem.Aux` forward between moves), so this is not a
+  driver difference — but it does mean the gate is only well-posed on the
+  session's FIRST search, which is exactly what `twoPlayerPoke` exists to
+  guarantee.
+
+**Scope sweep — 12 lines x depths 2-6, dither off, fixed depth, cold TT.**
+Positions reached by typing into the UI (start, 1.e4, Ruy Lopez, Sicilian,
+French, QGD, King's Indian, Italian, Scandinavian, Caro-Kann, plus an 18-ply
+Ruy middlegame and a 16-ply QGA queenless middlegame); depth 6 reached by
+poking `LVDEPTH+3`, which is what makes the sweep go past the shipped level
+cap of 5.
+
+| reference config | cells agreeing with `uidrive` |
+|---|---|
+| FEATURES `$5F` (shipped) | **60 / 60** |
+| FEATURES `$1F` (the old gate's) | 55 / 60 |
+
+The five `$1F` disagreements are Ruy Lopez d5, Sicilian d4, Sicilian d5, QGD d5
+and Italian d6 — i.e. the artefact is **not** depth-5-specific and **not**
+one-position; it is exactly "positions where check extensions matter", which is
+what FT_CKEXT is for. The Sicilian/d5 cell was merely the one the case table
+happened to contain.
+
+**Fix (tests only; ZERO engine or driver bytes).**
+`internal/ui/engine_test.go` grows a `shippedConfig(defs)` that spells the
+shipped configuration out **from `defs.inc`** — `$1F|FT_CKEXT` and
+`FT2_GENDEFER|FT2_SOFTCLK` — and `refSearch` installs both bytes. It is
+constructed, never peeked from the image: a reference derived from the thing it
+checks agrees by definition, which is how both of this week's bad gates
+happened. `TestEngineParity` then separately requires the BOOTED image to equal
+that construction, and fails with "this gate is comparing two different ENGINES
+and can say nothing about the two DRIVERS" if either side ever moves again.
+Mutation-checked: forcing `shippedConfig` back to `$1F` fires that fatal.
+
+The Sicilian depth-5 subtest is **un-skipped**; all four cases pass, and the
+`known`/`t.Skip` machinery is gone from the table so a future divergence cannot
+be parked there quietly.
+
+`m8.bin` 4441 B — **unchanged**. UI growth room stays 423 B, SD spare stays
+94 B. `engine.bin` byte-identical, so `TestMicroAB` fingerprints do not move.
+
+## 2026-07-29 — the opening book's 32-bit random was really 24: `uibookrnd` had GF(2) rank 24, fixed for ZERO bytes
+
+`asm/m8.s uibookrnd` turns the keystroke collector into the book's 32-bit
+weighted-pick random. Its last byte read `ENTROPY`'s **low** half:
+
+    BOOKRND+3 = ENTROPY0 EOR ENTCNT1 = BOOKRND+0 EOR BOOKRND+2
+
+so `ENTROPY`'s HIGH byte reached `BOOKRND` **nowhere at all**. The routine is a
+fixed pattern of EORs, hence affine over GF(2), hence entirely described by a
+32x32 bit matrix — and that matrix had **rank 24**. The book drew from 2^24
+values however good the collector got, and nothing downstream could tell: it
+still picks a legal move, and the loss shows only as openings recurring more
+often than they should.
+
+Reading `ENTROPY+1` instead removes it. Both operands are absolute, so the fix
+is **0 bytes** (`m8.bin` 4441 → 4441); it is only possible because `ENTROPY`
+widened to 16 bits earlier today. The map is now a bijection:
+
+    B0 = E0          ->  E0 = B0
+    B1 = C0 EOR E0   ->  C0 = B1 EOR B0
+    B2 = C1          ->  C1 = B2
+    B3 = E1 EOR C1   ->  E1 = B3 EOR B2
+
+**Gated**, because an affine map's rank is exactly the thing no behavioural
+test would ever notice: `internal/ui TestBookRandomIsFullWidth` runs the real
+`uibookrnd` under the emulator on 33 inputs (0 and the 32 unit vectors),
+recovers the matrix, and requires rank 32. Mutation-checked: restoring the old
+operand reports rank 24.
+
+## 2026-07-29 — ~~★ OPEN BUG: the UI's ID driver and the engine's `iterate` DISAGREE at depth 5~~ — SUPERSEDED, see the entry above
+
+> **★ THIS ENTRY'S HEADLINE CONCLUSION IS WRONG AND IS KEPT ONLY AS A RECORD.**
+> There is no divergence between `uidrive` and `iterate`. The reference search
+> this entry compares against was running FEATURES `$1F`, not the shipped
+> `$5F`, so the two sides were different ENGINES, not different drivers. What
+> this entry gets right and is worth keeping is the SEED diagnosis below —
+> `SEED` is `evseed`'s live PRNG state, the dither must be off on both sides,
+> and the gate really was passing by luck before that was fixed.
 
 Found while fixing the entropy collector (entry below); **not caused by it**.
 
@@ -43,7 +181,8 @@ enforce does not hold, and that is worth knowing before the disk ships.
 
 The subtest is `t.Skip`ped with the full explanation inline in the case table,
 so it stays visible; the other three are now a real gate rather than a lucky
-one. **Fixing `uidrive` is not attempted here** — it is UI/engine driver work
+one. (Both are now moot: the subtest is un-skipped and passing — see above.)
+**Fixing `uidrive` is not attempted here** — it is UI/engine driver work
 with its own risk, and this task was the entropy collector.
 
 ## 2026-07-29 — the entropy collector's fold CYCLED on quantized input (longest possible orbit: 16). Fixed for +13 B. **Blast radius on past measurements: NONE**, and that is measured, not assumed.

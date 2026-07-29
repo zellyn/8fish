@@ -557,7 +557,24 @@ adaptmaybe:
         lda PREVSC1
         sbc SCORE+1
         sta T1
-        bmi @nopanic            ; scoreDrop < 0 -> no panic
+        ; The subtract can OVERFLOW: root scores span [-MATE, MATEZONEHI*256)
+        ; = [-30000, +29695] (idok reports a WINNING mate before we are called,
+        ; but a LOSING mate falls straight through to here), so the true drop
+        ; reaches +-59695 and does not fit in 16 bits. The sign of the true
+        ; difference is N eor V, never N alone: "up 3 pawns, now getting mated"
+        ; (drop >= +32768) wraps NEGATIVE and would suppress the panic exactly
+        ; when it is most wanted, and the mirror image, a losing mate that
+        ; evaporates, wraps POSITIVE into a spurious one. Matches the signed
+        ; window compares in search.s, and mirror.SearchTimed, which computes
+        ; the drop full-width. (T1:T0 keep the WRAPPED value for the @easy
+        ; |drop| <= 30 test below: harmless, since a wrap needs |true drop| >
+        ; 32767 and the widest reachable one is 59695, so the wrapped magnitude
+        ; is always >= 65536-59695 = 5841 and can never read as flat.)
+        bvc @nov                ; V=0: A is the true high byte
+        eor #$80                ; V=1: N eor V is the true sign, and the true
+        bmi @nopanic            ;  |drop| is >= 32768, so a positive one is a
+        bpl @dopanic            ;  panic outright (one of these two is taken)
+@nov:   bmi @nopanic            ; scoreDrop < 0 -> no panic
         bne @dopanic            ; high byte > 0 -> drop >= 256 >= 25 -> panic
         lda T0
         cmp #25

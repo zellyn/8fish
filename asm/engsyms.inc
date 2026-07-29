@@ -7,7 +7,7 @@
 
 ENG_PCOSTHI        = $42BC   ; FT2_SOFTCLK per-phase cost table, high bytes
 ENG_PCOSTLO        = $42A3   ; FT2_SOFTCLK per-phase cost table, low bytes
-ENG_LCCODE_LOAD    = $BB59   ; where the aux-bank TT primitives sit in the engine image
+ENG_LCCODE_LOAD    = $BB61   ; where the aux-bank TT primitives sit in the engine image
 ENG_LCCODE_RUN     = $D000   ; where they must be copied to ($D000)
 ENG_LCCODE_SIZE    = $0041   ; how many bytes to copy
 ENG_adaptaborthi   = $BA7A   ; FT2_ADAPT hard-abort override (ABORTL = 2*CEILMAX)

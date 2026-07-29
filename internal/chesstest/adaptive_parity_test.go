@@ -116,6 +116,108 @@ func TestAdaptiveParity(t *testing.T) {
 	}
 }
 
+// TestAdaptiveMateScoreDrop is the mate-range half of the FT2_ADAPT parity
+// gate. TestAdaptiveParity only ever feeds scores in +-200cp, so it can never
+// straddle the 16-bit signed range; root scores really span [-MATE, MATEZONEHI)
+// = [-30000, +29695], and the difference of two of them reaches +-59695, which
+// does NOT fit in 16 bits.
+//
+// scoreDrop = PREVSC - SCORE is computed as a bare 16-bit subtract in
+// adaptmaybe, so it wraps whenever |drop| > 32767; the panic test must read the
+// TRUE sign (N eor V), not the wrapped one. Both directions are reachable in a
+// real search:
+//
+//   - "mate found against us": we were up 3 pawns last iteration and this
+//     iteration sees a forced mate. True drop >= +32768 (a catastrophic drop,
+//     the textbook panic case) wraps NEGATIVE -> the panic is SUPPRESSED
+//     exactly when the engine most needs the extra time.
+//   - "mate escaped": last iteration was a losing mate, this one is +3cp or
+//     better. True drop <= -32769 (a huge IMPROVEMENT) wraps POSITIVE -> a
+//     SPURIOUS panic raises the movable ceiling to CEILMAX.
+//
+// The winning-mate early exit at idok (SCORE+1 >= MATEZONEHI) catches neither:
+// it only fires on a WINNING mate for the side to move, and in both cases above
+// the mate score is the LOSING one, which falls straight through to adaptmaybe.
+//
+// The Go mirror (mirror.SearchTimed, transcribed here as policyStep) computes
+// the drop in full-width int, so it is exact; before the fix this test is a
+// genuine asm/mirror divergence, not a change of intent.
+func TestAdaptiveMateScoreDrop(t *testing.T) {
+	bin := loadEngine(t)
+	labels, err := ParseLabelFile("../../asm/engine.lbl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapt := labels["adaptmaybe"]
+	if adapt == 0 {
+		t.Fatal("adaptmaybe label not found")
+	}
+
+	const (
+		base       = 100
+		ceilMax    = 4 * base // 400
+		unstTarget = 3 * base // 300
+		minSpend   = base / 4 // 25
+	)
+
+	// Root-score extremes actually producible by the search (asm defs.inc:
+	// MATE = 30000, MATEZONEHI = $74 so SCORE <= $73FF = 29695 whenever
+	// adaptmaybe runs at all).
+	const (
+		lostMate = -29990 // mate against us in a handful of plies
+		wonHigh  = 29695  // the largest score that still reaches adaptmaybe
+	)
+
+	cases := []struct {
+		name             string
+		prevScore, score int16
+	}{
+		// --- the two wrapping cases (the defect) ---
+		{"mate-found-against-us", 3072, lostMate},  // true drop +33062
+		{"mate-found-big-edge", 20000, lostMate},   // true drop +49990
+		{"mate-escaped-to-edge", lostMate, 3072},   // true drop -33062
+		{"mate-escaped-to-won", lostMate, wonHigh}, // true drop -59685
+		{"widest-possible", wonHigh, -30000},       // true drop +59695
+		// --- boundary: the largest drops that still FIT in 16 bits ---
+		{"just-fits-positive", 2767, -30000}, // +32767
+		{"just-fits-negative", -30000, 2768}, // -32768
+		// --- non-wrapping mate-range controls (must be unchanged by the fix) ---
+		{"mate-to-mate", lostMate, -29980},
+		{"flat-in-mate-zone", lostMate, lostMate},
+		{"small-drop-near-zero", 40, 10},
+	}
+
+	for _, tc := range cases {
+		// Stable best move + depth 3, so the ONLY thing that can move the
+		// ceiling is the panic signal: any divergence is the score-drop test.
+		const stableFrom, stableTo = 0x12, 0x22
+		refCeil, _, refStop := policyStep(3, int(tc.score), int(tc.prevScore),
+			false, 1, base, 4*base, base, ceilMax, unstTarget, minSpend)
+		asmCeil, asmStop := runAdaptStep(t, bin, defs, labels, adapt, adaptStep{
+			curDepth:  3,
+			score:     tc.score,
+			prevScore: tc.prevScore,
+			bestFrom:  stableFrom, bestTo: stableTo,
+			prevFrom: stableFrom, prevTo: stableTo,
+			stable:  1,
+			ceiling: base,
+			spent:   4 * base,
+			ceilMax: ceilMax, unstTarget: unstTarget, minSpend: minSpend,
+		})
+		trueDrop := int(tc.prevScore) - int(tc.score)
+		if asmCeil != refCeil || asmStop != refStop {
+			t.Errorf("%s: prev=%d score=%d trueDrop=%d (wraps to %d): "+
+				"asm(ceil=%d stop=%v) != mirror(ceil=%d stop=%v)",
+				tc.name, tc.prevScore, tc.score, trueDrop,
+				int16(uint16(tc.prevScore)-uint16(tc.score)),
+				asmCeil, asmStop, refCeil, refStop)
+			continue
+		}
+		t.Logf("%-22s prev=%6d score=%6d trueDrop=%7d -> ceil=%d stop=%v (parity)",
+			tc.name, tc.prevScore, tc.score, trueDrop, asmCeil, asmStop)
+	}
+}
+
 // policyStep is the mirror's per-iteration effort policy, transcribed from
 // internal/mirror/effort.go SearchTimed (the adaptive-aggr config: PanicDrop
 // 25 -> 4*base, Unstable -> 3*base, MaxEighths 32, EasyStop StableIters 2 /

@@ -26,7 +26,18 @@ import sys
 from collections import Counter
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-EXPECTED_SHARDS = 12  # seeds per arm
+# Completeness is checked as "every shard PRESENT ran to SYMMATCH-DONE, and
+# both arms scored the same number of games" -- NOT against a hardcoded shard
+# count. The shard count is the launcher's business (SEEDS is overridable and
+# defaults to 6), and hardcoding 12 here made a COMPLETE 252-games-per-arm run
+# report "6/12 shards finished, RUN INCOMPLETE".
+#
+# This is deliberately not a relaxation. The real failure mode is a shard that
+# DIED PART-WAY -- which is exactly what happened when an agent was killed
+# mid-gauntlet -- and a truncated shard is caught here in two ways a shard
+# count would miss: it never prints SYMMATCH-DONE, and it leaves the arms with
+# unequal game counts, which breaks the pairing the whole design rests on.
+MIN_GAMES_PER_ARM = 200  # below this the interval is too wide to be worth quoting
 
 
 def elo(p):
@@ -162,7 +173,16 @@ def main():
                 a.add_log(f)
         arms[arm] = a
 
-    done = all(a.finished == EXPECTED_SHARDS for a in arms.values())
+    # A shard is "present" if it has a log at all; "finished" if that log
+    # carried a session summary. Any present-but-unfinished shard is a
+    # truncated run and disqualifies the Elo.
+    present = {k: len([d for d in sorted(glob.glob(os.path.join(ROOT, k + "-*")))
+                       if os.path.exists(os.path.join(d, "symmatch.log"))])
+               for k in ("off", "soft")}
+    done = (all(a.finished == present[k] and a.finished > 0
+                for k, a in arms.items())
+            and arms["off"].n == arms["soft"].n
+            and min(a.n for a in arms.values()) >= MIN_GAMES_PER_ARM)
     print("=" * 78)
     print("0. COMPLETENESS  (a partial gauntlet is biased: short decisive games")
     print("   finish first, and the soft arm draws more)")
@@ -170,7 +190,10 @@ def main():
     for k in ("off", "soft"):
         a = arms[k]
         print("   arm %-5s %2d/%2d shards finished, %4d games scored"
-              % (a.name, a.finished, EXPECTED_SHARDS, a.n))
+              % (a.name, a.finished, present[k], a.n))
+    if arms["off"].n != arms["soft"].n:
+        print("   *** ARMS UNEQUAL (%d vs %d): the pairing is broken ***"
+              % (arms["off"].n, arms["soft"].n))
     if not done and not partial_ok:
         print("\n   *** RUN INCOMPLETE — refusing to print Elo. Re-run with --partial")
         print("       to see interim spend/audit numbers only. ***")

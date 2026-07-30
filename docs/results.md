@@ -3,6 +3,68 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-29 — ★★ THE DEVICE CONFIGURATION MEASURED: **+161 [+126, +199]** vs Sargon III, and the soft clock costs NOTHING once ponder is removed
+
+504 games, paired, ponder removed from **both** sides — the configuration the
+disk actually runs. `runs/noponder-paired/`, analysed by its own `analyze.py`.
+
+**SPEND SYMMETRY FIRST** (this is what invalidated an earlier measurement, so
+it is read before any Elo):
+
+| arm | 8fish Gcyc | Sargon Gcyc | spend_ratio | adherence | ponder |
+|---|---:|---:|---:|---:|---:|
+| `off` (exact clock) | 367.0 | 385.1 | **0.9529** | 0.9551 | 0 |
+| `soft` (**the device**) | 353.4 | 369.9 | **0.9554** | 0.9633 | 0 |
+
+Delta **+0.25%** of compute. 8fish takes *less* than Sargon in both arms, so
+neither arm bought its result with free cycles. Ponder confirmed zero on both
+sides. Per-move re-derivation matches the harness accumulators to 0.03%.
+
+**RESULT:**
+
+| arm | games | W-L-D | score | Elo [95% CI] |
+|---|---:|---|---:|---|
+| `soft` — **the shipped device config** | 252 | 137-28-87 | 71.63% | **+161 [+126, +199]** |
+| `off` — exact clock | 252 | 154-52-46 | 70.24% | +149 [+109, +193] |
+
+**Clock cost (soft − off): +11.7 Elo ± 28.2, 95% CI [−43.5, +66.9], z = +0.42,
+p = 0.709.** The soft clock costs nothing measurable. If anything the device
+arm scored higher, not significantly.
+
+**This resolves the −64 as ponder-specific.** The 2026-07-29 paired gauntzlet
+found the soft arm 64 Elo behind *with both engines pondering*, where the soft
+arm underpondered (ratio 0.8916 vs 0.9374) because the ponder window is
+governed by the same estimate. Remove ponder from both sides and the gap
+vanishes. Being careful about how much this settles: the old CI was
+[−120, −8] and excluded zero, while this one is [−43.5, +66.9] and contains
+it — so part of the −64 was likely noise as well as ponder. What is now solid
+is that **the shipped configuration is not paying a clock penalty.**
+
+**★ COMPARABILITY — do not put +161 next to +116.** Removing ponder weakens
+BOTH engines, and Sargon relies on it more (at its normal levels it ponders on
+the player's time). So the no-ponder gauntlet is a *different benchmark*, not
+a better estimate of the same quantity. Quote it as: **in a no-ponder match
+the device configuration scores +161 [+126, +199]**; the ponder-enabled
+harness figure remains +116 [+75, +160]. It is the device-faithful number
+because the disk never ponders — but it is not the old number re-measured.
+
+**AUDIT — the cleanest Sargon run to date.** Both arms: **0** CrossCheckHistory
+desyncs, **0** unreadable/illegal markers, **0** Hard-Mode/LEVEL-9 violations
+(all 504 games verified), **0** quirk adjudications (down from 10), and **0**
+games reaching the move-99 column-overflow zone (longest 185/189 plies).
+Terminations are almost all real chess: 137/154 checkmate wins, 28/52
+checkmate losses, 82/41 threefold, 2 insufficient material.
+
+**Honest gap:** **8 of 504 games (3 soft, 5 off) have no TERMINATION line** and
+are unclassified. They are counted in the W-L-D totals from the session
+summaries, so the Elo is over all 252 per arm, but their endings are not
+attributed. Not chased down; worth a look if anyone revisits this rig.
+
+Note the shape difference that persists: the soft arm draws far more (87 vs
+41) and loses far less (28 vs 52) — the same "converts won positions less
+reliably" signature seen before, but here it nets positive rather than
+negative.
+
 ## 2026-07-29 — ★ RESOLVED, and it was never a driver bug: the "uidrive vs iterate" divergence was the REFERENCE running a DIFFERENT ENGINE ($1F vs the shipped $5F)
 
 Closes the OPEN BUG filed earlier today (entry below). **The invariant holds.**

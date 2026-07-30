@@ -1345,6 +1345,10 @@ sdomove:
         sta LVREJ               ;  about this one" - moves at nodes that are
                                 ;  not in check never reach sdevade at all
 .endif
+.ifdef PINVERIFY
+        lda #0                  ; ... and "the ray test claimed nothing"
+        sta PVSAY
+.endif
         ldx PLY
         lda INCHK,x
         bne sdevade
@@ -1366,6 +1370,7 @@ sdomove:
         asl
         tay
         lda PIECESQ,y           ; mover's king square
+        sta ATSQ
         sec
         sbc FROM
         clc
@@ -1373,7 +1378,29 @@ sdomove:
         tay
         lda ATTACKTAB,y
         and #ATK_DIAG|ATK_ORTHO
-        bne slfull              ; from-square king-aligned: maybe pinned
+        beq spinleg             ; not king-aligned: provably legal
+        ; SINGLE-RAY PIN TEST (structural win #2, 2026-07-30). The mover
+        ; leaves a square that IS on a ray through its own king, so it
+        ; might expose it - but only along THAT ray, and the parent was
+        ; not in check, so one walk answers the whole question. This used
+        ; to be `bne slfull`: a full 16-slot attacked() scan for 13,160 of
+        ; the workload's 23,641 slfull calls (56%), of which 99.3% turned
+        ; out LEGAL - 4.25 Mcyc, 3.0% of everything, spent proving moves
+        ; legal. See pinray (board.s) for the argument and the exact
+        ; contract.
+        sta ATBITS              ; the king->FROM ray's orientation
+        jsr pinray              ; Y = the (king - FROM) difference index
+        bcs slfull              ; the ray now ends on an enemy slider:
+                                ;  CONFIRM with the real scan. Only the
+                                ;  ACCEPTING direction skips work, so only
+                                ;  it has to be sound; and this costs 91
+                                ;  scans out of 13,160 (0.7%).
+spinleg:
+.ifdef PINVERIFY
+        lda #1                  ; the ray test claims LEGAL. Verify it: fall
+        sta PVSAY               ;  into the old make + attacked() path and
+        jmp slfull              ;  trap (104) if that disagrees.
+.endif
         jmp slegal              ; provably legal
 
 ; ---------------------------------------------------------------
@@ -1474,6 +1501,25 @@ slfull: ; full check: mover must not leave their king attacked
         jsr attacked
         bcc slegal
         jsr unmake
+.ifdef PINVERIFY
+        ; ILLEGAL, as make + attacked() sees it. If the single-ray pin test
+        ; called this move LEGAL (PVSAY = 1), the ray test is UNSOUND in the
+        ; only direction that matters - the accepting one, which in the
+        ; shipped image skips this scan entirely - so kill the run.
+        lda PVSAY
+        eor PVFORCE             ; test hook: 1 turns every UNCLAIMED-and-illegal
+        beq pvnotrap            ;  move into a manufactured disagreement, which
+        lda #104                ;  is how the trap MECHANISM itself gets proven
+        sta EXIT_TRAP
+pvnotrap:
+        lda PVSAY
+        bne pvskipi             ; claimed legal and illegal: trapped above
+        inc PVNILL              ; illegal and NOT claimed legal: a king move,
+        bne pvskipi             ;  an ep capture, an in-check node, or a move
+        inc PVNILL+1            ;  the ray test itself called exposed. That is
+pvskipi:                        ;  the population PVFORCE inverts, so a corpus
+                                ;  has to contain some for the trap proof.
+.endif
 .ifdef LEGALVERIFY
         ; ILLEGAL, as make + attacked() sees it. Every filter verdict is
         ; acceptable here - rejecting was right, accepting was merely
@@ -1499,6 +1545,18 @@ slj:
 .endif
 sloopj: jmp sloopret
 slegal:
+.ifdef PINVERIFY
+        ; LEGAL, confirmed by make + attacked(). Count the agreements so the
+        ; Go side can require the assertion to have been REACHED (the honest
+        ; limit CKVERIFY/GDVERIFY taught: never-fired and cannot-fire look
+        ; identical from outside).
+        lda PVSAY
+        beq pvskipl
+        inc PVNLEG
+        bne pvskipl
+        inc PVNLEG+1
+pvskipl:
+.endif
 .ifdef LEGALVERIFY
         ; LEGAL. A move the filter REJECTED reaching here is precisely the
         ; unsoundness the filter must never have, so kill the run.

@@ -567,6 +567,33 @@ LVNPERM    = $021B      ; ... filter accepted, make+attacked says ILLEGAL
 LVNLEG     = $021D      ; ... filter accepted, make+attacked says LEGAL
 LVNFALL    = $021F      ; ... in-check moves the filter DECLINED to judge
                         ;  (king move, ep capture, or CHECKERSQ == NOSQ)
+; The `ca65 -D PINVERIFY` debug variant does the same job for the SINGLE-RAY
+; PIN TEST (board.s pinray, called from search.s's lazy-legality gate): every
+; move the ray test calls LEGAL still goes through make + attacked(), and a
+; disagreement exits 104. It borrows $0227-$022C, free driver scratch that
+; the shipped image never touches (LEGALVERIFY has $0218-$0222 and a
+; PINVERIFY build is a separate assembly, so the two never share bytes).
+PVSAY      = $0227      ; PINVERIFY: this move's RAY-TEST verdict.
+                        ;  0 = the gate did not judge it (in check, a king
+                        ;      move, or an ep capture: it went to slfull for
+                        ;      one of the pre-existing reasons)
+                        ;  1 = the ray test claimed LEGAL, which in the
+                        ;      shipped image SKIPS attacked() - so make +
+                        ;      attacked() must agree, or exit 104.
+                        ;  (there is no "claimed illegal" value: the shipped
+                        ;   gate sends those to attacked() too, so only the
+                        ;   accepting direction can ever be unsound)
+PVNLEG     = $0228      ; PINVERIFY: 16-bit LE. Moves the ray test called
+                        ;  legal AND attacked() confirmed legal.
+PVNILL     = $022A      ; ... moves attacked() found illegal that the ray test
+                        ;  did NOT claim legal (a king move, an ep capture, an
+                        ;  in-check node, or a move the ray test itself called
+                        ;  exposed): the population PVFORCE manufactures a
+                        ;  disagreement out of, so a corpus must contain some.
+PVFORCE    = $022C      ; PINVERIFY: XOR mask applied to PVSAY before the trap
+                        ;  compare. 0 in a real run; TestPinRayVerify pokes 1
+                        ;  to turn every declined-and-illegal move into a
+                        ;  manufactured disagreement and require exit 104.
 LVFORCE    = $0221      ; LEGALVERIFY: XOR mask applied to LVREJ before the
                         ;  trap compare. 0 in a real run; TestEvasionFilter-
                         ;  Verify pokes 3 to turn every ACCEPTED-and-legal
@@ -830,9 +857,28 @@ EXIT_TRAP   = $BFFF
 ; rather than a refit: the SHAPE of the curve is unchanged, only its scale.
 ; SOFTC/SOFTK and the per-octave margins are therefore untouched, and the
 ; measured adherence returns to the values the last refit gated.
+;
+; ★ RESCALED AGAIN 2026-07-30, /1.0278, FOR THE SINGLE-RAY PIN TEST. Same
+; mechanism, same instrument, same conclusion. asm/board.s pinray stopped
+; running a 16-slot attacked() scan to prove king-aligned movers legal, which
+; took another ~2.7% off the true cost of a node in game conditions:
+;
+;   octave   est/truth before   est/truth after   ratio
+;   4000 ms       0.9249            0.9528        1.0302
+;   30000 ms      1.0123            1.0380        1.0254
+;
+; and again the engine stopped early rather than banking the win: at 30 s the
+; paired spend fell 0.9260 -> 0.8933, outside TestPairedClockProbe's
+; [0.90, 1.10] gate. The two octaves agree on the factor to within 0.5%, so
+; this is a RESCALE for the same reason as the last one. THE STANDING LESSON:
+; every structural win that removes per-node work makes these two numbers
+; stale, invisibly to every tree-identity check, because the estimated clock
+; is the only thing the shipped device runs on. Re-measure the probe as part
+; of the change, not after someone notices the Elo went missing.
 SOFTSCALE = 8
-SOFTA     = 25357       ; 3169.6 cycles/node at phase 0  (raw game fit /1.0845)
-SOFTB     = 587         ;  +73.4 cycles/node per unit of phase, up to SOFTK
+SOFTA     = 24671       ; 3083.9 cycles/node at phase 0  (raw game fit
+                        ;  /1.0845 /1.0278)
+SOFTB     = 571         ;  +71.4 cycles/node per unit of phase, up to SOFTK
 SOFTC     = 0           ;  flat above SOFTK: past ~15 the measured curve is
                         ;  level, and an unconstrained fit only reads noise
                         ;  out of it (a falling tail would under-price the

@@ -840,6 +840,81 @@ cksetcx:
         lda #1
         sta INCHK,x
         jmp ckdone
+
+; ---------------------------------------------------------------
+; pinray: the SINGLE-RAY PIN TEST that replaces attacked() for the
+; king-aligned movers of search.s's lazy-legality gate (2026-07-30
+; structural win #2). POST-make: FROM is empty, the mover is on TO, and
+; the parent was NOT in check.
+;
+; THE ARGUMENT. A move can only leave its own king attacked by opening a
+; line, and the only line a plain move opens is the one through the square
+; it VACATED (the capture square becomes occupied by the mover, so it opens
+; nothing - which is why en passant, whose victim is not on TO, is excluded
+; by the caller, as are king moves and castles, which move the king itself).
+; The parent position was not in check, so no OTHER attack on the king can
+; exist. Therefore "is my king attacked after this move" is exactly "does
+; the ray from the king through FROM now end on an enemy slider of the right
+; kind" - one walk, not attacked()'s 16-slot scan.
+;
+; That also settles the two cases a pre-make version needs extra logic for,
+; with no extra code: a pinned piece moving ALONG its pin ray leaves itself
+; (on TO) as the ray's first blocker, and a piece moving to the far side of
+; its own king lands off this ray and is not seen at all.
+;
+; In:  ATSQ    = the MOVER's king square
+;      ATBITS  = ATTACKTAB[ATSQ - FROM + $77] & (ATK_DIAG|ATK_ORTHO), i.e.
+;                the king->FROM ray's orientation, already known nonzero
+;      Y       = ATSQ - FROM + $77 (the same difference index)
+;      SIDE    = the OPPONENT (make has flipped it), so a piece whose color
+;                equals SIDE is an enemy and anything else blocks the ray
+; Out: carry SET   = the ray now ends on an enemy slider: the king is
+;                    exposed, so the move is illegal
+;      carry CLEAR = provably legal
+; Clobbers A,X,Y,ATDELTA. Measured 2.81 BOARD probes per call.
+;
+; SAME SHAPE AS cknodir above, deliberately not the same code. cknodir walks
+; out from the ENEMY king to find a DISCOVERED CHECK, so its color test has
+; the opposite polarity and its two exits record INCHK/CHECKERSQ instead of
+; returning a flag. Folding the two into one jsr'd routine was measured and
+; rejected: it saves ~31 image bytes but taxes cknodir, which the profile
+; workload enters 35,942 times against this routine's 13,160, for a net
+; +359k cycles (0.25% of all cycles, ~13% of this change's whole win).
+; Keep them in step by hand; a ca65 -D PINVERIFY build and
+; TestPinRayDifferential are what actually enforce this one.
+;
+; UNMASKED BOARD reads are safe here for the ckdwalk reason: every step is
+; `and #$88`-tested before the read (see the off-board dead-space contract
+; at BOARD in defs.inc).
+pinray:
+        lda #0                  ; step from the KING toward FROM. Y indexes
+        sec                     ;  the FROM->king direction, so negate it
+        sbc DELTATAB,y          ;  rather than recompute the difference.
+        beq prno                ; (defensive: the tables cannot disagree)
+        sta ATDELTA
+        lda ATSQ
+prwalk: clc
+        adc ATDELTA
+        tax
+        and #$88
+        bne prno                ; ran off the board: nothing behind FROM
+        lda BOARD,x
+        beq prnext              ; empty (FROM itself reads empty here)
+        eor SIDE                ; first piece on the ray: whose?
+        and #COLORMASK
+        bne prno                ; the mover's own side: the ray is blocked
+        lda BOARD,x
+        and #TYPEMASK
+        tay
+        lda TYPEATKTAB,y        ; an enemy slider matching this ray's
+        and ATBITS              ;  orientation? (a knight/king/pawn behind
+        bne pryes               ;  FROM has no bit in common with ATBITS)
+prno:   clc
+        rts
+prnext: txa
+        jmp prwalk
+pryes:  sec
+        rts
 .endif
 
 ; ---------------------------------------------------------------

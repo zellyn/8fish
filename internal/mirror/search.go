@@ -699,8 +699,26 @@ func (e *Engine) moveLoop() int {
 				continue
 			}
 			// Make + legality: the mover must not leave their king
-			// attacked. (The asm's lazy-legality fast path is a pure
-			// optimization with identical results.)
+			// attacked.
+			//
+			// DELIBERATELY NOT MIRRORED, unlike the evasion filter above:
+			// the asm settles this WITHOUT a full scan for most movers —
+			// the lazy-legality fast path (a non-king, non-ep mover whose
+			// FROM square is not on a ray through its own king cannot
+			// expose it) and, since 2026-07-30, the SINGLE-RAY PIN TEST
+			// (asm/board.s pinray) for the movers that ARE aligned. Both
+			// are POST-make and tree-identical, so they move no quantity
+			// any parity gate compares: `make` is unchanged (the ray test
+			// runs after it), and Cyc.Attacked is priced at ZERO in
+			// DefaultCycleCosts — attacked() never entered the fit,
+			// precisely because its mirror/asm per-node frequency already
+			// diverged (see cycles.md). What the pin test DID move is the
+			// asm's true cycles per node, ~2.5% cheaper, so the fitted
+			// coefficients now over-price the asm by about that much; that
+			// shows up as TestBudgetModeParity's reported spend ratio, not
+			// as a divergence. Cyc.Attacked / Cyc.AttackedAll remain
+			// mirror-side diagnostics and are NOT comparable to the asm's
+			// `attacked` probe count.
 			e.make(m)
 			moverKing := p.PieceSq[int(p.Side^ColorMask)<<1]
 			if e.attacked(moverKing, p.Side) {

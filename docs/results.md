@@ -3,6 +3,195 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-30 — ★ STRUCTURAL: single-ray pin test replaces `attacked()` for king-aligned movers, **−2.48% of all cycles for ZERO disk bytes**, tree-identical, no SPRT
+
+Structural win #2 from the 2026-07-30 slack hunt, and the cheapest one yet:
+the whole change fits in the `TABLES` page-alignment tail, so **the Standard
+Delivery image does not grow by one byte** and SD spare stays at 94 B.
+
+| | before | after | delta | predicted |
+|---|---:|---:|---:|---:|
+| TestStructHunt/R5 workload (6 FENs) | 142,947,168 | 139,403,400 | **−3,543,768 (−2.479%)** | +2.3% |
+| TestMicroAB (18 fixed-depth searches) | 3,365,500,241 | 3,249,555,705 | **−115,944,536 (−3.445%)** | — |
+| `attacked` entries (R5) | 28,574 | 15,505 | **−13,069 (−45.7%)** | — |
+| `slfull` entries (R5) | 23,641 | 10,572 | −13,069 | — |
+| engine.bin / SD image | 31,906 / 44,962 B | 31,906 / 44,962 B | **0 / 0** | — |
+
+Same work in 97.5% of the cycles = **+2.54% more search per unit of clock**
+(and +3.57% on the MicroAB workload, which is more full-width).
+
+**THE WASTE.** `slfull`'s legality test asked "is my king attacked after this
+move" with `attacked()`, a 16-slot piece-list scan. 13,160 of the workload's
+23,641 `slfull` calls (56%; 43% of the 30,894 there were before yesterday's
+evasion filter, which is the figure the hunt priced) were for movers whose FROM
+square lies on a ray through their own king — the `bne slfull` arm of the
+lazy-legality gate — and **99.3% of them turned out LEGAL**. 13,069 full
+scans, 325 cycles each, 4.25 Mcyc: **3.0% of everything, spent proving moves
+legal.**
+
+**THE REPLACEMENT** (`asm/board.s` `pinray`, 50 bytes). A move can only leave
+its own king attacked by opening a line, and the only line a plain move opens
+is the one through the square it VACATED — the capture square becomes occupied
+by the mover, so it opens nothing. The parent was not in check (that class goes
+to `sdevade`), so no other attack can exist. So the whole question is "does the
+ray from the king through FROM now end on an enemy slider of the right kind":
+one walk from the king, **2.81 BOARD probes per call measured**. Measured
+end-to-end, an accepted king-aligned move went from **1,233 to 963 cycles**
+(sdomove → verdict, make included), so the walk plus its `jsr`/`rts` and two
+setup stores costs about **88 cycles against the scan's 325** — better than the
+hunt's 50-60 cyc estimate for the walk once the gate's own 33-cycle alignment
+lookup is credited to it rather than counted twice.
+
+Running it POST-make is what makes it small. A pre-make version needs extra
+logic for a pinned piece moving ALONG its pin ray (legal) and for one moving
+to the far side of its own king; post-make both fall out for free — the mover
+on TO simply IS the ray's first blocker in the first case, and is not on the
+ray at all in the second.
+
+**ONLY THE ACCEPTING DIRECTION IS LOAD-BEARING, deliberately.** `bcs slfull`
+sends a "the ray is exposed" verdict to the real `attacked()` scan for
+confirmation, because there are only **91** of them against 13,069 accepts
+(0.7%) — 30k cycles to keep the rejecting direction out of the trust boundary
+entirely. So a too-STRICT ray test costs 325 cycles; only a too-PERMISSIVE one
+could corrupt a search. (The differential asserts both anyway: a wrong strict
+verdict means the rule has drifted.)
+
+**REUSE, MEASURED AND DECLINED.** `pinray` is the same ray-walk shape as
+`cknodir`'s discovered-check walk, with the color test's polarity inverted and
+different exits. Folding them into one `jsr`'d routine was costed: it saves
+~31 image bytes and taxes `cknodir`, which this workload enters **35,942**
+times against `pinray`'s 13,160, for **+359k cycles (0.25% of everything,
+~13% of this change's whole win)**. And the 31 bytes buy nothing *today*: both
+versions fit the page tail, so both cost the disk zero. What sharing would buy
+is a bigger tail for the NEXT change (140 B instead of 109 B), which is worth
+less than a quarter percent of every search from here on. Two routines, one
+cross-reference comment that states the polarity difference, and
+`TestPinRayTables` + `PINVERIFY` as the things that actually keep them in step.
+Revisit if the tail ever becomes the binding constraint again.
+
+**TREE IDENTITY, measured.** Every tree-shape counter is byte-identical:
+`search`, `squiesce`, `snode`, `snodeq`, `eval`, `generate`, `generateq`,
+`ttprobe`, `ttstore`, `scut`, `emitmove`, `sgo`, `sdomove`, `p1go`–`p4nkgo`,
+`sreploop`, `pawntermfull`, `genrecapent`, `sntry`, `srdefer`, `hashcatchup`,
+`cknodir`, `ckdwalk`, plus **`make` and `unmake` (38,117 both)** and every
+score and best move. `attacked` falls **alone**, by exactly the 13,069 accepts
+— which is this change's signature and, unlike the evasion filter's, does NOT
+move `make`, because the test runs after it. `TestMicroAB`'s 18 rows agree on
+score, move, `search`, `make`, `eval`, `ttprobe`, `generate` and disagree on
+`attacked` in all 18; the golden table's `attacked` column was re-recorded on
+that argument and nothing else was touched.
+
+**THE MIRROR DID NOT NEED IT — and that is verified, not assumed.** The
+evasion filter needed mirroring because it removed `make` calls, a parity-gate
+quantity. This one removes only `attacked()` calls, and `Costs.Attacked` is
+**0** in `DefaultCycleCosts`: `attacked` was never in the cycle fit, precisely
+because its mirror/asm per-node frequency already diverged (the mirror does
+not model the pre-existing lazy-legality fast path either). So mirror `Est` is
+unchanged, the trees are unchanged, and all five parity gates are green with
+no mirror code change. What DID move is the asm's true cost per node, so the
+fitted coefficients now over-price the asm by ~2.5% — visible as
+`TestBudgetModeParity`'s reported spend ratio and nothing else:
+
+| TestBudgetModeParity | before | after |
+|---|---:|---:|
+| spend ratio asm/mirror, median (all / pool / endgame) | 1.060 / 1.096 / 0.997 | 1.035 / 1.066 / 0.979 |
+| completed depth matched exactly (n=284) | 254 (89.4%) | **261 (91.9%)** |
+| depth skew (all / pool / endgame), tolerance ±n/10 | −14 / −7 / −7 | **−7 / −3 / −4** |
+| tree / move / score divergences | 0 / 0 / 0 | 0 / 0 / 0 |
+
+The ratio fell by exactly the cycles the asm stopped spending, and depth
+agreement IMPROVED — the mirror was already the slower twin, so making the asm
+cheaper moved the two together. No refit was made: a refit is
+`TestCycleModelFit`'s job against a regenerated `TestMicroABPhase` ground
+truth, and the frozen table it fits has not been regenerated since 5652dc1.
+`internal/mirror/search.go` records all of this so the next reader is not left
+to infer it.
+
+**AND IT MADE THE SOFT CLOCK STALE AGAIN — same mechanism, same instrument,
+same fix.** `FT2_SOFTCLK`'s table is a price PER NODE, so every structural win
+that removes per-node work invalidates it, invisibly to every tree-identity
+check, because the estimated clock is the only thing the shipped device runs
+on. In game conditions a node got **~2.7% cheaper**:
+
+| octave | est/truth before | after the pin test | after the rescale |
+|---|---:|---:|---:|
+| 4,000 ms | 0.9249 | 0.9528 | **0.9264** |
+| 30,000 ms | 1.0123 | 1.0380 | **1.0101** |
+
+Left alone the engine believed it had spent 2.7% more than it had and stopped
+early: at 30 s its paired spend against an exact-clock control fell 0.9260 →
+**0.8933**, outside `TestPairedClockProbe`'s [0.90, 1.10] equal-spend gate.
+`SOFTA`/`SOFTB` were therefore **rescaled by 1/1.0278** (25357 → 24671,
+587 → 571) — a RESCALE and not a refit because the two octaves agree on the
+factor to within 0.5% (1.0302 vs 1.0254), so `SOFTC`/`SOFTK` and every
+per-octave margin stand as measured:
+
+| octave | soft/exact before | after the pin test | after the rescale | depth agreement |
+|---|---:|---:|---:|---:|
+| 4,000 ms | 1.0125 | 0.9935 | **1.0066** | 0.963 |
+| 30,000 ms | 0.9260 | 0.8933 (FAIL) | **0.9143** | 0.978 |
+
+Paired completed depth at 30 s rose 3.753 → **3.944** on the same clock, which
+is the win arriving where it is supposed to. An INDEPENDENT replicate on a
+disjoint opening slice (`PROBE_FIRSTOPEN=8`, n=320 per octave) agrees that the
+rescaled clock is inside the band: soft/exact **0.9736** at 4 s and **0.9125**
+at 30 s, est/truth 0.9926 and 1.0332 — the same picture on positions the fit
+above never saw.
+
+**AN HONEST CAVEAT, MEASURED BOTH WAYS.** A THIRD slice
+(`PROBE_FIRSTOPEN=16`, and only n=160 because the opening list runs out) fails
+the 30 s band at soft/exact **0.8641** [0.8076, 0.9248]. That is NOT this
+change: the **baseline build fails the same slice harder, 0.8401**
+[0.7764, 0.9077]. So it is a property of that opening population plus half the
+sample size, it predates the pin test, and the rescaled build is the better of
+the two on it. The gate's own configuration (openings 0-7, n=320) and the
+disjoint 8-15 replicate both pass. Worth a look on its own account — the 30 s
+octave is the shipped level and 0.84-0.86 is real compute left on the table for
+some openings — but not as part of this change.
+
+**SPACE — the whole change is FREE on disk.** 59 bytes of CODE
+(`pinray` 50, the gate +9), and CODE's end moved $7B58 → $7B93 while `TABLES`
+stays page-aligned at $7C00: the growth landed entirely in the 168-byte page
+tail the last change left behind. engine.bin is **unchanged at 31,906 B**, the
+SD image at **44,962 B**, MARGIN 1 spare at **94 B** and MARGIN 2 UI room at
+**167 B**. The page tail is now 109 bytes; the next change that exceeds it
+costs a full 256-byte page against 94 B of spare and forces the chain-loader
+decision, so the base-raise lever staying exhausted is unchanged news.
+
+**GATES.** A `ca65 -D PINVERIFY` variant runs BOTH the ray test and the old
+make + `attacked()` path at every move the ray test accepts and exits 104 on
+disagreement — 206,700 accepted-and-confirmed-legal over the corpus, 0 traps —
+and it PROVES ITS OWN TRAP twice: `PVFORCE=1` manufactures a disagreement out
+of the declined-and-illegal population and must exit 104, and inverting
+`pinray`'s slider test in the source (a real break, not a hook) makes both
+`TestPinRayVerify` and `TestPinRayDifferential` fail loudly. The differential
+is exhaustive over a 32-position corpus: **208,895 gate-eligible moves,
+101,683 of them king-aligned so `pinray` actually ran, 0 disagreements** in
+either direction against an independent oracle (`shCheckers` on a
+Go-constructed post-move board) AND against a model of the rule written from
+the geometry rather than from the asm's tables. Coverage counters, all required
+nonzero: not-aligned 107,212, exposed verdicts 2,195, rays blocked by an own
+piece 67,718 / by a non-sliding enemy 8,695 / running off the board 23,075,
+**pinned piece moving ALONG its ray (legal) 2,128 versus OFF it (illegal)
+2,195**, promotions 370, white-king walks 114,161, black-king walks 94,734,
+king moves declined 32,658, en passant declined 71, in-check parents declined
+36,143 — and **all eight ray directions separately** (E 13,434, W 20,339,
+N 18,734, S 10,192, NE 12,045, SW 9,381, NW 10,396, SE 7,162), because a walk
+broken in one direction only is invisible to a corpus that never walks that
+way. `TestPinRayTables` additionally proves the two table facts the code's
+shortcuts rest on: `DELTATAB` is exactly antisymmetric about $77 over all
+4,032 on-board square pairs (`pinray` NEGATES one lookup instead of computing
+the reverse difference), and no non-slider type shares a bit with
+`ATK_DIAG|ATK_ORTHO` (so a knight, king or pawn behind the vacated square
+reads as "no pin" with no extra compare).
+
+All five parity gates (`TestFullGameMirrorParity`, `TestBudgetModeParity`,
+`TestIDIterationParity`, `TestSearchMirrorParity`, `TestTTSequenceParity`),
+the full `internal/chesstest` and `internal/mirror` suites, `internal/ui`,
+`internal/ucibridge`, `internal/sprt`, `internal/entropy`,
+`internal/delivery`: green. `TestSoftClockAccuracy` pool est/truth 1.023
+(unchanged, gate [0.85, 1.25]).
+
 ## 2026-07-30 — ★ STRUCTURAL: pre-make evasion filter + maintained pawn count, **−6.01% of all cycles**, tree-identical, no SPRT
 
 Two structural wins from the 2026-07-30 slack hunt, both **tree-identical**, so

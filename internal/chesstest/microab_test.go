@@ -16,7 +16,8 @@ type microABRow struct {
 }
 
 // microABGolden pins the tree. Recorded 2026-07-30, immediately after the
-// pre-make evasion filter landed.
+// pre-make evasion filter landed; the `attacked` column alone was re-recorded
+// later the same day for the SINGLE-RAY PIN TEST (see the argument below).
 //
 // WHY THIS TABLE EXISTS. This test used to only PRINT the fingerprint and
 // assert that the searches completed; its own comment said "run before and
@@ -36,25 +37,40 @@ type microABRow struct {
 // SAME amount. A change that moves score, move, or the node counts has
 // changed the TREE: that is a bug, or a feature needing an SPRT. Never a
 // silent table update.
+//
+// THE ONE UPDATE SO FAR, and the argument for it. The SINGLE-RAY PIN TEST
+// (2026-07-30, asm/board.s pinray) answers "does this move expose my own
+// king" by walking ONE ray instead of calling attacked(), for the movers whose
+// FROM square is on a ray through their king. Its signature is `attacked`
+// falling ALONE: score, move, search, make, eval, ttprobe and generate are
+// byte-identical in all 18 rows, and `make` in particular does NOT move,
+// because the test runs POST-make (unlike the evasion filter, whose signature
+// was make and attacked falling together by the same amount). The amount
+// `attacked` falls is exactly the number of king-aligned movers the ray test
+// accepted; the ~0.7% it rejects still take the full scan for confirmation, so
+// nothing in the accepting direction is taken on trust. Verified separately by
+// TestPinRayDifferential (208,895 gate moves, 0 disagreements in either
+// direction against an independent oracle) and by the PINVERIFY build.
+// Cycles over these 18 searches: 3,365,500,241 -> 3,249,555,705 (-3.44%).
 var microABGolden = []microABRow{
-	{0x1f, -40, "a3a4", 53273, 54507, 49821, 33618, 8495, 8384},
-	{0x1f, 354, "e1c1", 89096, 89726, 83136, 51213, 13262, 13935},
-	{0x1f, -38, "e2a6", 105654, 110128, 97883, 115313, 24985, 16827},
-	{0x1f, 84, "c3d5", 74627, 75467, 66420, 36192, 18723, 14615},
-	{0x1f, 96, "b4f4", 4807, 5455, 4141, 3327, 1366, 1262},
-	{0x1f, -18, "d4c6", 25474, 25617, 24065, 14142, 4039, 3734},
-	{0x07, -24, "a3a4", 55781, 56742, 50855, 32916, 9593, 8679},
-	{0x07, 349, "e1c1", 81098, 81509, 75289, 46082, 8006, 8165},
-	{0x07, 7, "d5e6", 106475, 110351, 99233, 92426, 5490, 7578},
-	{0x07, 77, "c3d5", 54679, 55196, 48443, 24602, 5634, 7681},
-	{0x07, 102, "b4f4", 2247, 2620, 1890, 1797, 432, 548},
-	{0x07, -29, "f1e2", 37634, 37897, 34672, 22066, 4745, 4274},
-	{0x00, -16, "a3a4", 18616, 18869, 16121, 12610, 1434, 2342},
-	{0x00, 343, "e1c1", 63364, 63660, 53890, 30022, 5452, 9207},
-	{0x00, 14, "d5e6", 14888, 15407, 11900, 18695, 2400, 2798},
-	{0x00, 64, "c3d5", 51639, 52101, 43276, 22799, 5121, 7859},
-	{0x00, 93, "b4f4", 1229, 1494, 854, 1090, 297, 318},
-	{0x00, -42, "f1e2", 29072, 29389, 25387, 15567, 2649, 3398},
+	{0x1f, -40, "a3a4", 53273, 54507, 49821, 11753, 8495, 8384},
+	{0x1f, 354, "e1c1", 89096, 89726, 83136, 12073, 13262, 13935},
+	{0x1f, -38, "e2a6", 105654, 110128, 97883, 71321, 24985, 16827},
+	{0x1f, 84, "c3d5", 74627, 75467, 66420, 13462, 18723, 14615},
+	{0x1f, 96, "b4f4", 4807, 5455, 4141, 2565, 1366, 1262},
+	{0x1f, -18, "d4c6", 25474, 25617, 24065, 1926, 4039, 3734},
+	{0x07, -24, "a3a4", 55781, 56742, 50855, 10464, 9593, 8679},
+	{0x07, 349, "e1c1", 81098, 81509, 75289, 13482, 8006, 8165},
+	{0x07, 7, "d5e6", 106475, 110351, 99233, 38507, 5490, 7578},
+	{0x07, 77, "c3d5", 54679, 55196, 48443, 7539, 5634, 7681},
+	{0x07, 102, "b4f4", 2247, 2620, 1890, 1352, 432, 548},
+	{0x07, -29, "f1e2", 37634, 37897, 34672, 2606, 4745, 4274},
+	{0x00, -16, "a3a4", 18616, 18869, 16121, 5917, 1434, 2342},
+	{0x00, 343, "e1c1", 63364, 63660, 53890, 7844, 5452, 9207},
+	{0x00, 14, "d5e6", 14888, 15407, 11900, 11908, 2400, 2798},
+	{0x00, 64, "c3d5", 51639, 52101, 43276, 7168, 5121, 7859},
+	{0x00, 93, "b4f4", 1229, 1494, 854, 834, 297, 318},
+	{0x00, -42, "f1e2", 29072, 29389, 25387, 2976, 2649, 3398},
 }
 
 // TestMicroAB is an exact-tree A/B fingerprint for the cycle-shaving review.

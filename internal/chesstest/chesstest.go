@@ -250,15 +250,22 @@ func SetFeatures2(m *harness.Machine, defs Defs, bits byte) {
 //
 //	budget <= ~8 s   : 127%
 //	~8 s .. ~16 s    : 113%
-//	budget >  ~16 s  : 100%
+//	budget >  ~16 s  :  92%   <- BELOW 100: the poked budget is LARGER
 //
 // and then BUDGET' = BUDGET * 100 / margin, which for a 6502 is better written
-// as BUDGET' = (BUDGET * K) >> 8 with K = 25600/margin (202, 227, 256) — a
+// as BUDGET' = (BUDGET * K) >> 7 with K = 12800/margin (101, 113, 139) — a
 // shift-and-add multiply, no division.
 //
-// The two anchors are MEASURED (4 s and 15 s, adherence against an exact-clock
-// control); the 8-16 s entry is interpolated between them and the entries
-// outside that range are held flat. Short budgets are floor-dominated — below
+// ★ THE DIVISOR IS 128, NOT 256, since 2026-07-30. It has to be: a margin
+// below 100% needs K = 25600/92 = 278 over 256, which is not a byte. Over 128
+// the same byte spans 50-255%. On device (asm/m8.s uimargin) the >>7 is free —
+// the addend is pre-doubled with three zero-page shifts, six bytes, and the
+// `entry 0 means leave it alone` early-out those six bytes replaced.
+//
+// All three entries are now MEASURED against an exact-clock control (4 s, 15 s
+// and 30 s; the 8-16 s entry is still interpolated), on all twenty curated
+// openings rather than the eight the gate used to run. Entries outside the
+// measured range are held flat. Short budgets are floor-dominated — below
 // ~2 s the engine cannot spend less than its first two iterations, so the
 // margin is powerless there and the safe direction is to leave it high.
 // ---------------------------------------------------------------------------
@@ -267,12 +274,36 @@ func SetFeatures2(m *harness.Machine, defs Defs, bits byte) {
 // top set bit (in 256-cycle units) is bit t. 4 s = 15938 units = octave 13;
 // 15 s = 59766 = octave 15. Extend this table, not the code, when a longer
 // level is measured.
+// ★ THE 15+ TAIL WENT 100 -> 92 ON 2026-07-30, AND A MARGIN CAN NOW BE BELOW
+// 100. Everything at octave 15 and above had been the flat, never-measured
+// extrapolation — and measured, on all twenty curated openings rather than
+// the eight the gate ran, it was leaving compute on the floor at the two
+// levels the product actually uses:
+//
+//	octave  level    soft/exact at margin 100   at margin 92
+//	  15     15 s      0.9206 [0.8844, 0.9619]     ~0.99
+//	  16     30 s      0.9035 [0.8731, 0.9301]     ~0.99
+//
+// The mechanism is the one the block above already names, running in the
+// underspend direction: the estimator reads ~3-5% HIGH at these octaves (the
+// deeper trees a 15-30 s search builds take far more TT cutoffs, and a
+// TT-cutoff node is counted but nearly free), and `idloop`'s `now + 2*cost <=
+// BUDGET` threshold roughly DOUBLES that into spend. A margin below 100 —
+// poking a budget larger than the nominal allocation — is the exact algebraic
+// inverse, and it is safe here because it lands adherence at ~0.94, under the
+// exact-clock control's own 0.955.
+//
+// 92 and not 90: 90 measures at dead parity (soft/exact 1.0013 [0.9841,
+// 1.0186], adherence 0.9564) and 92 lands ~1-2% under it, which is the same
+// posture the 4 s anchor was fitted to (0.9853). Underspending is benign;
+// overspending on hardware is a forfeit, and this estimator's bias has moved
+// 4% twice in one week under structural search wins.
 var softMarginPct = [24]uint16{
 	// octave: 0..12 (<= ~4 s)      13 (~4-8 s)  14 (~8-16 s)  15+ (> ~16 s)
 	127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
 	127,
 	113,
-	100, 100, 100, 100, 100, 100, 100, 100, 100,
+	92, 92, 92, 92, 92, 92, 92, 92, 92,
 }
 
 // SoftClockMargin returns the safety margin, in percent, for a per-move

@@ -2,6 +2,7 @@ package sprt
 
 import (
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -78,7 +79,18 @@ func TestPairedClockProbe(t *testing.T) {
 	feat := byte(0x1F) | byte(defs["FT_CKEXT"])
 	adapt := os.Getenv("PROBE_ADAPT") != ""
 
-	nOpen := 8
+	// ★ WHY THE DEFAULT IS THE WHOLE LIST, changed 2026-07-30 from 8.
+	// This is the instrument that actually resolves the spend ratio, and its
+	// [0.90, 1.10] assertion below is a real acceptance gate — so running it
+	// on openings 0-7 certified 8 of 20. The per-opening soft/exact spread at
+	// the 30 s octave is 0.75 to 1.01, sd 0.062, which makes an 8-game slice
+	// worth +/- 0.022 and a 4-game one +/- 0.031: slices disagree with each
+	// other by more than the width of the band's own margin. Measured on all
+	// twenty, the 30 s octave reads 0.9035 [0.8731, 0.9301] — a population
+	// fact, and the one the shipped LEVEL 8 actually experiences. Set
+	// PROBE_OPENINGS/PROBE_FIRSTOPEN to slice it deliberately, but know that a
+	// slice is a 4-8 sample of a population with that spread.
+	nOpen := len(Openings)
 	if v := os.Getenv("PROBE_OPENINGS"); v != "" {
 		nOpen, _ = strconv.Atoi(v)
 	}
@@ -97,9 +109,29 @@ func TestPairedClockProbe(t *testing.T) {
 	if v := os.Getenv("PROBE_SKIP"); v != "" {
 		firstPly, _ = strconv.Atoi(v)
 	}
-	// Mirror TestSoftClockAdherence's octaves: the short case and the SHIPPED
-	// long control (asm/m8.s LEVEL 8 = 30 s/move).
-	budgets := []uint64{4000, 30000}
+	// The SHIPPED octaves, one per distinct margin-table entry, and BOTH ENDS
+	// of the entry that covers more than one level:
+	//
+	//	 4000 — octave 13, margin 127%. asm/m8.s LEVEL 5.
+	//	15000 — octave 15, margin 92%. LEVEL 7, and the LOW end of the 15+
+	//	        entry. Added 2026-07-30: this octave was the "measured anchor"
+	//	        that no longer got measured, and on all twenty openings it was
+	//	        spending 0.9206 of what an exact clock spends.
+	//	30000 — octave 16, margin 92%. LEVEL 8, the gauntlet budget, and the
+	//	        level a user picks for a serious game.
+	//	60000 — octave 17, margin 92%. LEVEL 9, the longest level that ships.
+	//
+	// ★ 60000 IS HERE BECAUSE OCTAVE 17 IS NOT OCTAVE 16, and assuming it was
+	// is exactly the mistake the flat tail made. One margin entry covers
+	// octaves 15-23, so it is tempting to gate one of them and call the rest
+	// covered — but measured at margin 100 the three shipped octaves read
+	// 0.9206 (15 s), 0.9035 (30 s) and 0.9700 (60 s). A 60 s search completes
+	// depth 4.4 and its exact-clock control only spends 0.8502, so both arms
+	// sit far from the budget and the predictive gate is far less sensitive
+	// there. An entry fitted at 30 s therefore lands 60 s ABOVE parity, and
+	// nothing would have said so. This run is ~27 minutes; that is the price
+	// of gating every level the disk offers instead of the cheap ones.
+	budgets := []uint64{4000, 15000, 30000, 60000}
 	if v := os.Getenv("PROBE_MS"); v != "" {
 		budgets = nil
 		for _, s := range strings.Split(v, ",") {
@@ -117,6 +149,8 @@ func TestPairedClockProbe(t *testing.T) {
 	}
 
 	type pt struct {
+		open             int
+		ply              int
 		soft, exact, est uint64
 		dsoft, dexact    byte
 		agree            bool
@@ -233,7 +267,7 @@ func TestPairedClockProbe(t *testing.T) {
 							break
 						}
 						if ply >= firstPly {
-							local = append(local, pt{s.cyc, e.cyc, s.est, s.depth, e.depth,
+							local = append(local, pt{oi, ply, s.cyc, e.cyc, s.est, s.depth, e.depth,
 								s.from == e.from && s.to == e.to && s.fl == e.fl})
 						}
 						auxes[side] = e.aux
@@ -251,6 +285,15 @@ func TestPairedClockProbe(t *testing.T) {
 				}(oi)
 			}
 			wg.Wait()
+			// Deterministic order: the goroutines append in completion order,
+			// and both the bootstrap resample and the per-opening breakdown
+			// below must not depend on which game finished first.
+			sort.Slice(pts, func(i, j int) bool {
+				if pts[i].open != pts[j].open {
+					return pts[i].open < pts[j].open
+				}
+				return pts[i].ply < pts[j].ply
+			})
 			var ss, se, ds, de, sest float64
 			agree := 0
 			rat := make([]float64, 0, len(pts))
@@ -272,15 +315,38 @@ func TestPairedClockProbe(t *testing.T) {
 				}
 				return rat[int(f*float64(len(rat)-1))]
 			}
-			// bootstrap CI on the aggregate paired ratio (resample positions)
+			// ★ CLUSTER bootstrap: resample GAMES, not positions.
+			//
+			// The plies of one game are NOT independent draws. The exact arm
+			// decides every move, so a game is one deterministic trajectory
+			// through one opening's middlegame; consecutive plies share a
+			// position, a material balance, a phase and a carried TT, and the
+			// thing being measured — whether the predictive gate declines the
+			// last iteration — is a property of the whole trajectory, not of
+			// each ply separately. Resampling PLIES therefore treats ~40
+			// correlated observations as 40 independent ones and reports an
+			// interval far tighter than the data support. That is not
+			// hypothetical: it is how the 4-game PROBE_FIRSTOPEN=16 slice
+			// produced a confident-looking [0.8048, 0.9338] on an n of FOUR.
+			// Resampling whole openings keeps the within-game correlation
+			// inside the resampled unit, which is the standard correction.
+			games := map[int][]pt{}
+			var gameIDs []int
+			for _, p := range pts {
+				if _, ok := games[p.open]; !ok {
+					gameIDs = append(gameIDs, p.open)
+				}
+				games[p.open] = append(games[p.open], p)
+			}
 			rng := rand.New(rand.NewPCG(1, 2))
-			boots := make([]float64, 400)
+			boots := make([]float64, 2000)
 			for b := range boots {
 				var a, c float64
-				for range pts {
-					p := pts[rng.IntN(len(pts))]
-					a += float64(p.soft)
-					c += float64(p.exact)
+				for range gameIDs {
+					for _, p := range games[gameIDs[rng.IntN(len(gameIDs))]] {
+						a += float64(p.soft)
+						c += float64(p.exact)
+					}
 				}
 				boots[b] = a / c
 			}
@@ -297,6 +363,54 @@ func TestPairedClockProbe(t *testing.T) {
 			t.Log(line)
 			fmt.Println("PROBE " + line)
 
+			// ── BIAS AND VARIANCE ARE DIFFERENT DISEASES ────────────────
+			// The aggregate est/truth on the line above is a cycle-weighted
+			// BIAS. It cannot distinguish "the cost table is mispriced for
+			// this population" from "the per-move estimate is unbiased but
+			// noisy, and a THRESHOLD turns symmetric noise into asymmetric
+			// spend". Report the per-move mean and the relative RMS about
+			// that mean separately, plus the depth ledger — a spend deficit
+			// delivered as whole DECLINED ITERATIONS shows up as dexact >
+			// dsoft, while one delivered inside a single iteration does not.
+			var em, ev float64
+			var dLess, dMore int
+			for _, p := range pts {
+				em += float64(p.est) / float64(p.soft)
+				if p.dexact > p.dsoft {
+					dLess++
+				} else if p.dexact < p.dsoft {
+					dMore++
+				}
+			}
+			em /= n
+			for _, p := range pts {
+				d := float64(p.est)/float64(p.soft) - em
+				ev += d * d
+			}
+			ev = math.Sqrt(ev/n) / em
+			t.Logf("  est/truth per-move: mean=%.4f relRMS=%.4f   iterations: soft SHORT on %d/%d moves, soft LONGER on %d",
+				em, ev, dLess, len(pts), dMore)
+
+			// ── PER-OPENING BREAKDOWN ───────────────────────────────────
+			// A slice ratio is an average over a handful of GAMES. Whether
+			// it reflects the population or one outlier trajectory is not
+			// visible from the aggregate, and with 4-8 games it is the first
+			// thing to check before modelling anything.
+			for _, g := range gameIDs {
+				var a, c, e2 float64
+				var dl int
+				for _, p := range games[g] {
+					a += float64(p.soft)
+					c += float64(p.exact)
+					e2 += float64(p.est)
+					if p.dexact > p.dsoft {
+						dl++
+					}
+				}
+				t.Logf("  opening %2d (n=%3d): soft/exact=%.4f est/truth=%.4f short-iters=%d  [%s]",
+					g, len(games[g]), a/c, e2/a, dl, strings.Join(Openings[g], " "))
+			}
+
 			// The same band TestSoftClockAdherence applies to the unpaired
 			// ratio, on the instrument that can actually resolve it. Only
 			// meaningful when the shipped margin table is in force.
@@ -305,6 +419,27 @@ func TestPairedClockProbe(t *testing.T) {
 					t.Errorf("%d ms: paired soft/exact spend %.4f outside [0.90, 1.10] "+
 						"(bootstrap 95%% [%.4f, %.4f]): the estimator is not delivering the "+
 						"compute an exact clock would at this octave", ms, r, lo, hi)
+				}
+				// ★ AND THE INTERVAL HAS TO BE INSIDE IT TOO, added 2026-07-30.
+				// The band is NOT widened by this — it is the same [0.90,
+				// 1.10]; what changes is that the MEASUREMENT, not just its
+				// midpoint, has to establish the claim.
+				//
+				// This is the assertion that would have caught the defect this
+				// was written for. On all twenty openings the pre-fix build
+				// read 0.9035 at 30 s and 0.9206 at 15 s: both midpoints are
+				// inside the band, both PASSED, and both were leaving 8-10% of
+				// the level's allocation unspent — with game-clustered 95%
+				// intervals of [0.8731, 0.9301] and [0.8844, 0.9619], i.e.
+				// a fifth and a third of the interval sitting under the floor.
+				// A point estimate parked on the edge of a band is not a
+				// passing measurement, it is an unresolved one, and the whole
+				// investigation began with someone noticing a slice of it.
+				if lo < 0.90 || hi > 1.10 {
+					t.Errorf("%d ms: paired soft/exact spend %.4f has 95%% interval "+
+						"[%.4f, %.4f], which is not contained in [0.90, 1.10]: the point "+
+						"estimate passes but the measurement does not RESOLVE the spend as "+
+						"equal — this is the shape the 30 s octave hid in", ms, ss/se, lo, hi)
 				}
 			}
 		}

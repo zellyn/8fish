@@ -413,9 +413,12 @@ func TestSoftClockMarginRule(t *testing.T) {
 		{"1 s", 1_020_000, 127},
 		{"4 s", 4_080_000, 127},
 		{"8 s", 8_160_000, 113},
-		{"15 s", 15_300_000, 100},
-		{"30 s", 30_600_000, 100},
-		{"60 s", 61_200_000, 100},
+		// Octave 15 and up is 92, not 100, since 2026-07-30: below 100 means
+		// the poked budget is LARGER than the nominal allocation, which is
+		// what the two long levels measured out at. See softMarginPct.
+		{"15 s", 15_300_000, 92},
+		{"30 s", 30_600_000, 92},
+		{"60 s", 61_200_000, 92},
 	} {
 		if got := SoftClockMargin(tc.cycles); got != tc.want {
 			t.Errorf("SoftClockMargin(%s = %d) = %d, want %d", tc.name, tc.cycles, got, tc.want)

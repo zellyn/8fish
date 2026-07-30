@@ -91,7 +91,23 @@ func TestSoftClockAdherence(t *testing.T) {
 	}
 	feat := byte(0x1F) | byte(defs["FT_CKEXT"])
 
-	pairs := 6
+	// ★ WHY THIS IS len(Openings) AND NOT 6, added 2026-07-30. `Run` assigns
+	// pair p the opening `Openings[p % len(Openings)]`, so `pairs = 6` ran
+	// SIX of the twenty curated openings — 0 through 5 — and never the other
+	// fourteen. That is not a sampling detail: at the 30 s octave the paired
+	// probe measures a per-opening soft/exact spread of 0.75 to 1.01 with a
+	// standard deviation of 0.062, and openings 0-5 are the healthy end of it
+	// (0.94, 1.01, 0.94, 0.83, 0.98, 0.95, mean 0.943) while 6, 7, 10, 18 and
+	// 19 sit at 0.87, 0.81, 0.85, 0.75 and 0.88. The gate was certifying a
+	// subset that happened to look fine.
+	//
+	// This is the same shape as the four other defects found this week — the
+	// harness clock the hardware lacks, the position pool that was not game
+	// conditions, the `-D HARNESSKBD` build that was not the shipping build,
+	// and the disk that shipped FEATURES=$1F: the gate did not cover the case
+	// the product actually uses. Every curated opening now plays, in both
+	// arms, at both octaves.
+	pairs := len(Openings)
 	if v := os.Getenv("SOFTCLK_PAIRS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			pairs = n

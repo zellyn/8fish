@@ -3,6 +3,200 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-30 — ★ THE LONG LEVELS WERE THROWING AWAY 8-10% OF THEIR CLOCK, at every opening and since the 2026-07-27 recalibration. Margin table octaves 15+ fitted: **100% → 92%**, for THREE bytes and no engine change
+
+The `PROBE_FIRSTOPEN=16` slice that failed the equal-spend band was real but
+**not what it looked like**. Chasing it found a bigger and much duller defect
+underneath: the flat, never-measured tail of the margin table was costing the
+two levels a user actually picks about a tenth of their allocated compute, on
+*every* opening, and the gate could not see it because it ran six openings out
+of twenty and one octave out of four.
+
+### 1. The slice is not a population — it is four games
+
+The paired probe reproduces at **0.8641** on openings 16-19. But run on **all
+twenty** curated openings, the per-opening soft/exact at 30 s has standard
+deviation **0.062** and a range of **0.7467 to 1.0109**. That makes the
+standard error of a 4-game slice **0.031** and of an 8-game slice 0.022, so
+the three slices' means — 0.9176, 0.9136, **0.8689** — differ by about 1.3
+combined standard errors. There is no distinct opening population here.
+
+Two openings inside the *passing* slice 0-7 (opening 3 at 0.8326, opening 7 at
+0.8119) are worse than two inside the failing one. Correlation between an
+opening's ratio at 4 s and at 30 s is only **0.39**: an opening is barely
+"intrinsically" anything.
+
+**The reported interval was also too tight, and that is a real instrument bug
+now fixed.** `TestPairedClockProbe` bootstrapped by resampling PLIES. The
+plies of one game are one deterministic trajectory sharing a position, a
+material balance and a carried TT — resampling them treats ~40 correlated
+observations as 40 independent ones. That is how four games produced a
+confident-looking [0.8076, 0.9248]. The probe now resamples **whole games**.
+
+### 2. What is real: the whole population, at every long level
+
+All twenty openings, n≈800 per octave, shipped margin table, before any fix:
+
+| octave | level | margin | soft/exact | 95% (game-clustered) | est/truth | soft adh | exact adh |
+|---|---|---:|---:|---|---:|---:|---:|
+| 13 | 4 s | 127% | 0.9853 | [0.9568, 1.0112] | 0.9577 | 0.9120 | 0.9256 |
+| 15 | **15 s** | 100% | **0.9206** | [0.8844, 0.9619] | 1.0469 | 0.8253 | 0.8964 |
+| 16 | **30 s** | 100% | **0.9035** | [0.8731, 0.9301] | 1.0284 | 0.8630 | 0.9552 |
+| 17 | 60 s | 100% | 0.9700 | [0.9537, 0.9870] | 1.0321 | 0.8247 | 0.8502 |
+
+LEVEL 7 and LEVEL 8 sit on the floor of the [0.90, 1.10] band with a fifth and
+a third of their interval *underneath* it. Both **passed** the gate. And 15 s
+was supposedly a MEASURED anchor — measured, it turns out, on eight openings.
+
+### 3. It is BOTH diseases, and the sweep separates them
+
+Sweeping the soft arm's margin at 30 s over all twenty openings:
+
+| margin | effective per-move bias | soft/exact | soft adh | mean depth (exact 3.888) |
+|---:|---:|---:|---:|---:|
+| 100% | 1.0486 | 0.9035 | 0.8630 | 3.824 |
+| 95% | 0.9962 | 0.9461 | 0.9038 | 3.871 |
+| 90% | 0.9437 | **1.0013** | 0.9564 | 3.924 |
+
+Interpolating to an **exactly unbiased** clock (effective bias 1.000, i.e.
+margin 95.4) gives soft/exact **0.9430**. So of the 9.65-point deficit:
+
+- **4.0 points is BIAS** — per-move mean est/truth **1.0486** at this octave.
+  Deep trees take far more TT cutoffs and a TT-cutoff node is counted but
+  nearly free, which the taper-phase regressor cannot see.
+- **5.7 points is VARIANCE** — relative RMS **8.5%**, fed through `idloop`'s
+  `now + 2*cost <= BUDGET` threshold. **No unbiased cost model can recover
+  it.** This is the 2026-07-27 finding reproduced from the other side: a
+  perfect clock still underspends here, so the clock has to be biased.
+
+Between openings, correlation(est/truth, soft/exact) is **−0.63**: bias
+explains about 40% of the spread and threshold luck the rest. Openings 17 and
+18 have near-identical est/truth (1.0914, 1.0852) and soft/exact 0.9154 vs
+**0.7467**.
+
+### 4. How far back: it is the 2026-07-27 recalibration, not this week's rescales
+
+Same probe, same twenty openings, 30 s, three builds:
+
+| build | soft/exact | 95% | est/truth |
+|---|---:|---|---:|
+| `5c25da9` — recalibrated clock, before both rescales | 0.8910 | [0.8575, 0.9288] | 1.0444 |
+| `b5837b5` — after the pre-make evasion filter + /1.0845 | 0.9034 | [0.8766, 0.9326] | 1.0294 |
+| `f6ba3e0` — after the pin test + /1.0278 (HEAD) | 0.9035 | [0.8731, 0.9301] | 1.0284 |
+
+**Flat at 0.89-0.90 across all three.** The two rescales were correct and did
+their job — they restored the level and slightly improved it. This deficit
+predates them and is residue of the recalibration itself, which fitted one
+cost curve across two octaves and left everything above octave 15 at a guessed
+100%.
+
+### 5. The fix: fit the tail, which needs a margin BELOW 100%
+
+`softMarginPct[15..23]` **100 → 92**, and `asm/m8.s` KTAB re-encoded from a
+multiplier over 256 to one over **128**. That second half is not cosmetic: the
+correction needs the poked budget to be *larger* than the nominal allocation,
+i.e. K = 25600/92 = **278**, which is not a byte. Over 128 the same byte spans
+50-255% and the ladder is 101 / 113 / 139.
+
+On device that costs **three bytes**: `uimargin` pre-doubles the addend with
+`asl BUDGET0 / rol BUDGET1 / rol BUDGET2` (zero page) so the existing `>>8`
+delivers `BUDGET*K/128`, and the `entry 0 means leave it alone` early-out is
+deleted. **The disk image does not grow at all** — 44,962 B, SD spare **94 B**
+unchanged; UI growth room 167 → **164 B**. `engine.bin` is untouched: no
+engine source changed, so the search tree is identical by construction, not by
+assertion.
+
+92 and not 90 because 90 measures at dead parity (1.0013, adherence 0.9564)
+while 92 lands 1-3% under it — the same posture the 4 s anchor was fitted to
+(0.9853). Underspending is benign; overspending on hardware is a forfeit, and
+this estimator's bias has moved 4% twice in one week under structural wins.
+
+**Measured after the change**, same instrument, all twenty openings:
+
+| octave | level | margin | soft/exact | 95% | soft adh | exact adh | mean depth soft / exact |
+|---|---|---:|---:|---|---:|---:|---:|
+| 13 | 4 s | 127% | 0.9853 | [0.9568, 1.0112] | 0.9120 | 0.9256 | 2.219 / 2.289 |
+| 15 | 15 s | **92%** | **0.9935** | [0.9548, 1.0325] | 0.8906 | 0.8964 | **3.395** / 3.364 |
+| 16 | 30 s | **92%** | **0.9666** | [0.9462, 0.9859] | 0.9233 | 0.9552 | **3.890** / 3.888 |
+| 17 | 60 s | **92%** | **1.0191** | [0.9965, 1.0440] | 0.8664 | 0.8502 | **4.457** / 4.425 |
+
+Every adherence is under 1.00, so nothing moved toward the forfeit line, and
+the 4 s octave is byte-for-byte unchanged. **The recovered compute is real and
+it arrives as depth**: at 30 s the soft clock's mean completed depth goes
+3.824 → 3.890 against the exact clock's 3.888 — it now reaches the same depth
+an engine with a real clock reaches, which is the entire point of the feature.
+Move agreement 0.973 → 0.981.
+
+### 6. Octave 17 is not octave 16, and that is why the gate got longer
+
+The pre-fix table above is the argument: at margin 100 the three long levels
+read 0.9206, 0.9035 and **0.9700**. A 60 s search completes depth 4.4 and its
+exact-clock control spends only 0.8502, so both arms sit far from the budget
+and the predictive gate is much less sensitive there. One entry fitted at 30 s
+therefore lands 60 s slightly ABOVE parity (1.0191), which is fine — but
+nothing would have said so. Gating one octave and calling the other eight
+covered is the same mistake as the flat tail itself.
+
+### 7. The gate
+
+Three holes, all of the "the gate does not cover what the product uses" shape
+that four other defects took this week:
+
+1. **`TestSoftClockAdherence` ran six openings of twenty.** `Run` gives pair
+   `p` the opening `Openings[p % 20]`, so `pairs = 6` played openings 0-5 —
+   which are the healthy end of a distribution with sd 0.062. Now
+   `pairs = len(Openings)`.
+2. **`TestPairedClockProbe` defaulted to eight openings and two octaves.** Now
+   all twenty, and 4 s / 15 s / 30 s / 60 s — every timed level `asm/m8.s`
+   offers, and both ends of the entry that covers more than one of them. ~27
+   minutes; that is the price.
+3. **The band was asserted on a point estimate.** The pre-fix build passed
+   [0.90, 1.10] at 0.9035 with an interval of [0.8731, 0.9301]. The band is
+   **not widened** — it is the same [0.90, 1.10] — but the game-clustered 95%
+   interval must now be contained in it, so a midpoint parked on the floor is
+   reported as what it is: unresolved, not passing.
+
+### 8. Priced and REFUSED: the makes-per-node regressor
+
+The 2026-07-27 entry named it (a make counter at ~0.29% of runtime) and this
+investigation is the evidence that would have justified it — so it was priced
+properly and still refused. It attacks the **variance** term (5.7 of the 9.65
+points), because a TT-cutoff node makes no moves and that is exactly what the
+phase regressor is blind to. But the margin fix already recovers the spend for
+**three bytes and zero runtime**, so the regressor would not buy more compute;
+it would only tighten the per-opening spread (sd 0.062). Against that: 0.29%
+of every search, engine bytes out of a 94-byte spare, and a standing
+obligation to refit it on every structural win that makes a node cheaper — an
+obligation that has already come due twice this week. Not worth it. Revisit
+only if the per-opening spread itself starts costing Elo.
+
+**THE UNPAIRED GATE, post-fix, 20 pairs = 40 games per arm.** This is the
+instrument that would forfeit a game, so it is the one that has to be under
+1.00, and it is:
+
+| level | soft adherence | exact adherence | equal spend |
+|---|---:|---:|---:|
+| 4 s | 0.9137 (3,726 moves) | 0.9102 (3,660 moves) | 1.0039 |
+| 30 s | **0.9175** (3,986 moves) | 0.9043 (4,094 moves) | 1.0147 |
+
+The 4 s row is identical to the pre-fix run to four decimals, which is the
+check that octave 13 really was left alone. (This instrument carries the whole
+variance of game composition — its two arms play different games and here
+produced 3,986 vs 4,094 moves — which is why the ratio reads 1.015 where the
+composition-free paired probe reads 0.967. That is the disagreement
+`TestPairedClockProbe` was built to remove, not a contradiction.)
+
+**GATES.** `TestPairedClockProbe` (all four octaves, all twenty openings),
+`TestSoftClockAdherence` (20 pairs, both arms), the five parity gates
+(`TestFullGameMirrorParity`, `TestBudgetModeParity`, `TestIDIterationParity`,
+`TestSearchMirrorParity`, `TestTTSequenceParity`), `TestMicroAB` (fingerprint
+asserted, unchanged — no engine source was touched), `TestSoftClockLimits`
+(device KTAB vs `chesstest.SoftClockMargin` at every level, now including
+three sub-100% margins), `TestSoftClockMarginRule`,
+`TestSoftClockMarginEquivalence`, and the full `internal/chesstest`,
+`internal/ui`, `internal/ucibridge`, `internal/sprt`, `internal/entropy`,
+`internal/delivery`: green.
+
 ## 2026-07-30 — ★ STRUCTURAL: single-ray pin test replaces `attacked()` for king-aligned movers, **−2.48% of all cycles for ZERO disk bytes**, tree-identical, no SPRT
 
 Structural win #2 from the 2026-07-30 slack hunt, and the cheapest one yet:

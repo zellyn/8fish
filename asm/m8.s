@@ -908,8 +908,22 @@ ultimed:
         sta FEATURES2
         rts
 
-; uimargin: BUDGET *= KTAB[octave(BUDGET)] / 256, in place. A KTAB entry of
-; 0 means "margin 100%, leave it alone".
+; uimargin: BUDGET *= KTAB[octave(BUDGET)] / 128, in place.
+;
+; ★ THE DIVISOR IS 128, NOT 256, SINCE 2026-07-30, and that is the whole
+; point. A margin BELOW 100% — poking a budget LARGER than the level's
+; nominal allocation — is not a rounding curiosity, it is what octaves 15 and
+; up measured out at: the estimator reads ~3-5% HIGH there and the predictive
+; gate doubles that into a ~10% SPEND deficit (docs/results.md 2026-07-30).
+; Over 256 that needs K = 25600/90 = 284, which does not fit in a byte, so the
+; old encoding could express safety margins and nothing else. Over 128 the
+; same byte covers 50-255% and the shipped ladder is 101 / 113 / 139.
+;
+; It costs SIX BYTES: the accumulator is unchanged and still >>8, but the
+; ADDEND is pre-doubled (asl/rol/rol below), so the loop forms 2*BUDGET*K and
+; the >>8 delivers BUDGET*K/128. The `KTAB entry 0 means leave it alone`
+; early-out is gone with it — identity is now K=128, every timed level
+; multiplies, and (BUDGET*128*2)>>8 == BUDGET exactly.
 uimargin:
         lda BUDGET0
         ora BUDGET1
@@ -935,9 +949,11 @@ umsh:   inx
         bcc :+
         ldx #23
 :       lda KTAB,x
-        bne :+
-        rts                     ; 100%: unchanged
-:       sta UIK
+        sta UIK
+        asl BUDGET0             ; the loop's ADDEND is 2*BUDGET, so the >>8
+        rol BUDGET1             ;  below is really a >>7 on BUDGET*K. Safe in
+        rol BUDGET2             ;  24 bits: the largest level is 60 s =
+                                ;  239,176 units and 2x that is 478,352.
         lda #0
         sta UIACC0
         sta UIACC1
@@ -965,8 +981,8 @@ umml:   asl UIACC0
         sta UIACC3
 ummn:   dey
         bne umml
-        lda UIACC1              ; >> 8: K <= 255 so the result never exceeds
-        sta BUDGET0             ;  the input and 24 bits always suffice
+        lda UIACC1              ; >> 8 of 2*BUDGET*K, i.e. BUDGET*K/128; K <=
+        sta BUDGET0             ;  255 keeps the result inside 24 bits
         lda UIACC2
         sta BUDGET1
         lda UIACC3
@@ -1908,15 +1924,20 @@ LVB0:    .byte     $00, $00, $00, $00, $49,   $93,   $92,   $24,    $48
 LVB1:    .byte     $00, $00, $00, $00, $3E,   $7C,   $E9,   $D3,    $A6
 LVB2:    .byte     $00, $00, $00, $00, $00,   $00,   $00,   $01,    $03
 
-; KTAB: the soft-clock margin as a multiplier over 256, indexed by the
-; budget's octave. 0 means "margin 100%, do not scale". 202 = 25600/127,
-; 227 = 25600/113 — the two MEASURED anchors (4 s and 15 s adherence against
-; an exact-clock control) with the 8-16 s entry interpolated and the ends
-; held flat. See internal/chesstest softMarginPct, the reference this must
-; agree with.
-KTAB:   .byte 202, 202, 202, 202, 202, 202, 202, 202
-        .byte 202, 202, 202, 202, 202, 202, 227,   0
-        .byte   0,   0,   0,   0,   0,   0,   0,   0
+; KTAB: the soft-clock margin as a multiplier over 128, indexed by the
+; budget's octave (see uimargin for why 128). 101 = 12800/127, 113 =
+; 12800/113, 139 = 12800/92; 128 would be "leave it alone".
+;
+; ★ OCTAVES 15+ WENT 100% -> 92% ON 2026-07-30, and that entry is now
+; MEASURED rather than extrapolated. It had been the flat 100% tail no test
+; looked at, and on all twenty curated openings the paired probe reads
+; soft/exact 0.9206 at 15 s and 0.9035 at 30 s — the shipped LEVEL 7 and
+; LEVEL 8 throwing away 8-10% of their allocation. At 92% they read ~0.99,
+; which is the same 1-2%-under-parity the 4 s anchor was fitted to.
+; See internal/chesstest softMarginPct, the reference this must agree with.
+KTAB:   .byte 101, 101, 101, 101, 101, 101, 101, 101
+        .byte 101, 101, 101, 101, 101, 101, 113, 139
+        .byte 139, 139, 139, 139, 139, 139, 139, 139
 
 promoltr: .byte 'n', 'b', 'r', 'q'
 

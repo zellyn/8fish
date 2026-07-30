@@ -357,10 +357,20 @@ instruction stream.
 calibration positions and gated on a position pool, both of which said it
 over-estimated by 5%; in real games it under-estimated and the engine overran
 its clock by 17%. The table is now fit on moves from real games and
-deliberately biased. What a UI can promise, measured in games: at a **4 s**
-level the engine spends **0.94** of its allocation and at a **15 s** level
-**0.88**, against an exact clock's 0.92 and 0.86 — within 2.3% at both, and
-under 1.0 at both, so it never flags.
+deliberately biased. **RE-FITTED ABOVE OCTAVE 15 ON 2026-07-30** — the tail was
+a guess, and it was costing LEVEL 7 and LEVEL 8 about a tenth of their clock.
+What a UI can promise now, measured over all twenty curated openings against an
+exact-clock control in the same run (own true cycles / own allocation):
+
+| level | engine spends | an exact clock spends | equal-spend ratio |
+|---|---:|---:|---:|
+| 5 (4 s) | 0.912 | 0.926 | 0.985 |
+| 7 (15 s) | 0.891 | 0.896 | 0.994 |
+| 8 (30 s) | 0.923 | 0.955 | 0.967 |
+| 9 (60 s) | 0.866 | 0.850 | 1.019 |
+
+Under 1.0 at every level, so it never flags, and within 3.5% of what a machine
+with a real clock would spend.
 
 **★ The UI must implement one rule.** The safety bias is NOT in the engine: the
 cost table holds the raw measured cost, and the bias is applied by whoever
@@ -370,9 +380,20 @@ base allocation), scale by the octave of the budget:
 
 | budget | poked value |
 |---|---|
-| ≤ ~8 s | `BUDGET × 202 >> 8` (margin 127%) |
-| ~8-16 s | `BUDGET × 227 >> 8` (margin 113%) |
-| > ~16 s | unchanged (margin 100%) |
+| ≤ ~8 s | `BUDGET × 101 >> 7` (margin 127%) |
+| ~8-16 s | `BUDGET × 113 >> 7` (margin 113%) |
+| > ~16 s | `BUDGET × 139 >> 7` (margin **92%** — the poked budget is LARGER) |
+
+**★ The divisor is 128, changed 2026-07-30, and the last row is why.** Above
+~16 s the estimator reads 3-5% HIGH (deep trees take far more TT cutoffs, and
+a TT-cutoff node is counted but nearly free) and `idloop`'s `now + 2×cost`
+threshold doubles that into a ~10% SPEND deficit: measured over all twenty
+curated openings, LEVEL 7 (15 s) spent **0.9206** and LEVEL 8 (30 s) **0.9035**
+of what an exact clock spends. Correcting that needs a margin BELOW 100%,
+i.e. `25600/92 = 278` over 256 — which does not fit in a byte. Over 128 it
+does, and the shipped `asl/rol/rol` that pre-doubles the addend costs six
+bytes. A margin below 100 is safe here and only here: it lands adherence at
+~0.94, still under the exact clock's own 0.955.
 
 A shift loop to find the top set bit of BUDGET, a table read, one 24×8
 shift-and-add multiply — once per move, no division. Skip it entirely for

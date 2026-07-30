@@ -239,6 +239,11 @@ iterate:
         lda #0                  ; it for every deeper ply)
         rol
         sta INCHK
+        lda #NOSQ               ; the full scan yields no checker SQUARE, so
+        sta CHECKERSQ           ;  root evasions take the old make +
+                                ;  attacked() path (a handful of moves once
+                                ;  per iteration; every deeper ply gets a
+                                ;  real square from make's ckhit exits)
         lda #<MOVESTACK
         sta MSP
         lda #>MOVESTACK

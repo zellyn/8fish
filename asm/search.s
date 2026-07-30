@@ -272,23 +272,18 @@ srepnext:
         bcs sreploop
 snorep:
         ; insufficient material: PHASE <= 1 and no pawns (covers KK,
-        ; KNK, KBK; same-color-bishops draws are the referee's problem)
+        ; KNK, KBK; same-color-bishops draws are the referee's problem).
+        ; The pawn question used to walk all 32 piece-list slots here
+        ; (smdloop: 79033 iterations, 1.16M cycles = 0.76% of all cycles
+        ; and 2.2% of the ENDGAME, where every hit is), which is absurd
+        ; for a quantity that changes only when a pawn is captured or
+        ; promoted. NPAWNS is maintained on those two cold paths instead
+        ; (see defs.inc), so the test is now one load.
         lda PHASE
         cmp #2
         bcs sdrawend
-        ldx #31
-smdloop:
-        lda PIECESQ,x
-        cmp #NOSQ
-        beq smdnext
-        tay
-        lda a:BOARD,y
-        and #TYPEMASK
-        cmp #PAWN
-        beq sdrawend            ; a pawn exists: playable
-smdnext:
-        dex
-        bpl smdloop
+        lda NPAWNS
+        bne sdrawend            ; a pawn exists: playable
 sdraw:  lda #0
         sta SCORE
         sta SCORE+1
@@ -1340,15 +1335,25 @@ sgo:    ldy PLY
         sta CURSORHI,y
         ; fall through to sdomove
 sdomove:
+        ; The in-check test that used to open the post-make lazy-legality
+        ; gate now runs BEFORE make, because at an in-check node it can
+        ; settle legality on its own (sdevade). PLY is still the PARENT
+        ; ply here - make has not incremented it - so this is INCHK,x
+        ; where the gate below reads INCHK-1,x.
+.ifdef LEGALVERIFY
+        lda #0                  ; every move starts "the filter said nothing
+        sta LVREJ               ;  about this one" - moves at nodes that are
+                                ;  not in check never reach sdevade at all
+.endif
+        ldx PLY
+        lda INCHK,x
+        bne sdevade
         jsr make
         ; lazy legality (perf review F1): when the mover was not in
         ; check, only king moves, ep captures, and moves leaving a
         ; king-aligned square can possibly be illegal. Everything else
         ; skips the full attacked() scan. Conservative: alignment means
         ; "run the full check", not "illegal".
-        ldx PLY
-        lda INCHK-1,x           ; parent ply's in-check state
-        bne slfull
         lda MVFLAGS
         and #FL_EP
         bne slfull
@@ -1370,6 +1375,94 @@ sdomove:
         and #ATK_DIAG|ATK_ORTHO
         bne slfull              ; from-square king-aligned: maybe pinned
         jmp slegal              ; provably legal
+
+; ---------------------------------------------------------------
+; sdevade: PRE-MAKE evasion filter. X = the parent ply, which is in
+; check. A non-king, non-ep move can only answer a check by CAPTURING
+; the checker or INTERPOSING on the checker->king ray, and CHECKERSQ/
+; CHECKDIR (defs.inc; written by make's own gives-check propagation, so
+; they cost the ckhit exits ~10 cycles each and nothing else) make that
+; two DELTATAB lookups on the PARENT position. Everything else at an
+; in-check node is illegal and is dropped here, before make.
+;
+; That is where the cycles were: 7253 of the 8114 non-king non-ep moves
+; at in-check nodes over the six profile positions were illegal (89.4%),
+; and finding that out cost make + gives-check + accumulator update +
+; attacked() + unmake = 8.69M cycles, 5.71% of the whole search.
+;
+; SOUNDNESS. Only REJECTION must be sound; an accepted move still goes
+; through make + attacked() below exactly as before, so a filter that is
+; too permissive costs cycles and nothing else. Rejection needs only ONE
+; genuine checker: a non-king move that neither takes CHECKERSQ nor
+; blocks its ray cannot answer THAT check, which stays true under double
+; check (where no non-king move is legal at all). So there is no
+; double-check test here, and none is needed. The cases the filter
+; cannot reason about all fall back to make + attacked():
+;   - king moves      (any square may be legal)
+;   - ep captures     (the victim is not on TO)
+;   - CHECKERSQ==NOSQ (the curincheck paths: castle/ep parents, the root)
+; TREE-IDENTICAL: legality is a property of the position, so the legal
+; set, its order, LEGALCNT and the node count are all unchanged.
+; ---------------------------------------------------------------
+sdevade:
+        lda MVFLAGS
+        and #FL_EP
+        bne sdvfall             ; ep capture: the victim is not on TO
+        ldy FROM
+        lda a:BOARD,y           ; force absolute: no lda zp,y mode exists
+        and #TYPEMASK
+        cmp #KING
+        beq sdvfall             ; king move: any square may be legal
+        lda CHECKERSQ,x
+        bmi sdvfall             ; NOSQ: no checker square recorded here
+        cmp TO
+        beq sdvacc              ; captures the checker: verify for real
+        lda TO
+        sec
+        sbc CHECKERSQ,x
+        clc
+        adc #$77
+        tay
+        lda DELTATAB,y          ; step checker -> TO
+        beq sdrej               ; TO is not on ANY ray from the checker
+        cmp CHECKDIR,x          ; ... and it must be the ray to the king
+        bne sdrej               ;  (CHECKDIR = 0 for a knight: rejects here)
+        lda SIDE                ; on the ray: but BEFORE the king, or past it?
+        asl
+        tay
+        lda PIECESQ,y           ; the mover's own king (SIDE has not flipped)
+        sec
+        sbc TO
+        clc
+        adc #$77
+        tay
+        lda DELTATAB,y          ; step TO -> king: the same direction means
+        cmp CHECKDIR,x          ;  TO lies strictly BETWEEN them
+        beq sdvacc
+
+; ---- LEGALVERIFY (debug, ASSEMBLY-TIME optional - same pattern as
+; CKVERIFY/GDVERIFY): record the filter's verdict and then run the OLD
+; make + attacked() path for EVERY move, so a rejection the real legality
+; test disagrees with kills the run (exit 103). The shipped image assembles
+; none of it: sdrej is a jmp and sdvfall/sdvacc are the make site itself.
+; The verdict-recording bodies live at lvrej/lvfall/lvacc, past slegal,
+; because anything added HERE sits between the lazy-legality gate above and
+; slfull and pushes that gate's three branches out of range.
+; See the honest limit in TestEvasionFilterVerify - a live assertion only
+; ever sees what the workload reaches, which is why
+; TestEvasionFilterDifferential exists alongside it.
+.ifdef LEGALVERIFY
+sdrej:   jmp lvrej
+sdvfall: jmp lvfall
+sdvacc:  jmp lvacc
+.else
+sdrej:  jmp sloopret            ; provably cannot address the check: no make,
+                                ;  no gives-check, no attacked(), no unmake
+sdvfall:
+sdvacc: jsr make                ; in check: the lazy gate below would send
+                                ;  every one of these to slfull anyway, so
+                                ;  fall straight into it
+.endif
 slfull: ; full check: mover must not leave their king attacked
         lda SIDE
         sta ATSIDE
@@ -1381,8 +1474,67 @@ slfull: ; full check: mover must not leave their king attacked
         jsr attacked
         bcc slegal
         jsr unmake
+.ifdef LEGALVERIFY
+        ; ILLEGAL, as make + attacked() sees it. Every filter verdict is
+        ; acceptable here - rejecting was right, accepting was merely
+        ; permissive - so just tally which, and let the Go side require
+        ; that a corpus reached all of them.
+        lda LVREJ
+        beq lvcfall             ; 0 = declined to judge
+        cmp #1
+        bne lvcrej              ; 2 = rejected, and rightly so
+        inc LVNPERM             ; 1 = accepted but illegal: over-permissive
+        bne slj
+        inc LVNPERM+1
+        bne slj                 ; always
+lvcrej: inc LVNREJ
+        bne slj
+        inc LVNREJ+1
+        bne slj                 ; always
+lvcfall:
+        inc LVNFALL
+        bne slj
+        inc LVNFALL+1
+slj:
+.endif
 sloopj: jmp sloopret
-slegal: ldy PLY                 ; PLY = child here
+slegal:
+.ifdef LEGALVERIFY
+        ; LEGAL. A move the filter REJECTED reaching here is precisely the
+        ; unsoundness the filter must never have, so kill the run.
+        lda LVREJ
+        eor LVFORCE             ; test hook: 3 flips accept<->reject, so a
+        cmp #2                  ;  HEALTHY run must trap - which is how the
+        bne lvnotrap            ;  trap mechanism itself gets proven
+        lda #103
+        sta EXIT_TRAP
+lvnotrap:
+        lda LVREJ
+        beq lvlegdone           ; declined: nothing to count
+        inc LVNLEG
+        bne lvlegdone
+        inc LVNLEG+1
+lvlegdone:
+        jmp lvskip
+        ; The three verdict recorders sdevade jumps to. They live here, out
+        ; of the lazy gate's branch range, and all three converge on the OLD
+        ; make + slfull path - so the LEGALVERIFY build searches EXACTLY the
+        ; shipped tree (every rejection it lets through is one attacked()
+        ; then confirms illegal), and any divergence is a trap, not a
+        ; different search.
+lvrej:  lda #2                  ; REJECTED: legal here means the filter is
+        sta LVREJ               ;  unsound, and slegal above exits 103
+        jmp lvmk
+lvfall: lda #0                  ; declined to judge (king move / ep / NOSQ)
+        sta LVREJ
+        jmp lvmk
+lvacc:  lda #1                  ; accepted: illegal here is merely permissive
+        sta LVREJ
+lvmk:   jsr make
+        jmp slfull
+lvskip:
+.endif
+        ldy PLY                 ; PLY = child here
         dey
         lda LEGALCNT,y
         clc

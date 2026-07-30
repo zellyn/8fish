@@ -13,9 +13,12 @@ package ui_test
 //	                the resident opening book at $2000)
 //
 // Raising the staging base trades one for the other 256 bytes at a time, and
-// at $0C00 there is nowhere left to go: $0F00 would already overrun the book.
-// So both numbers are asserted, both are printed on every run, and the day
-// either goes negative this test says which one and by how much.
+// there is almost nowhere left to go: the base is $0D00 (raised from $0C00 on
+// 2026-07-30 to pay for the engine's pre-make evasion filter) and one more
+// page would already overrun the book. So both numbers are asserted, both are
+// printed on every run along with the whole base/margin table recomputed from
+// the real files, and the day either goes negative this test says which one
+// and by how much.
 
 import (
 	"bytes"
@@ -121,6 +124,33 @@ func TestDiskLedger(t *testing.T) {
 		l.SDSpare, delivery.MaxImage)
 	t.Logf("  MARGIN 2  UI growth room: %5d B  (staged payload ends $%04X, book at $%04X)",
 		l.UIRoom, l.PayloadEnd-1, delivery.BookOrg)
+
+	// The base/margin trade-off table, recomputed from the REAL file sizes on
+	// every run. delivery.go carries the same table as a comment for readers,
+	// and a comment that has to be maintained by hand is a comment that goes
+	// stale (it already did once, quoting sizes two releases old). This is the
+	// copy to trust when the decision "raise the base by a page?" comes round
+	// again, which the margins guarantee it will.
+	t.Logf("  base/margin trade-off, from the files on disk right now:")
+	t.Logf("    %-6s %8s %8s %s", "base", "image", "spare", "UI room")
+	for base := 0x0800; base <= 0x1000; base += delivery.SectorBytes {
+		ps, err := delivery.LoadAt(root, base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, bl, err := delivery.Image(ps)
+		if err != nil {
+			// Overlap (the payload has grown into the book): report the base
+			// as unusable rather than failing the whole ledger.
+			t.Logf("    $%04X  %8s %8s %s", base, "-", "-", err)
+			continue
+		}
+		mark := ""
+		if base == delivery.Base {
+			mark = "  <- chosen"
+		}
+		t.Logf("    $%04X  %8d %8d %7d%s", base, bl.ImageBytes, bl.SDSpare, bl.UIRoom, mark)
+	}
 
 	if len(img) != l.ImageBytes {
 		t.Errorf("image is %d B but the ledger says %d", len(img), l.ImageBytes)

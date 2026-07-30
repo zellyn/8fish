@@ -215,6 +215,9 @@ func (e *Engine) iterateWindow(depth, alpha, beta int) {
 	e.aborted = false
 	e.numExt = 0 // per-iterate reset; balanced save/restore keeps it 0 anyway
 	e.inChk[0] = e.curInCheck()
+	e.checkerSq[0] = NoSq // as asm engine.s: the root's in-check state comes
+	//  from a full scan, which yields no square, so
+	//  root evasions take the make + attacked() path
 	e.alpha[0] = alpha
 	e.beta[0] = beta
 	e.RootScore = e.search()
@@ -686,6 +689,15 @@ func (e *Engine) moveLoop() int {
 				continue
 			}
 
+			// Pre-make evasion filter (asm sdevade): at an in-check node,
+			// a move that neither captures the checker nor interposes on
+			// its ray is illegal, and the asm proves that from two table
+			// lookups instead of make + attacked() + unmake. Tree-
+			// identical, but it removes makes, and makes are compared by
+			// the parity gates — so the twin has to skip them too.
+			if e.inChk[ply] && e.evasionFiltered(m, ply) {
+				continue
+			}
 			// Make + legality: the mover must not leave their king
 			// attacked. (The asm's lazy-legality fast path is a pure
 			// optimization with identical results.)

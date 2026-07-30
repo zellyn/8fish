@@ -489,6 +489,9 @@ mkhmdone:
         lda MVPIECE             ; promotion: the pawn leaves FROM and no
         ldy FROM                ;  pawn appears — toggle only its FROM bit
         jsr pbtoggle
+        dec NPAWNS              ; ... and one fewer pawn is on the board
+                                ;  (the ONLY non-capture way a pawn leaves;
+                                ;  captures decrement in takepiece/takepieceq)
         lda CRTMP
         ldy TO
         jsr hashpiece
@@ -576,6 +579,12 @@ mknoech:
         beq ckfast
         jsr curincheck          ; side to move (the opponent) in check?
         ldx PLY
+        lda #NOSQ               ; the full scan found no checker SQUARE, so
+        sta CHECKERSQ,x         ;  the pre-make evasion filter falls back to
+                                ;  make + attacked() at this ply (rare: only
+                                ;  castles and ep captures land here, and
+                                ;  neither store touches the carry curincheck
+                                ;  returned)
         lda #0
         rol
         sta INCHK,x
@@ -672,15 +681,20 @@ ckdwalk: clc
         tay
         lda TYPEATKTAB,y
         and ATBITS              ; slider matching the ray orientation?
-        bne ckhit
+        bne ckhitx
         beq cknone              ; always
 ckdnext: txa
         jmp ckdwalk
-ckhit:
-        ldx PLY
-        lda #1
-        sta INCHK,x
-        bne ckdone              ; always
+        ; The two check-detection exits are STUBS: the branches that reach
+        ; them (four in ckfast, one in ckdwalk) are already near their
+        ; range limit, so the bodies live at cksetck/cksetcx, out of the
+        ; way of every branch in this routine.
+ckhitx: stx GTMP                ; DISCOVERED: X = the checker's square
+        jmp cksetcx             ;  (GTMP is dead here: only a castle uses
+                                ;   it in make, and castles take the
+                                ;   curincheck path, never ckdwalk)
+ckhit:  ldy DIFF                ; DIRECT: the checker is the piece on TO
+        jmp cksetck
 cknone: ldx PLY
         lda #0
         sta INCHK,x
@@ -782,6 +796,51 @@ mkptoff:
 mkpdone:
 .endif
         rts
+
+.ifndef NOEVAL
+; ---------------------------------------------------------------
+; cksetck / cksetcx: the bodies of ckfast's two check exits. Both record
+; INCHK[PLY] = 1 plus what the PRE-MAKE evasion filter (search.s sdevade)
+; needs: CHECKERSQ[PLY], a square the newly-checked side is checked FROM,
+; and CHECKDIR[PLY], the single-step 0x88 delta from there toward that
+; king. Getting them here is nearly free, which is the whole point - the
+; check-detection tables already know the answer, and reconstructing it
+; later would cost a scan.
+;
+;   cksetck  DIRECT check: the checker is the piece now on TO, and Y is
+;            already DIFF, the (king - TO) difference index, so
+;            DELTATAB[DIFF] IS the checker->king step. It is 0 for a
+;            knight, which is exactly right: nothing can interpose
+;            against a knight, and a 0 CHECKDIR makes the filter's
+;            DELTATAB compare reject every non-capture with no extra test.
+;   cksetcx  DISCOVERED check: the checker is the slider ckdwalk stopped
+;            on (its square parked in GTMP), found by walking AWAY from
+;            the king along ATDELTA - so the step back toward the king is
+;            -ATDELTA.
+;
+; Register contract at ckdone: A = INCHK[PLY] (nonzero), X = PLY.
+; ---------------------------------------------------------------
+cksetck:
+        lda DELTATAB,y
+        ldx PLY
+        sta CHECKDIR,x
+        lda TO
+        sta CHECKERSQ,x
+        lda #1
+        sta INCHK,x
+        jmp ckdone
+cksetcx:
+        lda #0
+        sec
+        sbc ATDELTA
+        ldx PLY
+        sta CHECKDIR,x
+        lda GTMP
+        sta CHECKERSQ,x
+        lda #1
+        sta INCHK,x
+        jmp ckdone
+.endif
 
 ; ---------------------------------------------------------------
 ; castlerook: move the rook for the castle move being made; TO tells
@@ -1045,6 +1104,7 @@ umnohash:
         lda RANKBIT,y
         eor PWBITS,x
         sta PWBITS,x
+        inc NPAWNS              ; the captured pawn is back on the board
         ldx PLY
         lda UNDOFD,x            ; the re-toggled file's cached term goes
         ora FDIRTY              ;  stale again: OR back this move's
@@ -1190,6 +1250,8 @@ umpvictim:
         ldy UNDOCAPSQ,x         ; pawn victim: its bit returns
         lda UNDOCAP,x
         jsr pbtoggle
+        inc NPAWNS              ; ... and so does the pawn (ep captures too:
+                                ;  UNDOCAPSQ is the pushed-past square)
 umpdone:
 .endif
         rts
@@ -1201,8 +1263,10 @@ umpmover:
         ldx PLY                 ; pbtoggle clobbered X
         lda UNDOFLAGS,x
         and #FL_PROMO           ; promotion: the pawn never occupied TO
-        bne umpvictim
-        ldy UNDOTO,x
+        beq umpmto
+        inc NPAWNS              ; ... and the promoted pawn comes back
+        jmp umpvictim
+umpmto: ldy UNDOTO,x
         lda UNDOPIECE,x
         jsr pbtoggle
         ldx PLY

@@ -536,9 +536,15 @@ unget:  lda UIPTRL
         rts
 
 ; uitrylegal: make FROM/TO/MVFLAGS, run the engine's own legality test, then
-; unmake unconditionally. C=1 = legal. The test is search.s sdomove's full
-; path: after make, the side that just moved must not have left its king
-; attacked.
+; unmake unconditionally. C=1 = legal. The test is search.s slfull: after
+; make, the side that just moved must not have left its king attacked.
+;
+; Deliberately NOT sdomove's whole path: the search's pre-make evasion filter
+; (sdevade) is an optimization that needs CHECKERSQ[PLY], which only make's
+; own gives-check propagation fills in, and the UI validates a move typed at
+; ply 0 where no make has run. slfull alone is the complete test - the filter
+; only ever removes work from in front of it - so the UI stays rule-free and
+; correct for every move shape, at a cost nobody can measure.
 uitrylegal:
         lda #0
         sta PLY

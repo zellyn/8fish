@@ -3,6 +3,143 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-30 — ★ STRUCTURAL: pre-make evasion filter + maintained pawn count, **−6.01% of all cycles**, tree-identical, no SPRT
+
+Two structural wins from the 2026-07-30 slack hunt, both **tree-identical**, so
+the gate is a cycle measurement plus a legality differential rather than an
+SPRT. Measured on the TestStructHunt/TestProfileR5 workload (six phase-diverse
+FENs, shipped `FEATURES=0x5F`, `FEATURES2=FT2_GENDEFER`, 30 Mcycle budget):
+
+| | baseline | after | delta | predicted |
+|---|---:|---:|---:|---:|
+| total cycles | 152,082,034 | 142,947,168 | **−9,134,866 (−6.01%)** | — |
+| ... pre-make evasion filter | | | **−8,004,758 (−5.26%)** | +5.4% |
+| ... maintained pawn count | | | **−1,130,108 (−0.74%)** | +0.72% |
+
+Same work in 94% of the cycles = **+6.39% more search per unit of clock**.
+
+**#1 PRE-MAKE EVASION FILTER** (`asm/search.s` `sdevade`). At an in-check node
+a non-king, non-ep move can only be legal if it CAPTURES the checker or
+INTERPOSES on the checker→king ray. The engine used to find that out by doing
+make + gives-check + accumulator update + `attacked()` + unmake and throwing
+89.4% of the results away (7,253 of 8,114 such moves illegal, 8.69 Mcyc =
+5.71% of everything). It is now two `DELTATAB` lookups on the parent position,
+because make's own gives-check propagation already knows the checker: the two
+`ckhit` exits store `CHECKERSQ[ply]` and `CHECKDIR[ply]` (the checker→king
+step) for ~10 cycles each. Measured filter cost 47.0 cyc/entry over 10,971
+entries = 0.36%; the plumbing costs 0.03%.
+
+*All 7,253 rejects are caught*: the `1b-evasion-other` illegal count went
+7,253 → **0**, and the 861 legal ones still verify through `attacked()`.
+
+**SOUNDNESS ARGUMENT.** Only REJECTION must be sound — accepting still runs
+make + `attacked()`, so an over-permissive filter costs cycles and nothing
+else. Rejection needs only ONE genuine checker, and "this move does not
+address THAT check" stays true under DOUBLE check (where no non-king move is
+legal at all), so the filter has no double-check test and needs none. King
+moves, ep captures and the `curincheck` plies that record no square
+(`CHECKERSQ = NOSQ`: castle/ep parents, the root) fall back unchanged.
+
+**#2 INSUFFICIENT MATERIAL → maintained pawn count** (`NPAWNS`, ZP `$32`).
+`smdloop`/`smdnext` walked all 32 piece slots asking "is there a pawn":
+1,161,636 cycles, 79,033 iterations, **all of it in the two endgame positions**
+(2.2% of endgame cycles). Now one `lda`/`bne` (31,528 cycles total). The count
+is maintained where pawns leave the board — `takepiece`/`takepieceq`'s
+pawn-victim prologues (every capture path funnels through them, en passant
+included) and make's promotion branch — and restored on exactly the matching
+unmake paths. Verified against make/unmake for ep and all four promotion types.
+
+**TREE IDENTITY, measured not assumed.** Every tree-shape counter is
+byte-identical on both workloads: `search`, `squiesce`, `snode`, `snodeq`,
+`eval`, `generate`, `generateq`, `ttprobe`, `ttstore`, `scut`, `emitmove`,
+`p1go`–`p4nkgo`, `sgo`, `sreploop`, `pawntermfull`, `genrecapent`, `sntry`,
+`srdefer`, plus every score and best move. `TestMicroAB`'s 18 rows agree on
+score, move and all of search/eval/ttprobe/generate.
+
+`make`, `unmake`, `slfull`, `sloopj` and `attacked` each fall by EXACTLY 7,253
+(the rejected moves) — one removed make per removed `attacked()`, in every
+MicroAB row too, which is the filter's signature and nothing else's.
+`hashcatchup` falls 1,382 → 1,271: making and unmaking an illegal move used to
+repair the elided-hash suffix as a side effect. The repair is idempotent and
+the hash VALUES are unchanged (identical `ttprobe`/`ttstore` counts and
+identical trees), so this is a conservative cache doing less work.
+
+**THE MIRROR NEEDED THE FILTER TOO** — verified, not assumed. The filter is
+tree-identical but it removes `make()` calls, and `TestBudgetModeParity`
+compares make COUNTS and prices them through `Costs.Make`. So
+`internal/mirror` got the same pre-make filter plus `asmCheckerSq`, which
+reproduces the asm's CHOICE of checker (direct first, then the discovered
+walk) rather than merely finding some checker — under double check the two
+differ, and picking the other one would diverge the accounting. Post-change
+spend ratio asm/mirror: **median 0.997**, 0 tree / 0 move / 0 score
+divergences over 252 same-tree positions.
+
+**GATES.** A `ca65 -D LEGALVERIFY` variant runs BOTH the filter and the old
+make + `attacked()` path at every filtered move and exits 103 on any
+disagreement — and, because "never fired" and "cannot fire" look identical
+from outside (the lesson of `CKVERIFY`/`GDVERIFY`), the test PROVES ITS OWN
+TRAP by poking `LVFORCE` to manufacture a disagreement and requiring 103.
+Alongside it, `TestEvasionFilterDifferential` is exhaustive over a 25-position
+check-heavy corpus: 190,799 in-check moves, the asm's verdict recovered from
+whether control reached `make` or `sdrej`, compared in both directions against
+an independent oracle (`shCheckers`) and against the documented rule.
+**126,480 rejections, 0 unsound, 0 rule disagreements**; the two instruments
+independently agree on the same 126,480. Coverage counters (all required
+nonzero): single-check 190,619, double-check 180, checker-capture accepts
+6,950, interposition accepts 3,788, king moves 53,512, en passant under check
+6, `CHECKERSQ=NOSQ` fallbacks 108, knight checkers 42,118, promotions under
+check 360, DIRECT `CHECKERSQ` writes 34,635, DISCOVERED writes 500. That last
+one matters: the profile workload contains **zero** discovered checks, so
+`cksetcx` would have been shipped unexercised without a corpus built to reach
+it.
+
+**AND IT MADE THE SOFT CLOCK STALE — the second-order cost, caught by
+`internal/sprt` and fixed.** `FT2_SOFTCLK`'s cost table is a price PER NODE,
+so any change that makes a node cheaper makes it stale — and this one attacked
+precisely the cost the 2026-07-27 refit said the phase regressor cannot see
+("check evasions and illegal-move rejections"). In GAME conditions, where
+those moves live, a node got **8.4% cheaper** — more than the 6.0% on the
+profile workload, exactly as that diagnosis predicts:
+
+| octave | est/truth before | after the filter | after the rescale |
+|---|---:|---:|---:|
+| 4,000 ms | 0.9266 | 1.0031 | **0.9249** |
+| 30,000 ms | 1.0146 | 1.1022 | **1.0123** |
+
+Left alone the engine believed it had spent 8.4% more than it had and stopped
+early: at 30 s its paired spend against an exact-clock control fell 0.9146 →
+**0.8524**, outside `TestPairedClockProbe`'s [0.90, 1.10] equal-spend gate. It
+was handing back a fifth of the win the filter had just bought — invisible to
+every tree-identity check, because the device configuration is the only one
+that runs on the estimate. `SOFTA`/`SOFTB` were therefore **rescaled by
+1/1.0845** (27498 → 25357, 637 → 587). A RESCALE and not a refit because the
+two octaves agree on the factor to within 0.4%: the curve's shape is
+unchanged, only its scale, so `SOFTC`/`SOFTK` and every per-octave margin stay
+as measured. Result — better than before the filter at both octaves:
+
+| octave | soft/exact before | after the filter | after the rescale | depth agreement |
+|---|---:|---:|---:|---:|
+| 4,000 ms | 1.0761 | 1.0084 | **1.0125** | 0.944 |
+| 30,000 ms | 0.9146 | 0.8524 (FAIL) | **0.9260** | 0.994 (was 0.978) |
+
+Pool est/truth 1.024 (`TestSoftClockAccuracy`, gate [0.85, 1.25]). The 4 s
+in-game adherence also moved AWAY from the forfeit line, 0.9928 → 0.9150,
+which on hardware is the difference that matters most.
+
+**SPACE — this is what the change actually cost.** 130 bytes of CODE, but the
+`TABLES` segment is page-aligned and only 42 bytes of page tail were left, so
+the IMAGE grew a full **256 bytes** (engine.bin 31,650 → 31,906; MAIN headroom
+1,102 → 911 B under the `$BFEF` linker ceiling — nothing reserves
+`$BF00-$BFEF`, only the harness traps at `$BFF0+`). That took the Standard
+Delivery image 162 B OVER `diskii mksd`'s 45,056 B cap, so
+`internal/delivery.Base` was **raised $0C00 → $0D00**, the lever
+`TestDiskLedger`'s own failure message prescribes: SD spare back to **94 B**,
+UI growth room 423 → **167 B**. There was no way to dodge it — even moving the
+whole filter into the page-tail-free `TABLES` segment costs 130 image bytes
+against 94 B of spare. The next ~126 engine bytes are free (they fit the new
+page tail); the ~130 after that cost another page, and MARGIN 2 has one page
+left before the answer is a different LOADER, not a smaller program.
+
 ## 2026-07-29 — ★★ THE DEVICE CONFIGURATION MEASURED: **+161 [+126, +199]** vs Sargon III, and the soft clock costs NOTHING once ponder is removed
 
 504 games, paired, ponder removed from **both** sides — the configuration the

@@ -163,8 +163,23 @@ CUROPENING = $3D        ; "which opening am I in": the NAMEID (name-table
 RUNPTR     = $3E         ; 16-bit ($3E-$3F): the probe's equal-key-run /
                         ;  weighted-pick pointer (ZP for (RUNPTR),y reads).
 
-; $32 is free ZP again (was EVALVALID, the FT2_IMPROV "a static eval was
-; recorded for this node visit" flag; removed with the feature 2026-07-26).
+NPAWNS    = $32         ; pawns of BOTH colors currently on the board,
+                        ;  maintained incrementally. Seeded by ptbuild
+                        ;  (which already scans the piece lists for pawns at
+                        ;  evalinit), decremented wherever a pawn LEAVES the
+                        ;  board - takepiece/takepieceq's pawn-victim
+                        ;  prologues (every capture path funnels through
+                        ;  them, including en passant) and make's promotion
+                        ;  branch - and incremented on exactly the matching
+                        ;  unmake paths. Those are the same sites that
+                        ;  already re-toggle PWBITS, so the maintenance is
+                        ;  one inc/dec on paths that are already cold.
+                        ;  Read by search's insufficient-material test,
+                        ;  which used to walk all 32 piece slots asking "is
+                        ;  there a pawn" (smdloop: 0.76% of all cycles,
+                        ;  2.2% of the endgame).
+                        ;  ($32 was free again since FT2_IMPROV's EVALVALID
+                        ;  was removed 2026-07-26.)
 
 BOARD     = $40         ; 128-byte 0x88 board, $40..$BF. The 64 off-board
                         ;  bytes (files 8-F of each rank: $48-4F,58-5F,68-6F,
@@ -532,6 +547,34 @@ GDVBUF     = $3000      ; GDVERIFY: ttmvsweep's 32x128 result buffer.
                         ;  a test that enforces the invariant over a comment
                         ;  that asserts it.
 
+; The `ca65 -D LEGALVERIFY` debug variant (the pre-make evasion filter's live
+; equivalence assertion) borrows $0218-$0222, which the shipped image leaves
+; free. It runs BOTH the filter AND the old make + attacked() legality test
+; at every filtered move and traps on disagreement, so its counters have to
+; survive a whole search; a GDVERIFY build and a LEGALVERIFY build are
+; separate assemblies and never share these bytes.
+LVREJ      = $0218      ; LEGALVERIFY: this move's FILTER verdict.
+                        ;  0 = the filter declined to judge it (not in check,
+                        ;      a king move, an ep capture, or CHECKERSQ==NOSQ)
+                        ;  1 = the filter ACCEPTED (over-permissive is legal)
+                        ;  2 = the filter REJECTED: make + attacked() must
+                        ;      agree the move is illegal, or exit 103.
+LVNREJ     = $0219      ; LEGALVERIFY: 16-bit counters, all LE. Moves the
+                        ;  filter rejected (and make+attacked confirmed
+                        ;  illegal - a legal one traps instead).
+LVNPERM    = $021B      ; ... filter accepted, make+attacked says ILLEGAL
+                        ;  (over-permissive: costs cycles, never soundness)
+LVNLEG     = $021D      ; ... filter accepted, make+attacked says LEGAL
+LVNFALL    = $021F      ; ... in-check moves the filter DECLINED to judge
+                        ;  (king move, ep capture, or CHECKERSQ == NOSQ)
+LVFORCE    = $0221      ; LEGALVERIFY: XOR mask applied to LVREJ before the
+                        ;  trap compare. 0 in a real run; TestEvasionFilter-
+                        ;  Verify pokes 3 to turn every ACCEPTED-and-legal
+                        ;  move into a manufactured disagreement, proving the
+                        ;  trap MECHANISM itself fires (the honest limit
+                        ;  CKVERIFY/GDVERIFY taught: an assertion that never
+                        ;  fires looks exactly like an assertion that cannot).
+
 ; ---- Entropy collector (asm/entropy.inc; M8 keyboard/text UI driver) ----
 ; The IIe has no clock and no RNG, so the eval dither's SEED is MANUFACTURED
 ; from human keystroke timing: ENTCNT spins in the driver's keyboard-wait
@@ -584,8 +627,42 @@ NUMEXT     = $0233      ; FT_CKEXT: check extensions applied along the CURRENT
 ; $0234-$0237 is free driver-scratch RAM (was FT_ASP's ASPAL/AH/BL/BH +
 ; ASPFAIL aspiration-window state, removed 2026-07-25 with the feature).
 
-; $0238-$0277 is free RAM again (was FT2_IMPROV's EVALSTKL/EVALSTKH, the
-; 2x32-byte per-ply static-eval stack; removed with the feature 2026-07-26).
+; ---- Pre-make evasion filter (search.s sdevade) -------------------------
+; A move made at an in-check node can only be legal if it captures the
+; checking piece or interposes on the king-checker ray (or is a king move).
+; The engine used to discover that the hard way: make + gives-check +
+; accumulator update + attacked() + unmake for every candidate, then throw
+; 89% of them away (measured: 7253 of 8114 non-king non-ep moves at in-check
+; nodes, 5.71% of all cycles). CHECKERSQ/CHECKDIR give sdomove enough to
+; reject those BEFORE make, for two DELTATAB lookups.
+;
+; Both are written by every code path that sets INCHK[ply] = 1 - the two
+; ckhit exits in make's gives-check propagation know the checker for free
+; (the direct checker is the piece now on TO; the discovered one is the
+; square ckdwalk stopped on) - and are meaningless when INCHK[ply] == 0.
+; The curincheck paths (castle/ep captures, and the root driver) do NOT
+; know a checker square, so they store NOSQ and the filter falls back to
+; the old make + attacked() behaviour there.
+;
+; SOUNDNESS: only REJECTION has to be sound, and it only needs ONE genuine
+; checker. A non-king move that neither captures CHECKERSQ nor blocks the
+; CHECKERSQ->king ray cannot answer that check, so it is illegal - which
+; stays true under DOUBLE check (where no non-king move is legal at all),
+; so the filter needs no double-check test. Accepting is always safe: the
+; move still goes through make + attacked() exactly as before.
+CHECKERSQ  = $0238      ; 32 bytes ($0238-$0257): a square from which the
+                        ;  side to move at this ply is checked, or NOSQ for
+                        ;  "not known, fall back". Valid only where
+                        ;  INCHK[ply] != 0.
+CHECKDIR   = $0258      ; 32 bytes ($0258-$0277): the single-step 0x88 delta
+                        ;  from CHECKERSQ[ply] TOWARD the checked king, i.e.
+                        ;  DELTATAB[king - checker + $77]. 0 when the checker
+                        ;  is not on a queen line with the king (a knight),
+                        ;  which makes the filter's first DELTATAB compare
+                        ;  reject every non-capture with no extra test.
+; ($0238-$0277 was free RAM since FT2_IMPROV's EVALSTKL/EVALSTKH, the
+; 2x32-byte per-ply static-eval stack, was removed with the feature
+; 2026-07-26; the two arrays fill it exactly.)
 
 UNDOPD     = $0298      ; 32 bytes ($0298-$02B7, page-2 tail — free RAM
                         ;  like the rest of the repurposed input-buffer
@@ -731,9 +808,31 @@ EXIT_TRAP   = $BFFF
 ; the true per-node cost is ~20% lower in the longer searches (deeper trees
 ; take far more TT cutoffs, and a TT-cutoff node is counted but nearly free)
 ; and the phase regressor cannot see which it is looking at.
+;
+; ★ RESCALED 2026-07-30, /1.0845, FOR THE PRE-MAKE EVASION FILTER. The
+; coefficients are a price PER NODE, so any change that makes a node cheaper
+; makes them stale — and this one attacked exactly the cost the paragraph
+; above says the phase regressor cannot see. asm/search.s sdevade stopped
+; make + attacked()ing the 89% of in-check moves that provably cannot answer
+; the check, and in GAME conditions (which is where those moves live) that
+; took 8.4% off the true cost of a node:
+;
+;   octave   est/truth before   est/truth after   ratio
+;   4000 ms       0.9266            1.0031        1.0826
+;   30000 ms      1.0146            1.1022        1.0863
+;
+; Left alone, the engine believed it had spent 8.4% more than it had and
+; stopped early: at the 30 s octave its paired spend against an exact-clock
+; control fell from 0.9146 to 0.8524, outside TestPairedClockProbe's
+; [0.90, 1.10] equal-spend gate — i.e. it was handing back a fifth of the
+; win the filter had just bought. The two octaves agree on the factor to
+; within 0.4%, which is what makes a uniform RESCALE the right correction
+; rather than a refit: the SHAPE of the curve is unchanged, only its scale.
+; SOFTC/SOFTK and the per-octave margins are therefore untouched, and the
+; measured adherence returns to the values the last refit gated.
 SOFTSCALE = 8
-SOFTA     = 27498       ; 3437.3 cycles/node at phase 0  (raw game fit)
-SOFTB     = 637         ;  +79.7 cycles/node per unit of phase, up to SOFTK
+SOFTA     = 25357       ; 3169.6 cycles/node at phase 0  (raw game fit /1.0845)
+SOFTB     = 587         ;  +73.4 cycles/node per unit of phase, up to SOFTK
 SOFTC     = 0           ;  flat above SOFTK: past ~15 the measured curve is
                         ;  level, and an unconstrained fit only reads noise
                         ;  out of it (a falling tail would under-price the

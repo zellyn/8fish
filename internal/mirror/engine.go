@@ -198,17 +198,23 @@ type Engine struct {
 	undo        [MaxPly]undoRec
 	hashStk     [MaxPly]uint32
 	inChk       [MaxPly]bool
-	futile      [MaxPly]bool
-	qsKind      [MaxPly]bool
-	raised      [MaxPly]bool
-	legal       [MaxPly]int
-	deltaT      [MaxPly]int
-	ttFrom      [MaxPly]byte // TT move for ordering (NoSq = none)
-	ttTo        [MaxPly]byte
-	ttBF        [MaxPly]byte // best move found (for the TT store)
-	ttBT        [MaxPly]byte
-	killer      [MaxPly][2]Move
-	moves       [MaxPly][]Move
+	// checkerSq mirrors asm CHECKERSQ[ply] (defs.inc): a square the side to
+	// move at this ply is checked FROM, or NoSq for "not known". Only
+	// meaningful where inChk[ply]. The pre-make evasion filter reads it,
+	// and it must reproduce the asm's CHOICE of checker, not merely find
+	// some checker — see asmCheckerSq.
+	checkerSq [MaxPly]byte
+	futile    [MaxPly]bool
+	qsKind    [MaxPly]bool
+	raised    [MaxPly]bool
+	legal     [MaxPly]int
+	deltaT    [MaxPly]int
+	ttFrom    [MaxPly]byte // TT move for ordering (NoSq = none)
+	ttTo      [MaxPly]byte
+	ttBF      [MaxPly]byte // best move found (for the TT store)
+	ttBT      [MaxPly]byte
+	killer    [MaxPly][2]Move
+	moves     [MaxPly][]Move
 
 	tt [4096]ttEntry
 }
@@ -631,6 +637,129 @@ func (e *Engine) pawnAttacks(sq, bySide byte) bool {
 	return false
 }
 
+// asmCheckerSq reproduces the square asm make() records in CHECKERSQ[ply]
+// when it propagates a check, given the move that was just played (from ->
+// to, already applied to the board and the side already flipped, so the side
+// to move IS the checked side).
+//
+// FAITHFULNESS, not merely correctness: the asm's pre-make evasion filter
+// judges moves against THIS square, and the filter decides whether make()
+// runs at all. Make counts are a parity-gate quantity (and the cycle model's
+// main regressor), so picking a DIFFERENT checker than the asm would — which
+// a position under double check offers — makes the mirror's tree accounting
+// diverge even though both engines search the same tree. So this follows the
+// asm's order exactly: ckfast's DIRECT test first (the piece now on `to`,
+// with blockers), then cknodir's DISCOVERED walk out from the king along the
+// ray through the vacated `from`.
+//
+// NoSq means "the asm would not have a square here", which makes the filter
+// fall back to make + attacked(). It is returned only for shapes the caller
+// has already excluded (castle/ep) or that cannot arise, so it is a safety
+// net rather than a live path.
+func (e *Engine) asmCheckerSq(from, to byte) byte {
+	p := &e.Pos
+	ksq := p.PieceSq[int(p.Side)<<1] // the checked side's king (slot 0/16)
+	// asm ckfast declines a KING on `to` ("a king never gives check"): two
+	// adjacent kings only occur in an illegal position, whose child is
+	// discarded before it is searched, so the recorded square is never read
+	// there. Modelled anyway, because "the mirror differs but it does not
+	// matter" is a sentence that stops being true without warning.
+	if p.Board[to]&TypeMask != King && e.attacksSquare(to, ksq) {
+		return to // DIRECT: the piece that just landed on `to` checks
+	}
+	// DISCOVERED: walk from the king along the ray through the now-empty
+	// `from` and stop on the first occupied square, exactly as ckdwalk does.
+	d := int(int8(deltaTab[(int(from)-int(ksq)+0x77)&0xFF]))
+	if d == 0 {
+		return NoSq
+	}
+	for s := int(ksq) + d; s >= 0 && s < 128 && s&0x88 == 0; s += d {
+		if p.Board[s] != 0 {
+			return byte(s)
+		}
+	}
+	return NoSq
+}
+
+// attacksSquare reports whether the piece standing on `from` attacks `to`,
+// blockers included: one slot's worth of the attacked() body, which is what
+// asm ckfast's direct-check test computes from the same tables. Not charged
+// to the cycle account — the asm folds it into make()'s gives-check work.
+func (e *Engine) attacksSquare(from, to byte) bool {
+	p := &e.Pos
+	pc := p.Board[from]
+	if pc == 0 {
+		return false
+	}
+	idx := (int(to) - int(from) + 0x77) & 0xFF
+	bits := attackTab[idx]
+	if bits == 0 {
+		return false
+	}
+	typ := pc & TypeMask
+	if typ == Pawn {
+		if pc&ColorMask == 0 {
+			return bits&atkWPawn != 0
+		}
+		return bits&atkBPawn != 0
+	}
+	if typeAtkTab[typ]&bits == 0 {
+		return false
+	}
+	if typ == Knight || typ == King {
+		return true
+	}
+	delta := int(int8(deltaTab[idx]))
+	for cur := int(from) + delta; ; cur += delta {
+		if byte(cur) == to {
+			return true
+		}
+		if p.Board[cur] != 0 {
+			return false
+		}
+	}
+}
+
+// evasionFiltered reports whether the asm's PRE-MAKE evasion filter
+// (asm/search.s sdevade) would reject m at an in-check node, i.e. prove it
+// illegal without making it. A non-king, non-ep move can only answer a check
+// by capturing the checker or interposing on the checker->king ray.
+//
+// The mirror needs this even though the filter is TREE-IDENTICAL: it removes
+// make()/unmake() calls, and the parity gates compare make counts (and price
+// them through Costs.Make). A mirror without the filter would report the same
+// tree and a different number of makes.
+//
+// Only rejection has to be sound; false is always safe (the caller then makes
+// the move and runs the real legality test), which is why every shape the asm
+// declines to judge returns false here too.
+func (e *Engine) evasionFiltered(m Move, ply int) bool {
+	if m.Flags&FlEP != 0 {
+		return false // ep capture: the victim is not on m.To
+	}
+	csq := e.checkerSq[ply]
+	if csq == NoSq {
+		return false // no checker square recorded at this ply
+	}
+	p := &e.Pos
+	ksq := p.PieceSq[int(p.Side)<<1]
+	if m.From == ksq {
+		return false // king move: any square may be legal
+	}
+	if m.To == csq {
+		return false // captures the checker
+	}
+	// asm CHECKDIR[ply]: the step from the checker toward the king. 0 for a
+	// knight checker, and then the first compare below rejects everything.
+	dir := deltaTab[(int(ksq)-int(csq)+0x77)&0xFF]
+	step := deltaTab[(int(m.To)-int(csq)+0x77)&0xFF]
+	if step == 0 || step != dir {
+		return true // m.To is not on the checking ray
+	}
+	// On the ray: strictly between the checker and the king, or past the king?
+	return deltaTab[(int(ksq)-int(m.To)+0x77)&0xFF] != dir
+}
+
 // curInCheck: is the side to move in check?
 func (e *Engine) curInCheck() bool {
 	p := &e.Pos
@@ -736,6 +865,18 @@ func (e *Engine) make(m Move) {
 	e.attackInMake = true
 	e.inChk[p.Ply] = e.curInCheck()
 	e.attackInMake = false
+
+	// Checker square for the pre-make evasion filter (asm board.s
+	// cksetck/cksetcx). The asm gets this out of the very tables that
+	// propagate the check, so it knows either the DIRECT checker (the piece
+	// now on m.To) or, failing that, the DISCOVERED slider on the king's ray
+	// through the vacated m.From. Castles and ep captures take the asm's
+	// full-scan curincheck path, which yields no square at all.
+	if e.inChk[p.Ply] && m.Flags&(FlCastle|FlEP) == 0 {
+		e.checkerSq[p.Ply] = e.asmCheckerSq(m.From, m.To)
+	} else {
+		e.checkerSq[p.Ply] = NoSq
+	}
 
 	if p.PDirty && e.Features&FtPstruct != 0 {
 		e.pawnterm()

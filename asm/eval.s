@@ -321,6 +321,8 @@ tkppawn:
         lda RANKBIT,y
         eor PWBITS,x
         sta PWBITS,x
+        dec NPAWNS              ; one fewer pawn on the board (every capture
+                                ;  path funnels through here, ep included)
         lda VICTIM              ; re-establish X (nibble); Y unchanged
         and #$0F
         tax
@@ -495,6 +497,7 @@ tkqpawn:
         lda RANKBIT,y
         eor PWBITS,x
         sta PWBITS,x
+        dec NPAWNS              ; (as tkppawn: the hash-elided qs twin)
         lda VICTIM
         and #$0F
         tax
@@ -611,6 +614,8 @@ ptbuild:
         lda #$FF                ; masks rebuilt from scratch: every file's
         sta FDIRTY              ;  cached per-file term (PTFVAL) is stale
         lda #0
+        sta NPAWNS              ; the pawn count is rebuilt by the same scan
+                                ;  (make/unmake maintain it from here on)
         ldx #7
 ptclr:  sta PWBITS,x
         sta PBBITS,x
@@ -626,6 +631,7 @@ ptscan: lda PIECESQ,x
         and #TYPEMASK
         cmp #PAWN
         bne ptnext
+        inc NPAWNS
         lda RANKBIT,y           ; 1 << rank
         sta EVTMP
         tya

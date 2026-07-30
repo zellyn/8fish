@@ -323,6 +323,11 @@ func (e *Engine) orderedMoveLoop() int {
 			continue
 		}
 
+		// Pre-make evasion filter, as moveLoop (asm sdevade): provably
+		// illegal in-check moves never reach make().
+		if e.inChk[ply] && e.evasionFiltered(m, ply) {
+			continue
+		}
 		e.make(m)
 		moverKing := p.PieceSq[int(p.Side^ColorMask)<<1]
 		if e.attacked(moverKing, p.Side) {

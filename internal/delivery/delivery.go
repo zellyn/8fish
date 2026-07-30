@@ -8,30 +8,31 @@
 // "this piece here, that piece there" — so the gaps between the pieces are
 // part of the image and are paid for in disk sectors.
 //
-//	$0C00  m8sdboot.bin                57 B  the run-once copier
-//	$0D00  m8.bin                   4,222 B  the UI payload (staged; the
+//	$0D00  m8sdboot.bin                57 B  the run-once copier
+//	$0E00  m8.bin                   4,441 B  the UI payload (staged; the
 //	                                         copier moves it to $E000)
 //	$2000  internal/book/bookblob.bin 7,407 B the resident opening book
-//	$4000  engine.bin              31,642 B  the engine
+//	$4000  engine.bin              31,906 B  the engine
 //
-// WHY $0C00 AND NOT $0800. `diskii mksd` refuses an image over
-// MaxImage (45,056) bytes. The span runs from the staging base to the end of
-// engine.bin at $BB99, so the base is the only free variable, and at the
-// BLOAD layout's $0800 the image is 45,978 bytes — 922 too many. Raising the
-// base shrinks the image byte for byte but eats the staging area the UI
-// payload has to fit in (it must end below the book at $2000):
+// WHY NOT $0800. `diskii mksd` refuses an image over MaxImage (45,056)
+// bytes. The span runs from the staging base to the end of engine.bin, so the
+// base is the only free variable, and at the BLOAD layout's $0800 the image
+// does not fit. Raising the base shrinks the image byte for byte but eats the
+// staging area the UI payload has to fit in (it must end below the book at
+// $2000). At the file sizes of 2026-07-30 (engine 31,906 B, UI 4,441 B):
 //
 //	base    image    spare   UI growth room
-//	$0800  45,978     -922        1,666
-//	$0C00  44,954      102          642     <- chosen
-//	$0D00  44,698      358          386
-//	$0E00  44,442      614          130
-//	$0F00  44,186      870         -126
+//	$0800  46,242   -1,186        1,447
+//	$0C00  45,218     -162          423
+//	$0D00  44,962       94          167     <- chosen
+//	$0E00      -        -             -     payload overlaps the book
 //
-// $0C00 is the lowest base that fits, i.e. the one that leaves the UI the
-// most room to grow. Both margins are small and both are consumed by ordinary
-// growth (the engine eats the spare, the UI eats the growth room), so
-// TestDiskLedger asserts both rather than trusting this comment.
+// The chosen base is the LOWEST that fits, i.e. the one that leaves the UI
+// the most room to grow. Both margins are small and both are consumed by
+// ordinary growth (the engine eats the spare, the UI eats the growth room),
+// so TestDiskLedger asserts both rather than trusting this comment — and
+// recomputing the table is one call to LoadAt/Image per candidate base, which
+// beats arguing from a comment that has already gone stale once.
 //
 // NEITHER MARGIN IS A WALL. It is our disk. The 44 KB cap and the contiguous
 // span are properties of the SIMPLEST Standard Delivery layout — one shot,
@@ -71,12 +72,25 @@ import (
 const (
 	// Base is the first byte of the delivered image, and the address
 	// `diskii mksd --address` is given. It must be page-aligned.
-	Base = 0x0C00
+	//
+	// RAISED $0C00 -> $0D00 on 2026-07-30, spending MARGIN 2 to buy back
+	// MARGIN 1 exactly as the table above and TestDiskLedger's failure
+	// message prescribe. The engine's pre-make evasion filter (asm/search.s
+	// sdevade, -5.3% of all search cycles) added 130 bytes of CODE, and
+	// because the TABLES segment is page-aligned those 130 bytes cost the
+	// IMAGE a full 256-byte page: SD spare went 94 B -> -162 B and the disk
+	// stopped building. No placement fitted -- even moving the whole filter
+	// into the page-tail-free TABLES segment costs 130 image bytes against
+	// 94 bytes of spare -- so this is the deliberate decision the ledger
+	// exists to force, taken with the numbers in hand. After the move: SD
+	// spare 94 B again, UI growth room 423 -> 167 B. TestDiskLedger logs the
+	// whole table from the REAL file sizes, so read it there, not here.
+	Base = 0x0D00
 	// CopierOrg is where m8sdboot.bin lands (and where execution starts).
-	CopierOrg = 0x0C00
+	CopierOrg = Base
 	// PayloadOrg is where m8.bin is staged before the copier lifts it to
 	// $E000. asm/m8sd.cfg defines the same value as the UIPAYLOAD symbol.
-	PayloadOrg = 0x0D00
+	PayloadOrg = Base + SectorBytes
 	// BookOrg is the resident opening book's home, and therefore the hard
 	// ceiling on the staged payload.
 	BookOrg = 0x2000

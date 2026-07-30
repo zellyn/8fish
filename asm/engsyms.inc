@@ -5,20 +5,20 @@
 ; UI is a SEPARATE link running from Language Card RAM at $E000, so
 ; engine.bin is untouched by the UI's existence (docs/ui-design.md §8).
 
-ENG_PCOSTHI        = $42BC   ; FT2_SOFTCLK per-phase cost table, high bytes
-ENG_PCOSTLO        = $42A3   ; FT2_SOFTCLK per-phase cost table, low bytes
-ENG_LCCODE_LOAD    = $BB61   ; where the aux-bank TT primitives sit in the engine image
+ENG_PCOSTHI        = $42C1   ; FT2_SOFTCLK per-phase cost table, high bytes
+ENG_PCOSTLO        = $42A8   ; FT2_SOFTCLK per-phase cost table, low bytes
+ENG_LCCODE_LOAD    = $BC61   ; where the aux-bank TT primitives sit in the engine image
 ENG_LCCODE_RUN     = $D000   ; where they must be copied to ($D000)
 ENG_LCCODE_SIZE    = $0041   ; how many bytes to copy
-ENG_adaptaborthi   = $BA7A   ; FT2_ADAPT hard-abort override (ABORTL = 2*CEILMAX)
-ENG_adaptmaybe     = $BA8D   ; FT2_ADAPT post-iteration policy
-ENG_attacked       = $5BAB   ; square-attacked test (the legality half of move validation)
-ENG_bookprobe      = $7922   ; resident opening-book probe (C=1 on a hit)
-ENG_ccsite         = $42D9   ; the `jsr checkclock` whose operand FT2_SOFTCLK patches
-ENG_checkclocks    = $425A   ; FT2_SOFTCLK accumulating-clock entry point
-ENG_curincheck     = $4248   ; is the side to move in check?
-ENG_evalinit       = $59D4   ; root accumulators, PHASE and HASH0-3 from the board
-ENG_gennodef       = $4215   ; full-width generate + per-ply move-list bookkeeping
+ENG_adaptaborthi   = $BB7A   ; FT2_ADAPT hard-abort override (ABORTL = 2*CEILMAX)
+ENG_adaptmaybe     = $BB8D   ; FT2_ADAPT post-iteration policy
+ENG_attacked       = $5BF0   ; square-attacked test (the legality half of move validation)
+ENG_bookprobe      = $79A4   ; resident opening-book probe (C=1 on a hit)
+ENG_ccsite         = $42DE   ; the `jsr checkclock` whose operand FT2_SOFTCLK patches
+ENG_checkclocks    = $425F   ; FT2_SOFTCLK accumulating-clock entry point
+ENG_curincheck     = $424D   ; is the side to move in check?
+ENG_evalinit       = $5A19   ; root accumulators, PHASE and HASH0-3 from the board
+ENG_gennodef       = $421A   ; full-width generate + per-ply move-list bookkeeping
 ENG_iterate        = $4137   ; one full-window search at CURDEPTH (the UI drives ID itself)
-ENG_make           = $5DA3   ; play FROM/TO/MVFLAGS, PLY++
-ENG_unmake         = $62FB   ; undo the move at PLY-1
+ENG_make           = $5DE8   ; play FROM/TO/MVFLAGS, PLY++
+ENG_unmake         = $6374   ; undo the move at PLY-1

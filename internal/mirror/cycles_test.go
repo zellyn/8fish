@@ -263,11 +263,23 @@ func TestCycleBudgetDiscountsFeature(t *testing.T) {
 	// and the tax only shows as a node difference near one of those
 	// boundaries; a sparse sweep can miss every boundary purely because the
 	// cost table was recalibrated (which is what happened when the phase
-	// term rescaled Est). A grid this dense always straddles one.
+	// term rescaled Est, and again when the pre-make evasion filter took
+	// makes out of Est on 2026-07-30).
+	//
+	// DENSITY RULE, so the next recalibration does not silently reduce this
+	// to a coincidence: the tax is worth roughly 4% of Est here (219 cycles
+	// x ~1 eval/node against ~5000 cycles/node), so a boundary is only
+	// straddled by budgets within ~4% above it. The STEP therefore has to
+	// stay a few percent of the budget, not a fixed 20M that is 50% of the
+	// first boundary and 3% of the last. The range stops at 320M because
+	// the d7 boundary is the last one below it and bigger budgets only cost
+	// time. bites is logged: if it ever drops toward 1, the grid has drifted
+	// off the boundaries again and wants re-tuning, not deleting.
 	var totUn, totTx uint64
 	bit := false
+	bites := 0
 	var budgets []uint64
-	for b := uint64(40_000_000); b <= 600_000_000; b += 20_000_000 {
+	for b := uint64(40_000_000); b <= 320_000_000; b += 4_000_000 {
 		budgets = append(budgets, b)
 	}
 	for _, budget := range budgets {
@@ -284,6 +296,7 @@ func TestCycleBudgetDiscountsFeature(t *testing.T) {
 		}
 		if taxed.Nodes < untaxed.Nodes {
 			bit = true
+			bites++
 		}
 		totUn += untaxed.Nodes
 		totTx += taxed.Nodes
@@ -293,8 +306,9 @@ func TestCycleBudgetDiscountsFeature(t *testing.T) {
 	if !bit {
 		t.Errorf("the rook-term tax never reduced node count across the budget sweep")
 	}
-	t.Logf("swept totals: untaxed %d nodes vs taxed %d nodes (%.1f%% fewer under the tax)",
-		totUn, totTx, 100*(1-float64(totTx)/float64(totUn)))
+	t.Logf("swept totals: untaxed %d nodes vs taxed %d nodes (%.1f%% fewer under the tax); "+
+		"the tax bit at %d of %d budgets (see the density rule above)",
+		totUn, totTx, 100*(1-float64(totTx)/float64(totUn)), bites, len(budgets))
 
 	// A NODE budget cannot see the tax at all: identical tree => identical
 	// nodes/depth regardless of EvalTermsCost. That is exactly the blind

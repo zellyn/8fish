@@ -3,6 +3,51 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-31 — ★ THE AUDIT WAS LYING: 2.4% of gauntlet games were harness artifacts reported as "0 quirk adjudications"
+
+Chasing a loose end I had noted twice and never opened — "8 games have no
+TERMINATION line (unclassified)" — turned out to be an instrument defect in
+the analyser that produces this project's headline number.
+
+**Root cause: `plies=-1`.** Quirk-unresolved games emit
+`TERMINATION g19 result=draw reason=quirk-unresolved plies=-1`, and
+`analyze.py` matched `plies=(\d+)` — no sign. Those lines therefore failed the
+regex **entirely**, landing in NEITHER the termination classifier NOR the
+quirk counter. The data was never missing; every shard has exactly one
+TERMINATION per game (verified: 42/42 in all twelve).
+
+**The consequence.** Two consecutive gauntlets printed
+`quirk-adjudications: 0/252 = 0.0%` and `CrossCheckHistory DESYNC: 0 (CLEAN)`
+while **12 games (2.4%) had ended as harness artifacts scored as draws** —
+and asymmetrically: **8 in the soft arm, 4 in the exact arm**. I relayed
+"zero quirk adjudications" as evidence of a clean run, twice. It was a false
+clean bill of health.
+
+**Impact on the numbers: small, and it does not change any conclusion.**
+Excluding the artifact draws:
+
+| arm | as reported | artifacts excluded | delta |
+|---|---|---|---|
+| `soft` (device) | 66.47%, +119 | 67.01%, **+123** | +4.2 |
+| `off` (exact) | 62.70%, +90 | 62.90%, **+92** | +1.5 |
+
+Both move slightly UP, the gap between arms is essentially unchanged, and the
+previous entry's conclusion (the decline was noise; the direct A/B says the
+build is not weaker) stands. The earlier +161 run had the same 13 unmatched
+lines, so it was affected identically and the before/after comparison is
+unaffected in direction.
+
+**Fixed:** the regex accepts a sign, so both arms now classify 252/252 and the
+audit reports the artifacts as artifacts (3.2% and 1.6%, tagged
+`<-- HARNESS ARTIFACT`).
+
+**The lesson, which is the fifth of this exact shape this week.** An audit
+that cannot parse a case reports that case as ABSENT rather than as UNKNOWN,
+and "0.0%" reads as reassurance. The "unclassified" count was printed right
+next to the "0 quirks" line the whole time and I read past it twice, because
+the number I was looking for said what I wanted. A count of things the
+instrument could not classify belongs in the FAILURE path, not in a footnote.
+
 ## 2026-07-31 — the direct A/B settles it: the Sargon decline was NOISE, and for a tree-identical speedup the CYCLE COUNT is the better instrument
 
 Current engine vs the pre-optimization build (`d36fda6`, before the evasion

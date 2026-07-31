@@ -85,7 +85,15 @@ class Arm:
             else:
                 self.d += 1
                 self.scores.append(0.5)
-        for m in re.finditer(r"TERMINATION g\d+ result=(\S+) reason=(\S+) plies=(\d+)", txt):
+        for m in re.finditer(# plies is -1 for quirk-unresolved games, so this MUST accept a sign.
+            # It did not until 2026-07-31, and the consequence was severe: those
+            # lines failed the regex entirely, so they landed in NEITHER the
+            # termination classifier NOR the quirk counter. Two gauntlets
+            # therefore printed "quirk-adjudications: 0/252 = 0.0%" while 12
+            # games (2.4%) had ended as harness artifacts scored as draws --
+            # a false clean bill of health on the instrument that produces this
+            # project's headline number.
+            r"TERMINATION g\d+ result=(\S+) reason=(\S+) plies=(-?\d+)", txt):
             self.terms[(m.group(1), m.group(2))] += 1
             plies = int(m.group(3))
             self.max_plies = max(self.max_plies, plies)

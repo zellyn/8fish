@@ -3,6 +3,49 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-31 — the direct A/B settles it: the Sargon decline was NOISE, and for a tree-identical speedup the CYCLE COUNT is the better instrument
+
+Current engine vs the pre-optimization build (`d36fda6`, before the evasion
+filter), equal 30 s cycle budget, same opponent, same conditions, only the
+engine differs. 300 games:
+
+    +92 =121 -87   score 50.8%   elo +6 +/- 30   llr(0,10) 0.03
+    spend A=402.4G B=400.9G  equal-total-spend A/B = 1.0038 (0.38%)
+    adherence 0.8830 / 0.8791
+
+**Spend is equal to 0.38%**, so both builds burned the same compute and the
+comparison is clean.
+
+**This closes the previous entry's open question.** The Sargon re-measure had
+both arms drifting down and could not say whether that was noise or something
+real. Here the point estimate is **positive** (+6), so the current build is
+not weaker; the Sargon decline was sampling noise, as the 1.2-1.8 SE drops
+suggested.
+
+**But it does NOT confirm the gain either, and cannot.** −8.5% cycles is
+1/0.915 = 1.093x the nodes, log2 = **0.128 doublings**, which at this
+project's measured 130-150 Elo/doubling predicts **+17**. The interval here
+is [−24, +36] — it *contains* +17 comfortably, but ±30 cannot resolve a
+17-point effect. Getting to ±8 would need roughly (30/8)² ≈ 14x the games,
+about 4,200 at 30 s/move. That is not worth buying.
+
+**★ The methodological point, which matters more than the number.** For a
+**tree-identical** speedup, the Elo SPRT is the WEAKER instrument. The cycle
+measurement is exact and noise-free (−5.26%, −2.48%, −0.74%, each verified on
+identical trees with `TestMicroAB` pinning score, move and every node count);
+the SPRT adds ±30 of sampling noise and no information. The causal chain —
+fewer cycles per node → more nodes per budget → more depth → more Elo — has
+no free parameter to doubt once the tree is proven identical.
+
+So the standing rule "asm time-budget SPRT is the final gate" is right for
+FEATURES, which change what the engine plays and therefore need a
+play-quality verdict. It is the wrong gate for a pure speedup: there,
+**demanding an SPRT substitutes a noisy instrument for an exact one.** Record
+the cycles, prove the tree, and stop.
+
+Practical consequence: the −8.5% stands as measured, and no further Sargon
+games should be spent trying to see it.
+
 ## 2026-07-31 — ★ HONEST NEGATIVE: the Sargon re-measure did NOT show the predicted gain. Both arms moved DOWN, within noise.
 
 I predicted +30-35 Elo. The measurement says otherwise, and the prediction is

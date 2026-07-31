@@ -9,3 +9,10 @@
 .asmbuild.lock
 *.dsk
 *.img
+
+# The hand-drawn DazzleDraw board art is a SOURCE asset, not a build
+# product. The blanket *.bin rule above hid it from git entirely: it
+# lived only in one working tree, was never committed, and the UI design
+# was written without it (which is how the shipped board ended up as FEN
+# letters). Keep it tracked.
+!assets/*.bin

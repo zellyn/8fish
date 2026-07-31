@@ -128,9 +128,66 @@ Derivations for the rejected/deferred rows:
   at once. Sargon III has exactly this problem, which is why ESC toggles between
   its board and its text screen. 40-column text shows **all of it
   simultaneously**, and that is a straight UX win over the period reference.
-- **Double hi-res.** Costs a quarter of the transposition table. Paying
-  measurable playing strength for prettier pieces is the wrong trade for a
-  project whose whole thesis is squeezing strength out of a 1 MHz 6502.
+- **Double hi-res.** ~~Costs a quarter of the transposition table.~~ The
+  *reasoning* here was wrong, but the verdict happens to survive. Investigated
+  2026-07-31; see the measurements below before repeating either mistake.
+
+  **The "25% of the TT" figure was an artefact of the TT's base address, not a
+  property of DHGR.** DHGR needs aux `$2000-$3FFF`; the table merely happened to
+  start at `$0200` and so happened to span it. The TT is the only aux consumer
+  in the codebase, and `TTBASE` is a single constant in `asm/defs.inc` —
+  `asm/tt.s` reaches it only through `adc #>TTBASE`, so relocating the table
+  costs **2 bytes of `engine.bin`** (the two inlined immediates in
+  `ttprobe`/`ttstore`) and nothing else. Relocation was measured to be
+  transparent: with `TTBASE` at `$0400`, `$2000`, `$3000` and `$3F00`,
+  `internal/chesstest` passes exactly as at `$0200`.
+
+  **But the obvious destination does not fit, by one page.** The tempting
+  arithmetic is `$C000 - $4000 = $8000 = 4096 x 8` — an exact fit for the table
+  above the DHGR aux half. It assumes aux is usable to `$BFFF`, and it is not:
+  `$BF00-$BFFF` is **reserved in both banks** by the memory map (D8) precisely
+  "so engine tables can never collide" with the harness trap addresses
+  (`docs/testing.md`). `TTBASE = $4000` is not a paper violation — it fails
+  `internal/chesstest` hard (searches stop terminating), while `$3F00` passes.
+  So the real budget above the DHGR page is `$4000-$BEFF` = **32,512 B against
+  the 32,768 B** a 4096-entry table needs — **256 bytes short**.
+
+  DHGR's aux half at `$2000-$3FFF` splits aux into two blocks and neither holds
+  the table:
+
+  ```
+  aux $0200-$1FFF    7,680 B   (holds the book: 7,407 B)
+  aux $2000-$3FFF    8,192 B   DHGR aux half -- fixed by hardware
+  aux $4000-$BEFF   32,512 B   256 B too small for 4096 x 8
+  ```
+
+  So **DHGR and a full 4096-entry TT are mutually exclusive** while D8 stands
+  and `tt.s` keeps its 12-bit-index x 8-byte-entry addressing. The verdict
+  (reject) is unchanged; the *price* is not a quarter of the table, it is one
+  page of aux, and the only ways through are to lift D8's aux-bank reservation
+  (the traps are main-bank only and are already gated on `RamRd`/`RamWrt`, so
+  the reservation may be belt-and-braces — but the observed `$4000` failure is
+  NOT yet root-caused, so this is unproven), or to change the entry layout.
+
+  Lesson worth keeping: when a cost is attributed to a *feature*, check whether
+  it is really attributable to the current *arrangement* — and then check the
+  replacement arrangement against the memory map instead of against arithmetic.
+
+- **Hi-res page 1, and the actual artwork.** The 28-px/4-byte square priced
+  above was sized for *invented* glyphs. The real asset
+  (`assets/chess-dazzledraw-save.bin`, hand-drawn in DazzleDraw) is 560-wide
+  DHGR with **44 x 21** squares, i.e. 22 px at 280 — neither 28 nor
+  byte-aligned. Two further facts any hi-res attempt must budget for, both
+  measured from the asset:
+  - The board is **172 scanlines** as drawn, but mixed mode leaves only 160.
+    Dropping the top 2 rows of each square (the most redundant: 98-99%
+    identical to their neighbours, 28 deviating pixels across all 64 squares)
+    gives 19 rows/square = 152 + borders = 154, which fits with 6 to spare.
+  - Columns 0-7 and 35-43 of every square are **pure background in all 64
+    squares**, so dropping 2 of them is lossless — and dropping an *even*
+    number preserves the 1-on-1-off dither phase exactly. 42 px = 6 DHGR bytes
+    (3 aux + 3 main), which makes every square byte-aligned and removes
+    pre-shifting entirely.
 
 ### 3.2 The chosen encoding
 

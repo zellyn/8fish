@@ -3,6 +3,57 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-31 — ★ HONEST NEGATIVE: the Sargon re-measure did NOT show the predicted gain. Both arms moved DOWN, within noise.
+
+I predicted +30-35 Elo. The measurement says otherwise, and the prediction is
+retracted rather than defended.
+
+**The prediction.** Since the +161 device measurement the engine gained
+−8.5% cycles (evasion filter −5.26%, pin ray −2.48%, pawn count −0.74%) and
+the margin-tail fit restored 8-10% of clock the long levels had been
+discarding. Those compound to ~18% more effective compute at 30 s — about
+0.24 doublings, order +30-35 Elo, which should sit above a 252-game arm's
+noise floor.
+
+**The measurement** (504 games, paired, ponder off both sides, same rig,
+same seeds, same openings, same budget as the +161 run):
+
+| arm | before | after | delta |
+|---|---|---|---|
+| `soft` (device config) | 71.63%, **+161** [+126, +199] | 66.47%, **+119** [+83, +157] | −5.16% |
+| `off` (exact clock) | 70.24%, **+149** [+109, +193] | 62.70%, **+90** [+54, +128] | −7.54% |
+
+Each drop is only **1.2-1.8 SE** — neither is significant on its own, and the
+intervals overlap. But both moved DOWN when the prediction was firmly UP, so
+the honest summary is: **the predicted gain is not visible, and the point
+estimates moved the wrong way.**
+
+**Spend symmetry, read first as always:** `soft` 0.9618, `off` 0.9387 (both
+under 1.0, 8fish still taking less compute than Sargon; ponder confirmed zero
+on both). The soft arm's ratio rose from 0.9554, and its edge over the exact
+arm grew from +11.7 to **+28.6 Elo** — which IS consistent with the margin fit
+doing what it was built to do. That part of the story holds; it is the
+absolute level that did not move as predicted.
+
+**Audit: clean.** Both arms 0 CrossCheckHistory desyncs, 0 unreadable/illegal
+markers, 0 Hard-Mode/LEVEL-9 violations across all 504, 0 quirk
+adjudications, 0 games reaching the move-99 overflow zone. So this is not a
+harness artifact. (8 and 5 games respectively still have no TERMINATION line
+and are unclassified — the same unexplained residue as the previous run.)
+
+**Why I am not concluding "the optimizations made it weaker".** The exact-clock
+arm's only change is a faster engine under an unchanged cycle budget, which
+can only buy depth. Two candidate explanations remain and the gauntlet cannot
+separate them: (a) ordinary sampling noise, which 1.2-1.8 SE is entirely
+consistent with; (b) something real that this instrument is too blunt to see.
+
+**Next step, chosen because the gauntlet is the wrong tool for this question:**
+a direct asm SPRT of the current engine against the pre-optimization build
+(`d36fda6`, before the evasion filter) at an equal 30 s cycle budget. Same
+opponent, same conditions, only the engine differs — far sharper per game
+than Sargon, and it answers "did −8.5% cycles make it stronger?" directly.
+Running now.
+
 ## 2026-07-30 — ★ THE LONG LEVELS WERE THROWING AWAY 8-10% OF THEIR CLOCK, at every opening and since the 2026-07-27 recalibration. Margin table octaves 15+ fitted: **100% → 92%**, for THREE bytes and no engine change
 
 The `PROBE_FIRSTOPEN=16` slice that failed the equal-spend band was real but

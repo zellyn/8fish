@@ -526,7 +526,7 @@ func (b *Bridge) probeBook() (move string, ok bool, err error) {
 	// the move number, not on where the game left the book. The engine does
 	// the key/search/pick; we only feed it r.
 	r := b.bookRnd()
-	res, err := chesstest.AsmBookProbe(b.Bin, b.Defs, b.BookEntry, b.Book.Blob(), pos, r)
+	res, err := chesstest.AsmBookProbe(b.Bin, b.Defs, b.BookEntry, b.Book.EntriesBlob(), pos, r)
 	if err != nil {
 		return "", false, err
 	}

@@ -18,8 +18,8 @@ import (
 // that the played move really came from the book and that the UI's
 // Pascal-string walk lands on the name the book agrees with.
 func TestBookIntegration(t *testing.T) {
-	blob := book.DefaultBlob()
-	b, err := book.Load(blob)
+	blob := book.DefaultEntries()
+	b, err := book.Load(blob, book.DefaultNames())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,6 +100,113 @@ func TestBookIntegration(t *testing.T) {
 	if got := strings.TrimSpace(u.Screen().Text(16)); got != "" {
 		t.Errorf("out of book, row 16 still says %q", got)
 	}
+}
+
+// TestBookNameRestoresBank1 gates the one soft-switch discipline the book
+// split introduced, from both sides at once.
+//
+// asm/m8.s's uibookname is the ONLY routine in 8fish that selects Language
+// Card BANK 2. It has to, because that is where the opening book's name table
+// lives; it may, because it runs at $E000, which bank switching does not
+// re-map. But while bank 2 is in, $D000-$DFFF is NOT the machine everything
+// else assumes:
+//
+//	$D000  LCCODE   ttfetch (every transposition-table probe) and the book's
+//	                bkfetch/bkhdr (every book probe). A jsr into bank 2 here
+//	                lands in the middle of a name string.
+//	$D300  DHTILES  the board artwork. A repaint would blit 1,824 bytes of
+//	                opening names onto the chessboard.
+//
+// Neither failure is loud, and neither is reachable from a screen comparison:
+// the name row would still be RIGHT. So invoke the routine directly and look
+// at the switch.
+//
+// It is TWO-SIDED on purpose. Asserting only "bank 1 is back" would pass if
+// uibookname never switched at all -- and then it would be reading the name
+// table's address out of bank 1, i.e. out of the artwork. So it also asserts
+// the NAME, which can only be read correctly from bank 2.
+func TestBookNameRestoresBank1(t *testing.T) {
+	blob := book.DefaultEntries()
+	b, err := book.Load(blob, book.DefaultNames())
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := ui.Boot(root, blob)
+	if err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	fn, ok := u.Lbl["uibookname"]
+	if !ok {
+		t.Fatal("asm/m8t.lbl has no uibookname label")
+	}
+	// The resting state, which the boot must have left behind: bank 1, LC RAM
+	// readable and writable. If this is already wrong the rest proves nothing.
+	if u.M.Mem.LCBank2 || !u.M.Mem.LCReadRAM || !u.M.Mem.LCWriteEnabled {
+		t.Fatalf("the booted UI is not in the resting Language Card state: "+
+			"bank2=%v readRAM=%v writeRAM=%v", u.M.Mem.LCBank2, u.M.Mem.LCReadRAM,
+			u.M.Mem.LCWriteEnabled)
+	}
+
+	const (
+		stub    = uint16(0x0300) // main page 3 scratch; cmd_quit borrows the same bytes
+		uibookb = uint16(0xF780) // asm/ui.s UIBOOKB
+	)
+	// `jsr uibookname`, and stop the moment the rts lands on stub+3. Stepping
+	// to a PC rather than storing to the harness exit trap is deliberate: the
+	// trap latches, so a second call in the same machine would return the
+	// first one's answer without executing an instruction.
+	for i, v := range []byte{0x20, byte(fn), byte(fn >> 8)} {
+		u.Poke(stub+uint16(i), v)
+	}
+	for id := byte(0); int(id) < 3; id++ {
+		want := "BOOK: " + b.Name(id)
+		u.Poke(u.Defs["CUROPENING"], id)
+		for i := range 64 { // scrub the output buffer between calls
+			u.Poke(uibookb+uint16(i), 0)
+		}
+		u.M.CPU.SetPC(stub)
+		returned := false
+		for range 100_000 {
+			if u.M.CPU.PC() == stub+3 {
+				returned = true
+				break
+			}
+			if err := u.M.CPU.Step(); err != nil {
+				t.Fatalf("nameID %d: %v", id, err)
+			}
+		}
+		if !returned {
+			t.Fatalf("nameID %d: uibookname never returned", id)
+		}
+
+		// (1) it came back on bank 1, read+write, exactly as it was called.
+		if u.M.Mem.LCBank2 {
+			t.Fatalf("nameID %d: uibookname returned with LANGUAGE CARD BANK 2 still "+
+				"selected. $D000-$DFFF is now the name table, not LCCODE and not the "+
+				"artwork: the next transposition-table probe would jsr into an opening "+
+				"name and the next repaint would blit one onto the board", id)
+		}
+		if !u.M.Mem.LCReadRAM || !u.M.Mem.LCWriteEnabled {
+			t.Errorf("nameID %d: uibookname returned with LC readRAM=%v writeRAM=%v; "+
+				"it must restore read+write RAM, not just the bank",
+				id, u.M.Mem.LCReadRAM, u.M.Mem.LCWriteEnabled)
+		}
+		// (2) and it read the right bank on the way through.
+		var got []byte
+		for i := range 64 {
+			c := u.Peek(uibookb + uint16(i))
+			if c == 0 {
+				break
+			}
+			got = append(got, c&0x7F)
+		}
+		if string(got) != want {
+			t.Errorf("nameID %d: uibookname wrote %q, want %q -- the name table is in "+
+				"Language Card bank 2, so a wrong string here means it read bank 1 "+
+				"(the artwork) instead", id, got, want)
+		}
+	}
+	t.Log("uibookname reads Language Card bank 2 and returns on bank 1, read+write")
 }
 
 // TestBookRandomIsFullWidth gates asm/m8.s uibookrnd: the 32 bits of

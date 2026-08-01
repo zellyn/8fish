@@ -1176,6 +1176,11 @@ deliberately does not model.
 
 ## 13. The board SHIPS (2026-07-31)
 
+> **§14 supersedes this section's display arrangement (2026-08-01).** The board
+> ships MIXED, with four rows of 80-column text under it; everything below
+> about the delivery, the chain load and the memory map still holds, except
+> that the book is now two pieces and based at aux `$0800`.
+
 `asm/8fish.dsk` boots to the hand-drawn double-hi-res board. Not to a harness
 variant of it: `internal/ui`'s `TestDiskBoardParity` starts a IIe at `$C600`,
 lets the Disk II boot ROM read a real nibblised disk, and asserts that all
@@ -1276,7 +1281,14 @@ SELECTION, and the selection did not move.
 Language Card, which RAMRD does not switch. The asymmetry between those two
 routines is the whole discipline in one page.
 
-### 13.4 ★ MIXED MODE DOES NOT FIT, and here is the arithmetic
+### 13.4 ★ MIXED MODE DOES NOT FIT, and here is the arithmetic — SUPERSEDED 2026-08-01
+
+**This section is kept as the record of how the price was worked out, and its
+last paragraph is what got built.** Mixed mode ships; see §14. Everything below
+about the aux arithmetic is still true — the book at 7,407 contiguous bytes and
+the text window could not both have aux `$0200-$1FFF`, and no re-slicing of the
+board was ever the problem.
+
 
 The board ships FULL SCREEN with ESC swapping to the 40-column text screen —
 Sargon III's arrangement — and not as §3.1's mixed mode with a four-line text
@@ -1362,3 +1374,182 @@ overwrote itself mid-loop, and the machine check that exists to print NEEDS A
 **nothing may write through RAMWRT in bulk before the machine check, because on
 exactly the machines the check exists to reject, a RAMWRT-on write is an
 ordinary write to main.**
+
+## 14. MIXED MODE SHIPS (2026-08-01)
+
+`asm/8fish.dsk` boots to the board **with four lines of 80-column text under
+it**. §13.4 priced this and did not build it; this section is what got built,
+what it cost, and the two gates that now hold it.
+
+### 14.1 The screen
+
+```
+scanlines 0-3      border
+scanlines 4-155    the 8x8 board, 8 x DHROWS(19), unchanged artwork
+scanlines 156-159  border
+scanlines 160-191  FOUR ROWS OF 80-COLUMN TEXT  (text rows 20-23)
+```
+
+The board did not move and was not re-sliced. `DHTOP` is still 4 and `DHROWS`
+is still 19, so 152 scanlines start at 4 and end at 155; MIXED shows graphics
+on 0-159. `asm/dhgr.s`'s geometry comment already said so in 2026-07-31's
+commit; the only change to that file is the comment now describing the
+shipping arrangement instead of a spare property. No tile was re-cut, no blit
+changed, and `TestDiskBoardParity` still asserts all 16,384 bytes.
+
+What the four rows carry, and why. Four rows and 320 characters have to hold
+what a player needs *without leaving the board*; everything else has to be one
+ESC away.
+
+```
+     0                   20                  40                  60         79
+ 20 | 8FISH 1.0    LEVEL 4     YOU ARE WHITE |WHITE TO MOVE      |CHECK       |
+ 21 |D 5  +0.34 e2e4                         |BOOK: C78 Ruy Lopez, Morphy     |
+ 22 |ILLEGAL MOVE - TRY AGAIN                | N-NEW T-TAKEBACK R-RESIGN D-DRAW|
+ 23 |YOUR MOVE? e2e4_                        | L-LEVEL S-SIDES Q-QUIT ?-HELP   |
+```
+
+- **Row 20** is the inverse title bar (version, level, which colour you have)
+  beside **whose move it is** — or how the game ended — and CHECK.
+- **Row 21** is the **think line**: depth, score and the engine's current best
+  move, updated between completed iterative-deepening iterations, beside the
+  **opening name**. Those are the two things you cannot get from looking at the
+  board.
+- **Rows 22-23** are the **message row** and the **input prompt with its
+  cursor**, each beside one of the two help lines.
+
+What was left out: the **move list**, the rank/file coordinates, and the
+long-form help. All three are on the 40-column screen, and ESC still swaps to
+it. The choice is "what does a player need while looking at the position",
+and a move list is what you consult *deliberately*.
+
+**Every field is COPIED from the 40-column row that already renders it**
+(`ui80get` reads text rows 0, 12, 13, 14, 16 and 17). There is exactly one
+piece of code per string, the two screens cannot disagree, and every existing
+`internal/ui` gate on the 40-column screen is transitively a gate on the
+window.
+
+### 14.2 What it cost: the book is TWO PIECES now
+
+The blocker was never pixels. Double hi-res forces 80COL on, and with 80COL on
+the text window is **80-column** text, whose EVEN columns are fetched from
+**aux `$0400-$07FF`**. Rows 20-23 are `$0650`, `$06D0`, `$0750`, `$07D0` — four
+40-byte spans in the middle of the aux hole the 7,407-byte book filled from
+`$0200`.
+
+The book was split along the line its own code already draws:
+
+| piece | size | home | read by |
+|---|---|---|---|
+| header + entries | **5,705 B** | AUX `$0800-$1E48` | `bookprobe` (`asm/book.s`), ~100 entries per probe |
+| name table | **1,702 B** | **LC BANK 2** `$D000-$D6A5` | `uibookname` (`asm/m8.s`), once per book move |
+
+`bookprobe` reads offsets 0..5,704 and stops — it has never touched a name.
+Only `uibookname` walks the table, and `uibookname` runs at **`$E000`, which
+Language Card bank switching does not re-map**, so it can select bank 2, read,
+and select bank 1 again with no risk to its own instruction fetch, its zero
+page, its stack or its output buffer.
+
+Bank 2 and not bank 1: bank 1 holds `LCCODE` (`$D000`), `DHTILES` (`$D300`),
+the two 152-byte scanline tables and the synthesised blank tiles, leaving
+**1,048 B contiguous** for a 1,702-byte table. Bank 2 was 4,096 B and entirely
+unused. `TestLanguageCardBank1Layout` now FAILS if bank 1 ever frees up enough
+to hold the table, because at that point the bank switch is complexity with no
+reason left.
+
+The header's `+4` field changed meaning with the split: it was a base-relative
+offset to the name table, and it is now the table's **absolute resident
+address**. `uibookname` reads it rather than assembling it in, so moving the
+table is a `cmd/genbook` change and nothing else.
+
+### 14.3 The memory map, after
+
+```
+MAIN  $0400-$07FF   80-column text page, MAIN half = the ODD columns
+MAIN  $2000-$3FFF   DOUBLE HI-RES PAGE 1, main half
+AUX   $0400-$07FF   80-column text page, AUX half = the EVEN columns  (NEW)
+AUX   $0800-$1E48   the resident opening book's ENTRIES, 5,705 B of 6,144
+AUX   $2000-$3FFF   double hi-res page 1, aux half
+AUX   $4000-$BFFF   the transposition table, all 4096 entries
+LC 1  $D000-$D063   LCCODE: the engine's aux primitives
+LC 1  $D300-$DA1F   the artwork, 1,824 B
+LC 1  $DA20-$DBE7   scanline bases + the two synthesised blank tiles (456 B)
+LC 1  $DBE8-$DFFF   free, 1,048 B
+LC 2  $D000-$D6A5   THE OPENING BOOK'S NAME TABLE, 1,702 B            (NEW)
+LC 2  $D6A6-$DFFF   free, 2,394 B
+LC*   $FF00-$FF4F   UI80BUF: the window's 80-column staging line      (NEW)
+```
+
+Aux `$0200-$03FF` is now free (512 B) and aux `$0800` has 439 B of book
+headroom below the DHGR aux half. The disk is 186 of 560 sectors; stage 2
+grew from 37 to 38 sectors (the name table is 7 of them, and it abuts the
+artwork, so the two are one span).
+
+### 14.4 The one thing mixed mode cost, and why it is not hidden
+
+**The two screens share main `$0400-$07FF`, and text rows 20-23 are where they
+collide.** The window's ODD columns *are* the 40-column screen's help and
+prompt rows. There is no way around that — it is the same 160 bytes of RAM —
+so the design faces it:
+
+- Every window row is composed in **UI80BUF**, an 80-byte staging line in LC
+  RAM at `$FF00`, and then de-interleaved into the two banks by `ui80row`.
+  Nothing ever reads a screen it is about to overwrite. `uiprompt` in
+  particular now builds its line in UI80BUF and writes it *outwards* to both
+  screens, which is why a backspace still visibly erases in both.
+- `uiswap` **repaints the 40-column screen** on the way back from the board.
+  §13.4's "ESC is instant because the screen behind it is already correct" is
+  now "ESC costs one more 23,000-cycle repaint", which is 23 ms.
+- `TestDiskBoots` compares the disk's screen against the gated shipping image
+  for **rows 0-19 only**, and asserts the window separately out of both banks
+  (`ui.Machine.Window()` / `DiskMachine.Window()`). Weakening a comparison is
+  exactly the move that hides a regression, so the exclusion is stated with
+  its reason and the excluded rows are asserted somewhere else, not dropped.
+
+### 14.5 The gates
+
+Two are new, and both were mutation-checked — shown failing with the thing
+they guard broken:
+
+- **`internal/delivery.TestBookClearsTheAuxTextPage`.** Reads `BOOK_BASE` out
+  of the generated `asm/book.inc` and the blob length off disk, and fails if
+  `[BOOK_BASE, BOOK_BASE+size)` intersects aux `$0400-$07FF`. Mutation: set
+  `book.BaseAddr` back to `$0200`, regenerate → *"THE RESIDENT BOOK OVERLAPS
+  THE 80-COLUMN TEXT PAGE'S AUX HALF … overlap: $0400-$07FF, 1024 bytes"*.
+  The whole reason for this change now lives somewhere that fails.
+- **`internal/ui.TestBookNameRestoresBank1`.** Calls `uibookname` directly
+  through a `jsr` stub in the booted machine, for three name IDs, and asserts
+  BOTH that the Language Card comes back on bank 1 with read+write RAM AND
+  that the name it wrote is the right one. Two-sided on purpose: a one-sided
+  "bank 1 is back" would pass a routine that never switched at all and read
+  the artwork instead. Mutations: delete the restoring `lda $C08B` pair →
+  *"returned with LANGUAGE CARD BANK 2 still selected"*; swap the `$C083`
+  select for `$C08B` → *"wrote "BOOK: \x03@ \a1p…", want "BOOK: C78 Ruy Lopez,
+  Morphy""*.
+
+Unchanged and still green: `TestMicroAB` against `microABGolden` (the search
+tree is byte-identical — this was packaging, not engine),
+`TestBookProbeParityASMvsGo` (264 positions / 4,194 probes, including the
+whole-blob integrity check after every probe), `TestDiskBoardParity` (all
+16,384 bytes of DHGR page 1 from a cold `$C600` boot), and the
+`internal/delivery` layout suite.
+
+Boot time: **7.10 s** of emulated IIe time from `$C600` to the first keyboard
+poll, against 7.01 s before. The 0.09 s is the name table's seven extra
+sectors and its copy.
+
+### 14.6 What a real IIe can still surprise us with — the mixed-mode additions
+
+§13.5's table stands unchanged, and mixed mode adds exactly one row to it,
+because goapple2 models MIXED as state and not as a scanner:
+
+| unverifiable | why | symptom on hardware |
+|---|---|---|
+| **Where the graphics/text split actually falls** | goapple2 has no video scanner: `Mixed` is a modelled bit, and no test here has ever rendered scanline 160 | if the split is not at 160 the board's bottom border is eaten, or a row of text is; the board itself is drawn 4-155 with a 4-line margin either side, so there is slack for an off-by-a-few but not for an off-by-a-lot |
+| **80-column text pixels** | the same reason as DHGR pixels in §13.5: the byte layout is checked against the model, but nothing here has driven the 14M shift register in 80-column TEXT mode | inverse video, or the aux/main column interleave, coming out wrong — the title bar is the loudest place it would show |
+
+The aux/main interleave itself (aux byte = even column) is NOT on this list:
+`Window()` de-interleaves it the same way the scanner does, and
+`TestDiskBoots` asserts real strings — "8FISH 1.0", "WHITE TO MOVE", "YOUR
+MOVE?" — read back out of both banks. Getting the interleave backwards
+produces every other character, which those assertions catch.

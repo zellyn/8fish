@@ -36,6 +36,7 @@ import (
 	"strings"
 
 	"github.com/zellyn/chess6502/harness"
+	bookpkg "github.com/zellyn/chess6502/internal/book"
 	"github.com/zellyn/chess6502/internal/chesstest"
 	"github.com/zellyn/chess6502/internal/tiles"
 )
@@ -50,6 +51,10 @@ const (
 	// above the engine's LCCODE at $D000. Keep equal to delivery.TilesLC and
 	// asm/m8.s's DHTILES.
 	TilesLC = 0xD300
+	// NamesLC is where the book's NAME TABLE is resident: Language Card
+	// BANK 2, $D000. Keep equal to delivery.NamesLC, book.NamesAddr and
+	// asm/book.inc's BOOK_NAMES.
+	NamesLC = 0xD000
 )
 
 // Machine is a booted 8fish UI plus the state a driving test needs.
@@ -117,6 +122,59 @@ func (s *Screen) Text(row int) string {
 	return sb.String()
 }
 
+// Win80Top is the first text row of the mixed-mode window: with MIXED set,
+// the IIe shows graphics on scanlines 0-159 and text rows 20-23 below them.
+// Mirrors asm/m8.s's DHTXTTOP.
+const Win80Top = 20
+
+// Win80Rows is how many rows that window has.
+const Win80Rows = 4
+
+// Window80 is a snapshot of the mixed-mode text window: four rows of EIGHTY
+// columns, de-interleaved from the two banks.
+//
+// With 80COL on the video scanner fetches two bytes per column position, aux
+// first: for row base B and 0 <= i < 40, aux B+i is screen column 2i and main
+// B+i is column 2i+1. Reading it back therefore needs BOTH banks, which is
+// why this is not just Screen() with a wider loop -- a test that read only
+// main would see every other character and call it corruption.
+type Window80 struct {
+	Raw [Win80Rows][80]byte
+}
+
+func window80(main, aux *[0x10000]byte) *Window80 {
+	var w Window80
+	for r := range Win80Rows {
+		base := RowBase(Win80Top + r)
+		for i := range 40 {
+			w.Raw[r][2*i] = aux[base+uint16(i)]
+			w.Raw[r][2*i+1] = main[base+uint16(i)]
+		}
+	}
+	return &w
+}
+
+// Text returns one window row as ASCII.
+func (w *Window80) Text(row int) string {
+	var sb strings.Builder
+	for col := range 80 {
+		a, _ := Decode(w.Raw[row][col])
+		sb.WriteByte(a)
+	}
+	return sb.String()
+}
+
+// String renders the window the way a IIe would show it under the board.
+func (w *Window80) String() string {
+	var sb strings.Builder
+	sb.WriteString("    +" + strings.Repeat("-", 80) + "+\n")
+	for row := range Win80Rows {
+		fmt.Fprintf(&sb, "%2d  |%s|\n", Win80Top+row, w.Text(row))
+	}
+	sb.WriteString("    +" + strings.Repeat("-", 80) + "+")
+	return sb.String()
+}
+
 // Video renders one row's inverse/normal attributes as a bar.
 func (s *Screen) Video(row int) string {
 	var sb strings.Builder
@@ -164,8 +222,10 @@ func ParseLbl(path string) (map[string]uint16, error) {
 
 // Boot loads engine.bin, m8tboot.bin and m8t.bin and runs the copier, so the
 // returned Machine is sitting in the UI's main loop waiting for its first
-// keystroke. book, if non-nil, is injected at $2000 (the resident opening
-// book's home).
+// keystroke. book, if non-nil, is the ENTRIES blob, injected at main $2000 --
+// where stage 2 lands it, not where it ends up. The book's NAME TABLE is
+// always installed (in Language Card bank 2), because it is embedded and
+// costs nothing; see load.
 func Boot(root string, book []byte) (*Machine, error) {
 	u, err := load(root, "m8tboot", "m8t", book, false)
 	if err != nil {
@@ -245,9 +305,9 @@ func load(root, bootName, payloadName string, book []byte, realKbd bool) (*Machi
 	copy(m.Mem.Main[BootOrg:], boot)
 	copy(m.Mem.Main[PayloadOrg:], payload)
 	if book != nil {
-		// The book LANDS at main $2000 -- from a BLOAD here, from stage 2 of
-		// the chain load on the disk -- and m8bookaux lifts it to its
-		// resident home in aux $0200 once m8machine has proved the aux
+		// The ENTRIES blob LANDS at main $2000 -- from a BLOAD here, from stage
+		// 2 of the chain load on the disk -- and m8bookaux lifts it to its
+		// resident home in aux $0800 once m8machine has proved the aux
 		// switches are real. Poking it where the disk puts it, rather than
 		// where it ends up, keeps this path a rehearsal of the real one.
 		copy(m.Mem.Main[0x2000:], book)
@@ -258,6 +318,13 @@ func load(root, bootName, payloadName string, book []byte, realKbd bool) (*Machi
 	// there, which is a difference between this rehearsal and the disk for
 	// no reason -- the blob is embedded and costs nothing to install.
 	copy(m.Mem.Main[TilesLC:], tiles.DefaultBlob())
+	// The book's NAME TABLE, where the disk's copier leaves it: Language Card
+	// BANK 2, which in goapple2's model is the separate MainD000Bank2 array
+	// (ALTZP is off, so it is the MAIN bank-2 image). Same reasoning as the
+	// artwork: stage 2 delivers it on the disk, only the SDCHAIN copier does
+	// that copy, and installing the embedded bytes here keeps the BLOAD
+	// rehearsal reading the same names the disk will.
+	copy(m.Mem.MainD000Bank2[NamesLC-0xD000:], bookpkg.DefaultNames())
 	return &Machine{M: m, Defs: defs, Lbl: lbl, StepLimit: DefaultStepLimit, RealKbd: realKbd}, nil
 }
 
@@ -350,6 +417,11 @@ func (u *Machine) Screen() *Screen {
 		}
 	}
 	return &s
+}
+
+// Window snapshots the mixed-mode 80-column text window out of both banks.
+func (u *Machine) Window() *Window80 {
+	return window80(&u.M.Mem.Main, &u.M.Mem.Aux)
 }
 
 // Peek reads a MAIN byte (including Language Card RAM at $D000-$FFFF, which

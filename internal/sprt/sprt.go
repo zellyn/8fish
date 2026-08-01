@@ -508,7 +508,7 @@ func playGame(cfg Config, opening []string, aWhite bool, gameNo int) (outcome in
 			if !aTurn && cfg.BinB != nil && cfg.BookEntryB != 0 {
 				entry = cfg.BookEntryB
 			}
-			res, perr := chesstest.AsmBookProbe(bin, defs, entry, bk.Blob(), pos, r)
+			res, perr := chesstest.AsmBookProbe(bin, defs, entry, bk.EntriesBlob(), pos, r)
 			if perr != nil {
 				return 0, aCyc, bCyc, aMv, bMv, aBook, bBook, fmt.Errorf("book probe: %w", perr)
 			}

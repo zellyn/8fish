@@ -50,8 +50,9 @@
 //	  $4000  asm/engine.bin      the engine
 //
 //	STAGE 2 (table written by the copier, re-entering the loader at $0802)
-//	  $0E00  tileblob.bin        the DHGR artwork, then copied to LC bank 1
-//	  $2000  bookblob.bin        the opening book, then copied to AUX $0200
+//	  $0E00  tileblob.bin        the DHGR artwork,     then copied to LC bank 1
+//	  $1600  booknames.bin       the book's names,     then copied to LC bank 2
+//	  $2000  bookblob.bin        the book's entries,   then copied to AUX $0800
 //
 // Stage 2 lands in MAIN and is copied on, rather than being read straight into
 // the Language Card or into aux. That is not caution, it is the boot ROM: its
@@ -59,9 +60,10 @@
 // a Language Card destination while ROM is banked in for $FCA8 (WAIT, which
 // the loader's track step calls) returns ROM; reading back an aux destination
 // with RAMRD off returns main. Either way the second pass would denibblise
-// garbage over the first. Staging through main costs one 8-page copy and one
-// 29-page copy — about 90 ms, against a 6-second boot — and it is immune to
-// where the stage happens to fall on the disk.
+// garbage over the first. Staging through main costs three copies — 8 pages of
+// artwork, 7 of the book's name table, 23 of its entries — about 90 ms against a
+// 7-second boot, and it is immune to where the stage happens to fall on the
+// disk.
 //
 // WHY $0E00 IS FREE FOR STAGE 2. It is where stage 1 staged the UI payload,
 // and the copier lifts that to $E000 BEFORE re-entering the loader. $2000 is
@@ -100,15 +102,25 @@ const (
 	// copies it into Language Card bank 1. It deliberately REUSES the
 	// payload's staging area, which is dead by then.
 	TilesOrg = 0x0E00
-	// BookOrg is where stage 2 lands the opening book, before the copier
-	// copies it to AUX $0200. It is main hi-res page 1, which the DHGR
-	// renderer needs and which is therefore not the book's home any more.
+	// NamesOrg is where stage 2 lands the book's NAME TABLE, before the copier
+	// copies it into Language Card bank 2. It abuts the staged tile blob (the
+	// two merge into one span), and TestMainMemoryLayout recomputes it as
+	// TilesOrg + ceil(tileblob) -- the asm copier derives SD2NAMES from
+	// TILE_BLOB_SIZE the same way, so a drift is a failure rather than a
+	// mystery.
+	NamesOrg = 0x1600
+	// BookOrg is where stage 2 lands the opening book's ENTRIES, before the
+	// copier copies them to AUX $0800. It is main hi-res page 1, which the
+	// DHGR renderer needs and which is therefore not the book's home any more.
 	BookOrg = 0x2000
-	// BookAux is the book's RESIDENT home: auxiliary RAM $0200. The blob is
-	// 7,407 B and aux $0200-$1FFF is 7,680 B, so it fits below the DHGR aux
-	// half at $2000 with 273 B to spare. Keep equal to asm/book.inc's
-	// BOOK_BASE and internal/book.BaseAddr.
-	BookAux = 0x0200
+	// BookAux is the ENTRIES blob's RESIDENT home: auxiliary RAM $0800.
+	//
+	// $0800 and not $0200 because of MIXED MODE: double hi-res forces
+	// 80-column text, and the four-line text window's EVEN columns are fetched
+	// from AUX $0400-$07FF. The book has to clear that page entirely, which it
+	// can only do once the name table is not in it. Keep equal to
+	// asm/book.inc's BOOK_BASE and internal/book.BaseAddr.
+	BookAux = 0x0800
 	// EngineOrg is where engine.bin runs.
 	EngineOrg = 0x4000
 	// TilesLC is where the copier installs the tile blob: Language Card
@@ -116,6 +128,11 @@ const (
 	// primitives plus the book's bkfetch/bkhdr). Keep equal to
 	// asm/m8.s's DHTILES.
 	TilesLC = 0xD300
+	// NamesLC is where the copier installs the book's name table: Language
+	// Card BANK 2, at its base. Bank 2 is the only 4 KB left that is
+	// contiguous and free; bank 1 holds LCCODE, the artwork and the scanline
+	// tables. Keep equal to asm/book.inc's BOOK_NAMES and book.NamesAddr.
+	NamesLC = 0xD000
 
 	// MaxImage is the largest image `diskii mksd` accepts, and it is not an
 	// arbitrary tool limit: it is 176 * 256, the boot sector's page table
@@ -152,12 +169,13 @@ type Piece struct {
 	Data []byte // filled in by Load
 	// RunsAt is where the piece ends up if that is NOT where it is delivered:
 	// the UI payload is lifted to $E000, the tile blob to Language Card
-	// bank 1, the book to aux $0200. Zero means "runs where it loads", which
+	// bank 1, the book's names to bank 2, its entries to aux $0800. Zero means
+	// "runs where it loads", which
 	// is true only of the copier and the engine.
 	//
-	// Three of the five pieces are staged, and that is the whole shape of
-	// this delivery: the loader can only write MAIN, so anything that lives
-	// anywhere else arrives somewhere it does not stay.
+	// Four of the six pieces are staged, and that is the whole shape of this
+	// delivery: the loader can only write MAIN, so anything that lives anywhere
+	// else arrives somewhere it does not stay.
 	RunsAt int
 }
 
@@ -249,9 +267,16 @@ func Stage1Pieces() []Piece {
 
 // Stage2Pieces returns the pieces the COPIER's page table delivers, after it
 // has re-entered the surviving loader.
+//
+// Three pieces, three different final homes, and none of them is where the
+// loader can put it: the artwork goes to Language Card bank 1, the book's name
+// table to Language Card bank 2, the book's entries to auxiliary RAM. The
+// loader writes MAIN and only MAIN, so every one of them is staged and copied
+// on by asm/m8.s's copier.
 func Stage2Pieces() []Piece {
 	return []Piece{
 		{Path: filepath.Join("internal", "tiles", "tileblob.bin"), Org: TilesOrg, RunsAt: TilesLC},
+		{Path: filepath.Join("internal", "book", "booknames.bin"), Org: NamesOrg, RunsAt: NamesLC},
 		{Path: filepath.Join("internal", "book", "bookblob.bin"), Org: BookOrg, RunsAt: BookAux},
 	}
 }

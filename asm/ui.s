@@ -58,7 +58,8 @@ LAYPTR    = PSP0        ; $D2-$D3  16-bit layout-table pointer
 ;   $F700-$F7FF  UI variables and screen-string buffers (this block)
 ;   $F800-$FAFF  game history: from / to / flags, one page each
 ;   $FB00-$FEFF  game hash history: HASH0-3, one page each
-;   $FF00-$FFEF  free (240 B)
+;   $FF00-$FF4F  UI80BUF: the mixed-mode window's 80-column staging line
+;   $FF50-$FFEF  free (160 B)
 ;   $FFF0-$FFFF  6502 vectors (RAM once LC read is enabled; m8.s writes them)
 M8VARS    = $F700
 UIHCNT    = M8VARS+$00  ; plies played so far
@@ -126,6 +127,16 @@ UIHASH0   = $FB00
 UIHASH1   = $FC00
 UIHASH2   = $FD00
 UIHASH3   = $FE00
+
+; UI80BUF: one EIGHTY-column text line, staged in Language Card RAM before it
+; is de-interleaved into the aux and main halves of the mixed-mode window
+; (asm/m8.s's ui80row). It is not in the $F700 block because that page is
+; full; $FF00-$FFEF was the last free run below the 6502 vectors.
+;
+; It is also, deliberately, NOT on the screen. The window's main half is rows
+; 20-23 of the 40-column text page, so a row composed in place would be
+; overwriting its own source. See the window's comment block in asm/m8.s.
+UI80BUF   = $FF00       ; 80 bytes, $FF00-$FF4F
 
 UIBUFMAX  = 8           ; longest accepted input line ("e7e8q" + slack)
 

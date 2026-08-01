@@ -39,10 +39,10 @@
 ; artwork and its two init-built tables live there, which is why the renderer
 ; costs the UI payload only its 347 bytes of code and 96 bytes of index table.
 ;
-; Bank 1, not bank 2, ON PURPOSE: the engine's aux primitives are in bank 1 at
-; $D000, the renderer would otherwise have to switch banks around every
-; repaint, and a bank switch that gets left in the wrong state hides LCCODE
-; from the next transposition-table probe. Bank 2 stays entirely free.
+; Bank 1, not bank 2, ON PURPOSE for the ARTWORK: the engine's aux primitives
+; are in bank 1 at $D000, the renderer would otherwise have to switch banks
+; around every repaint, and a bank switch that gets left in the wrong state
+; hides LCCODE from the next transposition-table probe.
 ;
 ;   $D000-$D063   LCCODE      the engine's aux primitives (ttfetch, and now
 ;                             bkfetch/bkhdr for the book: 100 B, from the
@@ -56,6 +56,20 @@
 ;   $DAB8-$DB4F   DHROWH      152 scanline base addresses (high)
 ;   $DB50-$DBE7   dhblnk      the two synthesised empty-square tiles (2 x 76)
 ;   $DBE8-$DFFF   free        1,048 B
+;
+; LANGUAGE CARD BANK 2 is no longer free, and what is in it is what made MIXED
+; MODE fit. The opening book's 1,702-byte NAME TABLE moved here from the aux
+; blob, so the book's entries could start at aux $0800 -- above the 80-column
+; text page, whose aux half ($0400-$07FF) is the EVEN columns of the four-row
+; text window under the board.
+;
+;   $D000-$D6A5   BOOK_NAMES  the opening book's name table (asm/book.inc)
+;   $D6A6-$DFFF   free        2,394 B
+;
+; The bank-1 objection above still stands, and is exactly why only ONE routine
+; may select bank 2: uibookname, which runs at $E000 (unbanked), reads the
+; table, and restores bank 1 before it returns. internal/ui's
+; TestBookNameRestoresBank1 fails if it stops doing either half.
 ; ---------------------------------------------------------------------------
 ; Exported so the LINKER writes them into asm/m8.lbl: internal/delivery's
 ; TestLanguageCardBank1Layout reads the real addresses out of the label file
@@ -106,11 +120,13 @@ NLEVELS = 9
 ;      engine's aux-bank primitives at $D000. Both must happen FIRST, because
 ;      the payload's staging area is where stage 2 lands.
 ;   2. (disk only) re-enter the surviving Standard Delivery loader with a fresh
-;      page table to read STAGE 2: the DHGR tile blob and the opening book.
-;   3. copy the tile blob into Language Card bank 1 at DHTILES.
-;   4. copy the opening book from main $2000 to AUX $0200, vacating main
-;      $2000-$3FFF — which is the DHGR main half, and therefore not somewhere
-;      the book can stay.
+;      page table to read STAGE 2: the DHGR tile blob, the opening book's name
+;      table, and the opening book's entries.
+;   3. copy the tile blob into Language Card bank 1 at DHTILES, and the book's
+;      name table into Language Card BANK 2 at BOOK_NAMES.
+;   4. copy the opening book's entries from main $2000 to AUX $0800, vacating
+;      main $2000-$3FFF — which is the DHGR main half, and therefore not
+;      somewhere the book can stay.
 ;
 ; Step 4 is UNCONDITIONAL: the BLOAD/harness path has the book at main $2000
 ; too (the loader or the test poked it there), and the engine's probe reads
@@ -200,8 +216,36 @@ sd2done:
         sta TTPTR+1
         ldx #SD2TILEN
         jsr copyp
-        lda $C08B               ; back to LC RAM read + write
-        lda $C08B
+
+        ; ---- the book's NAME TABLE: main SD2NAMES -> Language Card BANK 2 --
+        ; Bank 2 because bank 1 is full: LCCODE at $D000, the artwork at
+        ; $D300, the scanline tables and the synthesised blank tiles above it,
+        ; leaving 1,048 contiguous bytes for a 1,702-byte table. Bank 2 is
+        ; 4,096 bytes and had never been touched.
+        ;
+        ; $C081 twice: read ROM, WRITE LC RAM, BANK 2. The double read is what
+        ; enables writing, exactly as with $C089 above; the ROM stays readable
+        ; because nothing here needs LC RAM to read.
+        lda $C081
+        lda $C081
+        lda #<SD2NAMES
+        sta ZPTR
+        lda #>SD2NAMES
+        sta ZPTR+1
+        lda #<BOOK_NAMES
+        sta TTPTR
+        lda #>BOOK_NAMES
+        sta TTPTR+1
+        ldx #SD2NAMEN
+        jsr copyp
+
+        lda $C08B               ; back to LC RAM read + write, BANK 1 -- and
+        lda $C08B               ;  bank 1 is the state EVERYTHING else assumes:
+                                ;  LCCODE ($D000, the TT and book primitives)
+                                ;  and DHTILES ($D300, the artwork) are both
+                                ;  hidden while bank 2 is in. Only uibookname
+                                ;  ever switches away again, and it switches
+                                ;  back before it returns.
         lda #1                  ; the artwork is resident: boot to the BOARD
         sta UIDHGRDEF           ;  (a RAM patch of the payload, not a build
                                 ;   difference -- see m8main)
@@ -249,16 +293,32 @@ SD2TILES  = UIPAYLOAD           ; the UI payload's staging area, now dead. Not
                                 ;  linker symbol the copier already reads the
                                 ;  payload from, so the two cannot desync.
 SD2TILEN  = (TILE_BLOB_SIZE + 255) / 256
+SD2NAMES  = SD2TILES + SD2TILEN * 256   ; the name table abuts the artwork, so
+                                        ;  the two are ONE span on the disk.
+                                        ;  DERIVED, not written down twice:
+                                        ;  internal/delivery.NamesOrg is the
+                                        ;  same address computed the same way,
+                                        ;  and TestStage2PageTable fails if the
+                                        ;  two ever disagree.
+SD2NAMEN  = (BOOK_NAMES_SIZE + 255) / 256
 SD2BOOK   = BOOKSTAGE           ; main hi-res page 1: the DHGR main half
 SD2BOOKN  = (BOOK_BLOB_SIZE + 255) / 256
 
+; The name table's whole-page copy must stay inside Language Card bank 2. It
+; lands at BOOK_NAMES ($D000) and $E000-$FFFF is NOT banked -- it is the UI's
+; own code -- so an overrun would write the copier's payload over itself.
+.assert BOOK_NAMES + SD2NAMEN * 256 <= $E000, error, "the book's name table does not fit Language Card bank 2 ($D000-$DFFF); see cmd/genbook's budget check"
+
 .ifdef SDCHAIN
-; Stage 2's page table, generated from the two blob sizes so that it cannot
+; Stage 2's page table, generated from the three blob sizes so that it cannot
 ; drift from what internal/delivery writes on the disk (TestStage2PageTable
 ; reads these very bytes back out of m8sdboot.bin and compares).
 sd2tab:
         .repeat SD2TILEN, i
         .byte >SD2TILES + i
+        .endrepeat
+        .repeat SD2NAMEN, i
+        .byte >SD2NAMES + i
         .endrepeat
         .repeat SD2BOOKN, i
         .byte >SD2BOOK + i
@@ -310,9 +370,24 @@ MIXCLR      = $C052     ; full screen, no four-line text window
 TXTPAGE1    = $C054     ; display page 1 (and, under 80STORE, map it to MAIN)
 SET80COLON  = $C00D     ; w: 80-column video fetch (BOTH banks per scanline)
 GRSET       = $C050     ; graphics, not text
+MIXSET      = $C053     ; MIXED: graphics on scanlines 0-159, four text rows
+                        ;  (20-23) below them
 SETDHIRES   = $C05E     ; AN3 LOW: double resolution, with 80COL on
 CLRDHIRES   = $C05F     ; AN3 HIGH: single resolution
 HIRESSET    = $C057     ; hi-res, not lo-res
+
+; Language Card bank selection. READ these (never store): two consecutive
+; reads of an odd $C08x is what enables writing to LC RAM, and every use here
+; needs LC RAM writable -- $E000-$FFFF is where the UI's own variables live,
+; and write-protecting the card protects all of $D000-$FFFF, not just the
+; banked $D000-$DFFF window.
+;
+; Bank 1 is the RESTING STATE and everything assumes it: LCCODE ($D000: the
+; engine's ttfetch and the book's bkfetch/bkhdr) and DHTILES ($D300: the board
+; artwork) are both bank 1. Bank 2 holds exactly one thing -- the opening
+; book's name table -- and exactly one routine ever selects it (uibookname).
+LCBANK1RW   = $C08B     ; r x2: LC bank 1, read RAM + write RAM
+LCBANK2RW   = $C083     ; r x2: LC bank 2, read RAM + write RAM
 
 ; Autostart's power-up byte (docs/ui-design.md §11 risk 3). The reset
 ; handler takes the WARM path — jmp ($03F2) — only when $03F4 equals
@@ -488,8 +563,11 @@ mengine:
 m8irq:  rti
 
 ; ---------------------------------------------------------------------------
-; m8bookaux: lift the resident opening book from main $2000 to AUX $0200,
-; vacating main $2000-$3FFF -- the DHGR MAIN half -- for the board renderer.
+; m8bookaux: lift the resident opening book's ENTRIES from main $2000 to AUX
+; $0800, vacating main $2000-$3FFF -- the DHGR MAIN half -- for the board
+; renderer. (The book's NAME TABLE is not here: it went to Language Card
+; bank 2 in the copier, and it is the only part of the book that can, because
+; the probe never reads it.)
 ;
 ; The blob got to main $2000 from the disk (stage 2 of the chain load) or from
 ; a BLOAD; either way it is there and dead the moment this returns. Stores
@@ -498,12 +576,20 @@ m8irq:  rti
 ; at $E000, which neither switch touches.
 ;
 ; CALLED ONLY AFTER m8machine. See the note in the copier: on a machine whose
-; aux switches are not switches, this loop is a 7 KB write over main $0200.
+; aux switches are not switches, this loop is a 6 KB write over main $0800 --
+; i.e. over this copier's own BLOAD-path staging area.
 ;
-; Byte count: BOOK_BLOB_SIZE rounded up to whole pages -- 29 pages for 7,407 B,
-; so it copies 17 bytes past the blob into aux $1EEF-$1EFF. Still well below
+; ★ WHY $0800 AND NOT $0200. Aux $0400-$07FF is the 80-column text page's
+; AUXILIARY half: with 80COL on, the scanner fetches an aux byte and a main
+; byte per column, and the aux bytes are the EVEN columns. Mixed mode's
+; four-line window is rows 20-23 of that page, so the book cannot be under it.
+; $0800 is the first page above it.
+;
+; Byte count: BOOK_BLOB_SIZE rounded up to whole pages -- 23 pages for 5,705 B,
+; so it copies 183 bytes past the blob into aux $1E49-$1EFF. Still well below
 ; the DHGR aux half at $2000, which internal/delivery's TestMainMemoryLayout
-; asserts against the real blob size rather than against this sentence.
+; asserts against the real blob size rather than against this sentence, and
+; TestBookClearsTheAuxTextPage asserts the bottom end the same way.
 ; ---------------------------------------------------------------------------
 m8bookaux:
         lda #<BOOKSTAGE
@@ -553,16 +639,20 @@ m8bal:  lda (ZPTR),y
 ; WHERE IT PROBES, and why it moved. It used to use $0300 (CEILMAX0, engine
 ; scratch) on the reasoning that aux $0300 was "inside the transposition
 ; table" and would be rewritten anyway. Both halves of that stopped being
-; true: the TT starts at aux $4000 now, and aux $0300 is INSIDE THE RESIDENT
-; OPENING BOOK, which the copier has already put there when m8main runs. The
-; probe wrote $5A and then $00 over one of its bytes; internal/ui's
-; TestDiskBoots caught it as a book that did not read back.
+; true: the TT starts at aux $4000 now, and aux $0300 was, at the time, INSIDE
+; THE RESIDENT OPENING BOOK (based at aux $0200 then), which the copier had
+; already put there when m8main ran. The probe wrote $5A and then $00 over one
+; of its bytes; internal/ui's TestDiskBoots caught it as a book that did not
+; read back.
 ;
-; $3F00 is scratch in BOTH banks by construction: main $3F00 and aux $3F00 are
-; both inside DHGR page 1, which dhclear paints end to end before anything is
-; displayed, and $3F00 is above the book's stage-2 landing zone in main
-; ($2000-$3CEE) so probing it cannot damage the blob before m8bookaux moves
-; it. That pair of properties is what $0300 turned out not to have.
+; The book has since moved up to aux $0800, so aux $0300 would be harmless
+; again -- and that is exactly the trap this comment exists to refuse. An
+; address that is scratch because of where something ELSE happens to live is a
+; bug waiting for the next move. $3F00 is scratch in BOTH banks BY
+; CONSTRUCTION: main $3F00 and aux $3F00 are both inside DHGR page 1, which
+; dhclear paints end to end before anything is displayed, and $3F00 is above
+; the book's stage-2 landing zone in main ($2000-$3648) so probing it cannot
+; damage the blob before m8bookaux moves it.
 DHPROBE     = $3F00
 ; ---------------------------------------------------------------------------
 m8machine:
@@ -989,6 +1079,10 @@ m8engine:
         lda #<s_thinking
         ldx #>s_thinking
         jsr uiputs
+        lda UIDHGR              ; on the board screen the ONLY place it can
+        beq :+                  ;  appear is the window's first row, and
+        jsr ui80stat            ;  nothing repaints that until the search's
+:                              ;  first completed iteration
         jsr entseed             ; SEED = the collected keystroke entropy
         jsr uibookrnd           ; BOOKRND likewise (book weighted pick)
         lda #0
@@ -1433,24 +1527,33 @@ urdesc: jsr uiswap
 urdx:   rts
 
 ; ---------------------------------------------------------------------------
-; uiswap / uidhon / uidhoff: ESC swaps the display between the double-hi-res
-; board and the 40-column text screen, which is the same choice Sargon III
-; makes and for the same reason -- there is no room for both at once.
+; uiswap / uidhon / uidhoff: the board ships in MIXED MODE -- the double-hi-res
+; board on scanlines 0-159 with a FOUR-ROW, EIGHTY-COLUMN text window under it
+; -- and ESC swaps that whole screen for the 40-column text screen, which
+; carries the move list, the full help and everything else that does not fit
+; in four rows.
 ;
-; ★ WHY NOT MIXED MODE, with the board above and four text lines below. It is
-; arithmetic, and the arithmetic is in AUX RAM, not on the screen. Double
-; hi-res needs 80COL on, and with 80COL on the mixed-mode text window is
-; 80-COLUMN text: its even columns come from AUX $0400-$07FF. Rows 20-23 are
-; aux $0650-$0677, $06D0-$06F7, $0750-$0777 and $07D0-$07F7 -- 160 bytes, in
-; four pieces, in the MIDDLE of the 7,680-byte aux hole the 7,407-byte opening
-; book now occupies. The two largest chunks left either side of the window are
-; 1,104 B and 6,152 B = 7,256 B, which is 151 B SHORT of the book. So mixed
-; mode and a contiguous resident book cannot both be had, and the way to have
-; both is to move the book's 1,702-byte NAME TABLE out of the blob into the
-; Language Card, leaving 5,705 B of header+entries that fit aux $0800-$1FFF
-; with room to spare. That is a blob-format change (cmd/genbook,
-; internal/book, the probe parity gate), not a renderer change, and it is
-; written up in docs/ui-design.md rather than half-done here.
+; ★ WHAT MIXED MODE COST, AND WHY IT IS PAID (2026-08-01). It is arithmetic,
+; and the arithmetic is in AUX RAM, not on the screen. Double hi-res needs
+; 80COL on, and with 80COL on the text window is 80-COLUMN text: its EVEN
+; columns are fetched from AUX $0400-$07FF. Rows 20-23 are aux $0650-$0677,
+; $06D0-$06F7, $0750-$0777 and $07D0-$07F7 -- 160 bytes, in four pieces, in
+; the MIDDLE of the aux hole the opening book used to fill from $0200.
+;
+; The book did not get chopped into four pieces. Its 1,702-byte NAME TABLE
+; moved out of the blob into LANGUAGE CARD BANK 2 (the probe never reads it;
+; only uibookname does, and that runs at $E000 where a bank switch is free),
+; leaving 5,705 B of header + entries that sit at aux $0800-$1E48 -- entirely
+; ABOVE the text page. See cmd/genbook and docs/ui-design.md §14.
+;
+; ★ THE TWO SCREENS SHARE MAIN $0400-$07FF, and rows 20-23 are where they
+; collide: the window's ODD columns are the very bytes the 40-column screen
+; uses for its help and prompt rows. Neither renderer was changed to avoid
+; that. Instead the window is composed in an 80-byte staging buffer (UI80BUF)
+; and blitted, so it always READS from LC RAM and never from the screen it is
+; about to overwrite -- and uiswap repaints the 40-column screen on the way
+; back. Cost: one more 23,000-cycle 40-column repaint per ESC, against a
+; whole class of "which renderer ran last" bugs.
 ;
 ; ★ SWITCHES THAT WERE UNVERIFIABLE AND ARE NOT ANY MORE. goapple2's IIe model
 ; used to implement neither 80STORE nor AN3, so this whole routine would have
@@ -1464,25 +1567,37 @@ uiswap:
         lda UIDHGR
         eor #1
         sta UIDHGR
-        beq uidhoff
-        jsr uidhon
-        jmp dhboard             ; the board screen is stale: repaint it
+        beq usw40
+        jsr uidhon              ; to the board: the board screen AND the text
+        jsr dhboard             ;  window under it are both stale
+        jmp uidhtext
+usw40:  jsr uidhoff             ; back to 40 columns: rows 20-23 of the text
+        jmp uipaint40           ;  page have been carrying the window's ODD
+                                ;  columns, so they are not text any more.
+                                ;  uiread's loop repaints the prompt row next.
 uiswx:  rts
 
-; uidhon: hand the display to double hi-res, full screen.
+; uidhon: hand the display to double hi-res, MIXED with a four-row text window.
 uidhon:
-        sta CLR80STORE          ; ★ LOAD-BEARING. This renderer reaches the
-                                ;  aux half through RAMWRT; with 80STORE ON,
-                                ;  $2000-$3FFF follows PAGE2 and IGNORES
-                                ;  RAMWRT, so every aux byte would land in
-                                ;  MAIN and the board would come out as
-                                ;  interleaved garbage.
+        sta CLR80STORE          ; ★ LOAD-BEARING, and now doubly so. The board
+                                ;  renderer reaches the aux half through
+                                ;  RAMWRT, and the text window reaches the aux
+                                ;  text page the same way; with 80STORE ON,
+                                ;  BOTH $0400-$07FF and $2000-$3FFF follow
+                                ;  PAGE2 and IGNORE RAMWRT, so every aux byte
+                                ;  would land in MAIN -- an interleaved-garbage
+                                ;  board over a half-written window.
         sta SET80COLON          ; the scanner fetches aux+main per byte column
         sta SETDHIRES           ; AN3 low: 560 dots, not 280
         sta GRSET               ; graphics
         sta HIRESSET            ; hi-res
-        sta MIXCLR              ; full screen: see the note above
-        sta TXTPAGE1            ; page 1 = $2000-$3FFF in both banks
+        sta MIXSET              ; ★ MIXED: graphics on scanlines 0-159, four
+                                ;  text rows below. The board is 8 x DHROWS =
+                                ;  152 scanlines from DHTOP = 4, i.e. 4-155,
+                                ;  so it fits with a four-line border top and
+                                ;  bottom and the artwork is untouched.
+        sta TXTPAGE1            ; page 1 = $2000-$3FFF in both banks, and
+                                ;  $0400-$07FF for the window
         rts
 
 ; uidhoff: hand it back to the 40-column text screen, exactly as m8main took
@@ -1832,20 +1947,26 @@ qstubend:                       ;  since m8main invalidated the power-up byte
 ; Painting
 ; ===========================================================================
 
-; uipaint repaints EVERYTHING: the 40-column text screen every time, and the
-; double-hi-res board on top of that whenever the board screen is the one
-; being shown.
+; uipaint repaints EVERYTHING: the 40-column text screen every time, then --
+; when the board is the screen being shown -- the double-hi-res board and the
+; four-row 80-column window under it.
 ;
 ; The text screen is painted even when it is not displayed, and that is
 ; deliberate: it costs 23,659 cycles against the 193,667 the board costs, it
-; makes ESC instantaneous (the screen behind it is already correct), and it
-; keeps ONE repaint path -- every screen gate in internal/ui is a gate on
-; bytes this always wrote.
+; makes ESC nearly instantaneous, and it keeps ONE repaint path -- every
+; screen gate in internal/ui is a gate on bytes this always wrote. It is now
+; load-bearing for a second reason: the MIXED-MODE WINDOW IS COMPOSED FROM IT.
+; uidhtext copies already-rendered 40-column rows (title, status, check, think
+; line, opening name, message) into its 80-byte staging buffer, so there is
+; exactly one place where each of those strings is built.
 uipaint:
         jsr uipaint40
         lda UIDHGR
         beq uipx
-        jmp dhboard
+        jsr dhboard
+        jmp uidhtext            ; ...and the text window, whose MAIN half
+                                ;  uipaint40 has just overwritten with rows
+                                ;  20-23 of the 40-column screen
 uipx:   rts
 
 uipaint40:
@@ -1990,17 +2111,19 @@ uichkrow:
         jmp uiputs
 ucrx:   rts
 
-; uiprompt: row 23 — the input line with everything typed so far and a
-; cursor block.
+; ---------------------------------------------------------------------------
+; uiprompt: the input line with everything typed so far and a cursor block.
+;
+; It is the ONE row that is repainted on every keystroke rather than once per
+; move, and it is also the one row the two screens fight over: 40-column row 23
+; and the mixed-mode window's bottom row are the same 40 bytes of MAIN. So it
+; composes into UI80BUF first and then writes outwards -- the left 40 columns
+; to the text page, and (in mixed mode) the whole 80 to the window. Nothing
+; reads back a screen it is about to overwrite.
+; ---------------------------------------------------------------------------
 uiprompt:
-        lda #PROMPTROW
-        ldx #0
-        jsr uigotorc
-        ldy #39                 ; clear the row first: a backspace has to
-        lda #$A0                ;  visibly remove the character
-uprc:   sta (SCRPTR),y
-        dey
-        bpl uprc
+        jsr ui80clr             ; blank the whole line first: a backspace has
+                                ;  to visibly remove the character
         lda UIRESULT
         bne upcmd
         jsr uimyturn
@@ -2010,20 +2133,215 @@ upcmd:  lda #<s_cmdq
         jmp upput
 upmv:   lda #<s_movq
         ldx #>s_movq
-upput:  jsr uiputs
-        ldy #PROMPTLEN
-        ldx #0
-uprpl:  cpx UIBLEN
+upput:  ldy #0
+        jsr ui80puts
+        ldx #PROMPTLEN
+        ldy #0
+uprpl:  cpy UIBLEN
         bcs uprcur
-        lda UIBUF,x
+        lda UIBUF,y
         ora #$80
-        sta (SCRPTR),y
-        iny
+        sta UI80BUF,x
         inx
+        iny
         bne uprpl
 uprcur: lda #$20                ; inverse space: the cursor
+        sta UI80BUF,x
+        ; --- the 40-column screen's row 23 ---
+        lda #PROMPTROW
+        ldx #0
+        jsr uigotorc
+        ldy #39
+uprc:   lda UI80BUF,y
         sta (SCRPTR),y
+        dey
+        bpl uprc
+        ; --- and, in mixed mode, the window's bottom row, with the second
+        ; help line filling the 40 columns the prompt does not use ---
+        lda UIDHGR
+        beq uprx
+        lda #<s_help2
+        ldx #>s_help2
+        ldy #41
+        jsr ui80puts
+        lda #DHTXTTOP+3
+        jmp ui80row
+uprx:   rts
+
+; ===========================================================================
+; The mixed-mode text window: four rows of EIGHTY columns under the board.
+;
+; ★ HOW 80-COLUMN TEXT IS STORED. With 80COL on, the scanner fetches TWO bytes
+; per column position: the AUX byte first, then the MAIN byte. So for row base
+; B and 0 <= i < 40, aux B+i is screen column 2i and main B+i is column 2i+1.
+; Every row here is therefore built as ONE 80-byte line in UI80BUF and then
+; de-interleaved into the two banks by ui80row.
+;
+; ★ WHY A STAGING BUFFER AND NOT DIRECT STORES. Two reasons, and the second is
+; the one that matters. First, it halves the soft-switch traffic: one RAMWRT-on
+; window per row instead of one per character. Second, the window's MAIN half
+; IS rows 20-23 of the 40-column text page -- the help rows and the prompt row
+; -- so a renderer that read the screen while writing it would consume its own
+; output. Composing in LC RAM makes the overlap a non-event.
+;
+; ★ WHAT THE FOUR ROWS SHOW, and why. Four rows and 320 characters have to
+; carry what a player needs WITHOUT leaving the board, and everything else has
+; to be reachable with one ESC:
+;
+;   20  the inverse title bar (version, level, which colour you have)  cols 0-39
+;       whose move it is, or how the game ended                       cols 40-59
+;       CHECK                                                         cols 60-79
+;   21  the think line: depth, score, the engine's best move          cols 0-39
+;       BOOK: <opening name>                                          cols 40-79
+;   22  the message row (illegal move, draw offers, game over)        cols 0-39
+;       the first help line                                           cols 41-79
+;   23  the input prompt, what you have typed, and the cursor         cols 0-39
+;       the second help line                                          cols 41-79
+;
+; The MOVE LIST, the rank/file coordinates and the long-form help are what got
+; left out; all three are on the 40-column screen, one ESC away. Every one of
+; these fields is COPIED from the 40-column row that already renders it, so
+; there is exactly one piece of code per string and the two screens cannot
+; disagree.
+; ===========================================================================
+
+DHTXTTOP  = 20          ; first screen row of the four-row window (mixed mode
+                        ;  shows text rows 20-23 under scanlines 0-159)
+
+; ui80clr: blank all 80 columns of the staging line. Clobbers A,Y.
+ui80clr:
+        ldy #79
+        lda #$A0                ; normal space
+u80c:   sta UI80BUF,y
+        dey
+        bpl u80c
         rts
+
+; ui80get: copy the 40 characters of 40-column text row A into the staging
+; line starting at column X, stopping at column 80. Clobbers A,X,Y, SCRPTR
+; and UITMPB.
+;
+; It reads the TEXT PAGE, so its source row must be one the window does not
+; overwrite -- i.e. row 0-19, never 20-23. That is not a comment: rows 20-23
+; hold the window's own odd columns once it has been painted once, so a
+; source row of 21 would render the previous frame's interleave as text.
+ui80get:
+        stx UITMPB
+        ldx #0
+        jsr uigotorc            ; SCRPTR = the row base, column 0
+        ldy #0
+        ldx UITMPB
+u80g:   lda (SCRPTR),y
+        sta UI80BUF,x
+        inx
+        cpx #80
+        bcs u80gx
+        iny
+        cpy #40
+        bcc u80g
+u80gx:  rts
+
+; ui80puts: copy the $00-terminated string at A/X into the staging line
+; starting at column Y, stopping at column 80. Clobbers A,X,Y, STRPTR and
+; UITMPB.
+ui80puts:
+        sta STRPTR
+        stx STRPTR+1
+        sty UITMPB
+        ldy #0
+        ldx UITMPB
+u80p:   lda (STRPTR),y
+        beq u80px
+        sta UI80BUF,x
+        inx
+        cpx #80
+        bcs u80px
+        iny
+        bne u80p
+u80px:  rts
+
+; ui80row: blit the staging line to 80-column text row A -- even columns to
+; AUX, odd columns to MAIN. Clobbers A,X,Y and SCRPTR.
+;
+; RAMWRT is the only switch involved, and it works here for exactly the reason
+; it works in dhboard: uidhon cleared 80STORE, so $0400-$07FF follows
+; RAMRD/RAMWRT like any other address. With 80STORE on it would follow PAGE2
+; instead and every "aux" byte would land in main, on top of the odd columns.
+ui80row:
+        ldx #0
+        jsr uigotorc            ; SCRPTR = the row base; both banks share it
+        sta RAMWRTON            ; --- even columns: aux ---
+        ldx #0
+        ldy #0
+u80ra:  lda UI80BUF,x
+        sta (SCRPTR),y
+        inx
+        inx
+        iny
+        cpy #40
+        bcc u80ra
+        sta RAMWRTOFF           ; --- odd columns: main ---
+        ldx #1
+        ldy #0
+u80rm:  lda UI80BUF,x
+        sta (SCRPTR),y
+        inx
+        inx
+        iny
+        cpy #40
+        bcc u80rm
+        rts
+
+; ui80stat: rebuild the window's FIRST row -- the title bar, whose move it is,
+; and CHECK. Split out because m8engine paints THINKING... onto CHKROW at the
+; start of the engine's turn, and on the board screen that row is the only
+; place it can appear.
+ui80stat:
+        jsr ui80clr
+        lda #0                  ; the inverse title bar, level digit and all
+        ldx #0
+        jsr ui80get
+        lda #STATROW            ; ...whose move it is, or the result
+        ldx #40
+        jsr ui80get
+        lda #CHKROW             ; ...and CHECK / THINKING..., over its spaces
+        ldx #60
+        jsr ui80get
+        lda #DHTXTTOP
+        jmp ui80row
+
+; ui80think: rebuild the window's SECOND row -- the think line and the opening
+; name. Split out because the search calls it between iterations (uithinkln),
+; which is the only thing that repaints while the engine is on move.
+ui80think:
+        jsr ui80clr
+        lda #THINKROW
+        ldx #0
+        jsr ui80get
+        lda #BOOKROW
+        ldx #40
+        jsr ui80get
+        lda #DHTXTTOP+1
+        jmp ui80row
+
+; uidhtext: repaint all four rows of the window. Called after every full
+; repaint (uipaint) and after every swap back to the board (uiswap).
+uidhtext:
+        jsr ui80stat
+        jsr ui80think
+
+        jsr ui80clr
+        lda #MSGROW
+        ldx #0
+        jsr ui80get
+        lda #<s_help1
+        ldx #>s_help1
+        ldy #41
+        jsr ui80puts
+        lda #DHTXTTOP+2
+        jsr ui80row
+
+        jmp uiprompt            ; row 23 paints itself into both screens
 
 ; uisetmsg / uiclrmsg: the message row's contents live in LC RAM so a full
 ; repaint restores them.
@@ -2046,31 +2364,52 @@ uiclrmsg:
         sta UIMSGB
         rts
 
+; ---------------------------------------------------------------------------
 ; uibookname: CUROPENING -> "BOOK: <name>" in the opening row's buffer. The
-; name table is a run of length-prefixed strings at the end of the resident
-; blob; NAMEID indexes it by position, so the walk is the decode.
+; name table is a run of length-prefixed strings; NAMEID indexes it by
+; position, so the walk is the decode.
+;
+; ★ IT READS TWO DIFFERENT MEMORIES, and that is the whole point of the split.
+; The HEADER (magic, and the name table's address) is in AUXILIARY RAM with the
+; entries; the NAME TABLE itself is in LANGUAGE CARD BANK 2. So this routine
+; opens an aux window, reads six bytes, closes it, opens a bank-2 window,
+; walks the table, and closes that.
+;
+; ★ WHY THIS ROUTINE MAY BANK, AND NOTHING ELSE MAY. It runs at $E000. Language
+; Card bank switching only re-maps $D000-$DFFF -- $E000-$FFFF is common to both
+; banks -- so its own instruction fetches, its zero page (which follows ALTZP,
+; not the LC bank), its stack and every byte it writes (UIBOOKB and UITMPB, at
+; $F7xx) are unaffected. asm/book.s cannot do the equivalent trick with RAMRD,
+; because it is fetched from main $4000; that asymmetry is why the probe pays
+; for a $D000 primitive and this does not.
+;
+; ★ WHAT IS HIDDEN WHILE BANK 2 IS IN, and therefore what must not happen:
+; LCCODE at $D000 (ttfetch, bkfetch, bkhdr -- so no transposition-table probe
+; and no book probe) and DHTILES at $D300 (so no board repaint). The window
+; below is straight-line code with no jsr in it, and it restores bank 1 on
+; BOTH exits. internal/ui's TestBookNameRestoresBank1 fails if either path
+; stops doing so.
+;
+; ★ $C083 AND NOT $C080. Bank 2 with WRITE ENABLED, because write-protecting
+; the Language Card protects ALL of $D000-$FFFF -- including $F780, where this
+; routine's output goes. Write-protecting here would not read the wrong name;
+; it would silently write no name at all.
+; ---------------------------------------------------------------------------
 uibookname:
-        ; The blob lives in AUX now, so this reads with RAMRD on. That is
-        ; safe HERE and nowhere else in the project: this code runs from the
-        ; Language Card at $E000, which RAMRD does not switch, and its zero
-        ; page follows ALTZP, not RAMRD. Every store below goes to UIBOOKB /
-        ; UITMPB, also in the Language Card, so RAMWRT never enters into it.
-        ; asm/book.s cannot do this -- it is fetched from main $4000 -- which
-        ; is exactly why the probe pays for a $D000 primitive and this does not.
-        sta RAMRDON
+        sta RAMRDON             ; ---- the HEADER, from AUX ----
         lda BOOK_MAGIC
         cmp #'B'
         bne ubnnone
         lda BOOK_MAGIC+1
         cmp #'K'
         bne ubnnone
-        lda BOOK_NAMEOFF
-        clc
-        adc #<BOOK_BASE
-        sta T0
-        lda BOOK_NAMEOFF+1
-        adc #>BOOK_BASE
-        sta T0+1
+        lda BOOK_NAMEADDR       ; the name table's ABSOLUTE resident address.
+        sta T0                  ;  Read from the header rather than assembled
+        lda BOOK_NAMEADDR+1     ;  in, so moving the table is a cmd/genbook
+        sta T0+1                ;  change and nothing else.
+        sta RAMRDOFF            ; ---- and out of AUX before anything else ----
+        lda LCBANK2RW           ; ---- the NAME TABLE, from LC BANK 2 ----
+        lda LCBANK2RW           ;  (two reads: that is what enables writing)
         ldx CUROPENING
         beq ubngot
 ubnskip:
@@ -2104,12 +2443,14 @@ ubncl:  iny
         cpx #39
         bcc ubncl
 ubnterm:
-        sta RAMRDOFF
+        lda LCBANK1RW           ; bank 1 back, BEFORE anything can want LCCODE
+        lda LCBANK1RW           ;  or DHTILES again (X survives: it is the
+                                ;  write cursor for the terminator below)
         lda #0
         sta UIBOOKB,x
         rts
-ubnnone:
-        sta RAMRDOFF
+ubnnone:                        ; no book: aux is still switched in, bank 1 was
+        sta RAMRDOFF            ;  never switched away from
         lda #0
         sta UIBOOKB
         rts
@@ -2152,7 +2493,11 @@ utlterm:
         jsr uigotorc
         lda #<UITHINK
         ldx #>UITHINK
-        jmp uiputs
+        jsr uiputs
+        lda UIDHGR              ; in mixed mode the same line is the LEFT half
+        beq utlx                ;  of the window's second row, and a search is
+        jmp ui80think           ;  the only thing that repaints between moves
+utlx:   rts
 
 ; uiscore: SCORE (16-bit signed centipawns, side-to-move POV) -> a signed
 ; pawn figure at (SCRPTR),y.

@@ -3,6 +3,95 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-01 — ★ MIXED MODE SHIPS: the board keeps four lines of 80-column text under it
+
+`asm/8fish.dsk` now boots to the double-hi-res board **with a four-row,
+80-column text window under it**, instead of a full-screen board and ESC to a
+text screen. §13.4 of docs/ui-design.md priced this on 2026-07-31 and did not
+build it; this is what got built. Full write-up: **docs/ui-design.md §14**.
+
+**The board did not move and was not re-sliced.** `DHTOP` is 4 and `DHROWS` is
+19, so the eight ranks are scanlines 4-155; MIXED shows graphics on 0-159.
+`asm/dhgr.s` changed only in its header comment.
+
+**The blocker was aux RAM, and the fix was to split the book.** Double hi-res
+forces 80COL on, so the text window is 80-COLUMN text, whose EVEN columns are
+fetched from **aux `$0400-$07FF`** — four 40-byte spans through the middle of
+the 7,407-byte blob that lived at aux `$0200`. The book split along a line its
+own code already drew:
+
+| piece | size | home | read by |
+|---|---|---|---|
+| header + entries | 5,705 B | AUX `$0800-$1E48` (439 B spare) | `bookprobe`, ~100 entries/probe |
+| name table | 1,702 B | **LC BANK 2** `$D000-$D6A5` (2,394 B spare) | `uibookname`, once per book move |
+
+`bookprobe` has never read a name. Only `uibookname` does, and it runs at
+`$E000`, which Language Card bank switching does not re-map — so it selects
+bank 2 (`$C083` twice: bank 2 with WRITE ENABLED, because write-protecting the
+card protects all of `$D000-$FFFF` including its own `$F780` output buffer),
+reads, and restores bank 1. Bank 2 and not bank 1 because bank 1 has 1,048 B
+contiguous free against a 1,702-byte table.
+
+**What the four rows show** (the design call): row 20 the inverse title bar
+beside whose move it is and CHECK; row 21 the think line — depth, score, the
+engine's best move, updated between completed ID iterations — beside
+`BOOK: <opening>`; rows 22-23 the message row and the input prompt, each
+beside one help line. Left out and one ESC away: the move list, the
+coordinates, the long help. Every field is COPIED from the 40-column row that
+already renders it, so there is one piece of code per string.
+
+```
+ 20 | 8FISH 1.0    LEVEL 1     YOU ARE WHITE WHITE TO MOVE                      |
+ 21 |D 2 -0.05 g8f6                          BOOK: B90 Sicilian, Najdorf        |
+ 22 |                                         N-NEW T-TAKEBACK R-RESIGN D-DRAW  |
+ 23 |YOUR MOVE? e2e4_                         L-LEVEL S-SIDES Q-QUIT ?-HELP     |
+```
+
+**The one thing it cost.** The window's ODD columns *are* rows 20-23 of the
+40-column text page — the same 160 bytes of main RAM. So each window row is
+composed in an 80-byte staging line in LC RAM (`UI80BUF`, `$FF00`) and blitted,
+never read back off the screen it is overwriting; and `uiswap` repaints the
+40-column screen on the way back from the board. "ESC is instant because the
+screen behind it is already correct" becomes "ESC costs one more 23,000-cycle
+repaint" — 23 ms. `TestDiskBoots` now compares rows 0-19 against the gated
+shipping image and asserts the window separately, out of BOTH banks.
+
+**Two new gates, both mutation-checked.**
+
+- `internal/delivery.TestBookClearsTheAuxTextPage` reads `BOOK_BASE` out of the
+  generated `asm/book.inc` and the blob length off disk and fails on any
+  intersection with aux `$0400-$07FF`. Mutation (`BaseAddr` back to `$0200`):
+  *"THE RESIDENT BOOK OVERLAPS THE 80-COLUMN TEXT PAGE'S AUX HALF … overlap:
+  $0400-$07FF, 1024 bytes"*. The reason for the whole change now lives
+  somewhere that FAILS.
+- `internal/ui.TestBookNameRestoresBank1` calls `uibookname` through a `jsr`
+  stub in the booted machine and asserts BOTH that the card comes back on
+  bank 1 read+write AND that the name it wrote is right — two-sided, because a
+  one-sided check would pass a routine that never switched and read the artwork
+  instead. Mutations: drop the restoring `lda $C08B` pair → *"returned with
+  LANGUAGE CARD BANK 2 still selected"*; select `$C08B` instead of `$C083` →
+  *"wrote \"BOOK: \\x03@ \\a1p…\", want \"BOOK: C78 Ruy Lopez, Morphy\""*.
+
+**Unchanged and green:** `TestMicroAB` vs `microABGolden` (the search tree is
+byte-identical — this was packaging, not engine), `TestBookProbeParityASMvsGo`
+(264 positions / 4,194 probes, blob-integrity check after every probe),
+`TestDiskBoardParity` (all 16,384 bytes of DHGR page 1 from a cold `$C600`
+boot), the `internal/delivery` layout suite, and `make test` end to end.
+
+**Cost on the disk:** stage 2 grew 37 → 38 sectors (the name table is 7, and it
+abuts the artwork so the two stay one span); 186 of 560 disk sectors.
+**Boot time: 7.10 s** of emulated IIe time from `$C600` to the first keyboard
+poll, against 7.01 s before — the 0.09 s is the extra sectors and their copy.
+
+**Still unverifiable in emulation** (added to docs/ui-design.md §13.5's list):
+goapple2 models MIXED as a state bit and has no video scanner, so *where the
+graphics/text split actually falls* on hardware is untested — the board has a
+4-line margin top and bottom, which absorbs a small error and not a large one
+— and 80-column TEXT pixels have never driven a real 14M shift register. The
+aux/main column interleave itself is NOT on that list: `Window()`
+de-interleaves it the way the scanner does and the gates assert real strings
+read back out of both banks.
+
 ## 2026-08-01 — ★ the residual Sargon quirk class, ROOT-CAUSED: SARGON'S MOVE NUMBER IS NOT DECIMAL PAST 99
 
 Every standard-start game that reached move 100 was ending as a harness

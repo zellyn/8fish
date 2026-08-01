@@ -24,7 +24,11 @@
 ;   Board: 8 x 42 = 336 px at x=112 (byte column 8: 14-aligned AND even, so
 ;   the dither phase carries over unchanged), and 8 x 19 = 152 scanlines from
 ;   y=4. Mixed mode ($C053) shows scanlines 0-159, so 152 plus a 4-line border
-;   top and bottom fits exactly.
+;   top and bottom fits exactly -- and as of 2026-08-01 that is not a spare
+;   property, it is the shipping arrangement: the board runs 4-155 with four
+;   rows of 80-column text on scanlines 160-191. Nothing in this file changed
+;   to make that happen (see docs/ui-design.md section 14); the geometry was
+;   already right, and what had to move was the opening book.
 ;
 ; TILES
 ;
@@ -34,10 +38,10 @@
 ;   1,824 B. The two empty-square tiles are synthesised at init from the
 ;   background constants (dhinit), so the blob carries 24 tiles, not 26.
 ;
-; The caller must have selected the LC bank holding the tile blob, and must
-; have put the machine in DHGR FULL-SCREEN mode (uidhon: 80COL on, AN3 low,
-; HIRES, TEXT off, MIXED off -- mixed mode does not fit; see docs/ui-design
-; section 13.4 and the 2026-07-31 results entry).
+; The caller must have selected LC BANK 1 -- the bank holding the tile blob;
+; uibookname is the one routine that ever selects bank 2, and it restores
+; bank 1 before it returns -- and must have put the machine in DHGR mode
+; (uidhon: 80COL on, AN3 low, HIRES, TEXT off, MIXED on, 80STORE off).
 
 ; ---- geometry ----
 DHCOL0    = 8           ; first DHGR byte column of the board (x = 112)

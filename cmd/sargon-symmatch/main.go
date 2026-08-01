@@ -1284,5 +1284,7 @@ func loadBookBlob(path string) (*book.Book, error) {
 	if err != nil {
 		return nil, err
 	}
-	return book.Load(blob)
+	// nil names: a named blob file is an ENTRIES blob, and the name text is
+	// logging-only -- nothing about move selection reads it.
+	return book.Load(blob, nil)
 }

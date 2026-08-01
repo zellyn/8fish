@@ -25,7 +25,7 @@ func bookProbeDeps(t *testing.T) (bin []byte, bookentry uint16, bk *book.Book, b
 	if err != nil {
 		t.Fatal(err)
 	}
-	return bin, be, bk, book.DefaultBlob()
+	return bin, be, bk, book.DefaultEntries()
 }
 
 // enumerateBookPositions BFS-walks every position reachable by playing book

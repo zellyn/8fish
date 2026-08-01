@@ -42,10 +42,12 @@ image would have paid 30 sectors for the $2200-$3FFF hole. This was not part of
 the plan and is worth more than the chain load: every future "it does not fit"
 is now a layout question.
 
-**Renderer cost, re-measured on the shipping build**: 193,667 cycles per
-whole-board repaint (unchanged — it is the same code), plus a one-time 115,000
-for `dhclear`. The 40-column screen is repainted every time as well (23,659
-cycles) so ESC is instantaneous; together that is 0.7% of a 30-second move.
+**Renderer cost, re-measured**: `dhboard` is **192,667 cycles** per whole-board
+repaint (188.3 ms; the earlier 193,667 was measured before `dhclear` shifted
+the code, and the 1,000-cycle difference is the measurement's own granularity,
+not a speed-up). Plus a one-time ~115,000 for `dhclear`. The 40-column screen
+is repainted every time as well (23,826 cycles) so ESC is instantaneous;
+together that is 0.7% of a 30-second move.
 
 **Language Card budget**: UICODE 5,064 B of 5,888 (was 4,453); the renderer is
 380 B of code + 96 B of generated tables. 1,064 B of the $E000-$FFEF LC still

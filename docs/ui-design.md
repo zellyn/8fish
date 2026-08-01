@@ -1302,8 +1302,9 @@ and it also wants an 80-column text writer the project does not have yet.
 
 Cost of the current arrangement: while the board is up, the player types blind.
 Mitigation, and it is cheap: the 40-column screen is repainted EVERY time
-regardless (23,659 cycles against the board's 193,667), so ESC is instant and
-the screen behind it is always already correct.
+regardless (23,826 cycles against the board's 192,667 — both re-measured on
+the shipping build), so ESC is instant and the screen behind it is always
+already correct.
 
 ### 13.5 ★ What a real IIe can still surprise us with — a MUCH shorter list
 

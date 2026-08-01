@@ -14,6 +14,23 @@ import (
 // the aux bank) are ordinary memory writes and never fire a trap. Peek is
 // promoted from the embedded *iie.Memory unchanged, so memory dumps remain
 // side-effect free.
+//
+// Both the read and the store traps require the machine to be in the "all
+// main" banking the harness I/O convention assumes: RAMRD off AND RAMWRT
+// off. RAMWRT matters to the READ traps because of a 6502 bus artifact:
+// `sta (zp),Y` (and the other indexed-store modes) perform a hardware-
+// accurate DUMMY READ of the target address one cycle before the write.
+// That read is a real bus cycle, so it follows RAMRD, not RAMWRT — code
+// running the aux-write discipline of asm/tt.s (RAMWRT on, RAMRD off; see
+// D4) therefore emits a MAIN-bank read of every address it writes to AUX.
+// On real hardware that is harmless, because $BFF0-$BFFF is plain RAM
+// there. Here it is not: the read traps have side effects (InAddr pops an
+// input byte, InStatusAddr sets WaitingForInput and makes Run return), so
+// an aux data structure covering $BFF0-$BFF7 would stall every run that
+// wrote to it. Gating on RAMWRT reproduces the hardware behaviour instead
+// of inventing a hazard the hardware does not have, which is what lets the
+// transposition table run all the way to aux $BFFF (docs/testing.md D8).
+//
 // Read traps (all main-bank, like the store traps; fixed addresses per
 // docs/testing.md):
 //
@@ -74,7 +91,10 @@ func (t *TrapMemory) Read(addr uint16) byte {
 	if t.RealKeyboard && addr >= 0xC000 && addr <= 0xC00F && !t.Memory.KeyWaiting() {
 		t.waitingInput = true
 	}
-	if !t.Memory.RamRd {
+	// RamWrt as well as RamRd: with RAMWRT on this may be the dummy read
+	// cycle of an indexed store to AUX, which on hardware has no effect
+	// (see the type doc).
+	if !t.Memory.RamRd && !t.Memory.RamWrt {
 		switch {
 		case t.InAddr != 0 && addr == t.InAddr:
 			if len(t.Input) == 0 {

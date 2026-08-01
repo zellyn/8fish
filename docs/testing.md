@@ -41,9 +41,23 @@ $D000-$FFFF image for runs that need monitor/Applesoft ROM.
 
 On real hardware these addresses are plain RAM, so engine binaries that use
 them via the swappable I/O module still run there unmodified. Traps fire
-only on **main-bank** stores (aux writes to the same addresses via RAMWRT
-are ordinary memory), and `$BF00-$BFFF` is reserved in both banks by the
-memory map (D8) so engine tables can never collide with them.
+only when the machine is in **all-main banking** — RAMRD off *and* RAMWRT
+off — so neither aux writes nor aux reads at these addresses touch them.
+`$BFF0-$BFFF` is reserved in **MAIN only** (D8, amended 2026-07-31);
+`asm/engine.cfg` enforces it by capping the image at `$4000-$BFEF`.
+
+**AUX has no reserved range: engine tables may run to the literal last
+byte, `$BFFF`.** They could not before 2026-07-31, and the reason was
+subtle enough to be worth stating here. A 6502 `sta (zp),Y` performs a
+DUMMY READ of the target address one cycle before the write, and that read
+follows RAMRD rather than RAMWRT — so `ttstore`, which writes aux with
+RAMWRT on and RAMRD off (D4), emitted a *main*-bank read of every address
+it wrote to aux. Those reads hit the read traps below, whose side effects
+(`$BFF1` pops an input byte; `$BFF2` sets `WaitingForInput` and makes
+`Run` return) stalled any search whose table covered `$BFF0-$BFF7`. That
+hazard existed only in the harness — on hardware the dummy read is a plain
+RAM read — so the read traps are now gated on RAMWRT too.
+`harness/auxdummyread_test.go` is the regression gate.
 
 | Address | Access | Means |
 |---|---|---|

@@ -170,12 +170,58 @@ the vector module is worth building once a second I/O backend (M8's
 keyboard/screen) makes the indirection pay for itself.
 
 Amendments from adversarial review (both critics found the collision):
-- **$BF00-$BFFF is reserved in BOTH banks** — the memory-budget tables
-  and ld65 segment configs must exclude it. Without this, engine tables
-  growing to the top of main RAM, or aux TT/book data crossing $BFF0,
-  would spuriously emit protocol bytes or kill the run.
+- **$BFF0-$BFFF is reserved in MAIN.** (Originally written as "$BF00-$BFFF
+  in BOTH banks"; amended 2026-07-31, see below.) The memory-budget tables
+  and ld65 segment configs must exclude it: `asm/engine.cfg` already caps
+  MAIN at `$7FF0` = `$4000-$BFEF`, and `internal/delivery`'s layout test
+  asserts the engine image stops below `COUT_TRAP`.
 - Traps fire **only on main-bank stores** (the harness checks RAMWRT),
   so aux writes to those addresses are ordinary memory. Implemented.
+
+**Amendment 2026-07-31 — the aux-bank half of the reservation is dropped;
+AUX is usable to the literal last byte, `$BFFF`.**
+
+The original reservation was written against the *store* traps, and for
+stores it was already redundant: `TrapMemory.Write` gates on RAMWRT, so an
+aux store to `$BFF0`/`$BFFF` has never fired a trap. But the reservation
+was nonetheless load-bearing, for a reason nobody had stated — and the
+mechanism was root-caused only now.
+
+It is the **read** traps (`$BFF1` IN, `$BFF2` INSTAT, `$BFF4-$BFF6` CLOCK),
+plus a 6502 bus artifact. `sta (zp),Y` performs a hardware-accurate DUMMY
+READ of the target address one cycle before the write (go6502's `zpiy6w`
+models it; the LDA form does not, since it only reads twice on a page
+cross, and TT entries are 8-aligned). That read is a real bus cycle, so it
+follows **RAMRD, not RAMWRT**. `asm/tt.s` `ttstore` runs the D4 aux-write
+discipline — RAMWRT on, RAMRD *off* — so every one of its eight
+`sta (TTPTR),y` stores emitted a **MAIN-bank read** of the address it was
+writing to AUX. With the table based at `$4000`, entry 4094 covers
+`$BFF0-$BFF7`; storing it read main `$BFF1` (which POPS an input byte) and
+main `$BFF2` (which sets `WaitingForInput`, making `Machine.Run` return).
+Hence the observed "searches stop terminating".
+
+On real hardware this is a non-event: `$BFF0-$BFFF` is plain RAM and the
+dummy read has no side effect. The hazard was invented by the harness. So
+the fix is in the harness, not the engine: `TrapMemory.Read` now gates the
+read traps on `!RamWrt` as well as `!RamRd`, i.e. the traps fire only in
+the "all main" banking the I/O convention already assumes — symmetric with
+`Write`, which has always gated on RAMWRT. `harness/auxdummyread_test.go`
+pins both directions (aux stores across `$BFF0-$BFFF` complete cleanly;
+main-bank reads of `$BFF1`/`$BFF2` still trap).
+
+Consequences:
+- The true reserved range is **`$BFF0-$BFFF` in MAIN only** — sixteen
+  bytes, not a page, and not in aux at all.
+- A 4096-entry TT therefore fits **exactly** at aux `$4000-$BFFF`
+  (`$C000 - $4000 = $8000 = 4096 x 8`), freeing aux `$2000-$3FFF` in both
+  banks for a double-hi-res framebuffer at zero cost to table size, entry
+  layout, or playing strength. Verified: with `TTBASE = $4000` the engine
+  assembles to a byte-identical 31,906 B, `TestMicroAB` matches
+  `microABGolden`, and all five parity gates are green.
+- Note the residual asymmetry: had the fix not been possible, the usable
+  aux top would have been `$BFEF` (32,752 B, 4094 entries) — and 4094 is
+  not a power of two, so the 12-bit index mask in `TTADDR` could not have
+  addressed it without a different scheme.
 - The trap addresses are canonical: the `-cout`/`-exit` flags exist for
   experiments, but the checked-in I/O module and all tooling assume
   $BFF0/$BFFF.

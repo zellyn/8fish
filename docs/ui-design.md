@@ -142,36 +142,58 @@ Derivations for the rejected/deferred rows:
   transparent: with `TTBASE` at `$0400`, `$2000`, `$3000` and `$3F00`,
   `internal/chesstest` passes exactly as at `$0200`.
 
-  **But the obvious destination does not fit, by one page.** The tempting
-  arithmetic is `$C000 - $4000 = $8000 = 4096 x 8` — an exact fit for the table
-  above the DHGR aux half. It assumes aux is usable to `$BFFF`, and it is not:
-  `$BF00-$BFFF` is **reserved in both banks** by the memory map (D8) precisely
-  "so engine tables can never collide" with the harness trap addresses
-  (`docs/testing.md`). `TTBASE = $4000` is not a paper violation — it fails
-  `internal/chesstest` hard (searches stop terminating), while `$3F00` passes.
-  So the real budget above the DHGR page is `$4000-$BEFF` = **32,512 B against
-  the 32,768 B** a 4096-entry table needs — **256 bytes short**.
-
-  DHGR's aux half at `$2000-$3FFF` splits aux into two blocks and neither holds
-  the table:
+  **And the obvious destination DOES fit — exactly.** (This paragraph replaces
+  a second wrong answer, recorded 2026-07-31 and corrected the same day. The
+  first version of it said the table missed by one page. It does not miss at
+  all.) The arithmetic `$C000 - $4000 = $8000 = 4096 x 8` is an exact fit for
+  the table above the DHGR aux half, and it holds:
 
   ```
-  aux $0200-$1FFF    7,680 B   (holds the book: 7,407 B)
-  aux $2000-$3FFF    8,192 B   DHGR aux half -- fixed by hardware
-  aux $4000-$BEFF   32,512 B   256 B too small for 4096 x 8
+  aux $0200-$3FFF   -----     free (DHGR aux half is $2000-$3FFF)
+  aux $4000-$BFFF   32,768 B  the transposition table, all 4096 entries
   ```
 
-  So **DHGR and a full 4096-entry TT are mutually exclusive** while D8 stands
-  and `tt.s` keeps its 12-bit-index x 8-byte-entry addressing. The verdict
-  (reject) is unchanged; the *price* is not a quarter of the table, it is one
-  page of aux, and the only ways through are to lift D8's aux-bank reservation
-  (the traps are main-bank only and are already gated on `RamRd`/`RamWrt`, so
-  the reservation may be belt-and-braces — but the observed `$4000` failure is
-  NOT yet root-caused, so this is unproven), or to change the entry layout.
+  `TTBASE = $4000` really did fail `internal/chesstest` hard — searches stopped
+  terminating — and the earlier note correctly refused to call that a paper
+  violation. But it was a **harness bug, not a memory-map constraint**, and the
+  root cause is now demonstrated (D8 amendment, 2026-07-31):
 
-  Lesson worth keeping: when a cost is attributed to a *feature*, check whether
-  it is really attributable to the current *arrangement* — and then check the
-  replacement arrangement against the memory map instead of against arithmetic.
+  > A 6502 `sta (zp),Y` performs a hardware-accurate DUMMY READ of the target
+  > address one cycle before the write. That read is a real bus cycle, so it
+  > obeys **RAMRD, not RAMWRT**. `ttstore` writes aux with RAMWRT on and RAMRD
+  > off (D4), so each of its eight `sta (TTPTR),y` stores emitted a *main*-bank
+  > read of the address it was writing to *aux*. At `TTBASE = $4000`, entry
+  > 4094 covers `$BFF0-$BFF7`, so storing it read main `$BFF1` (pops an input
+  > byte) and main `$BFF2` (sets `WaitingForInput`, which makes `Machine.Run`
+  > return). On real hardware those are plain RAM and the dummy read does
+  > nothing; the hazard was the harness's own invention.
+
+  The read traps are now gated on RAMWRT as well as RAMRD — symmetric with the
+  store traps, which have always been — so aux is usable to `$BFFF`. Measured
+  with `TTBASE = $4000`: `engine.bin` is byte-identical in size (31,906 B),
+  `TestMicroAB` matches `microABGolden` (the search tree is unchanged, as a
+  pure relocation must be), and all five parity gates plus `internal/ui`,
+  `internal/ucibridge`, `internal/entropy` and `internal/delivery` are green.
+
+  So **DHGR and a full 4096-entry TT are NOT mutually exclusive.** The cost of
+  double hi-res to the engine is: two `adc` immediates in `engine.bin`
+  (`$02` -> `$40`), zero table entries, zero Elo. The reject verdict above
+  stands or falls on the UI arguments alone — the memory argument is gone.
+
+  A bonus the relocation carries: `asm/m8.s` documents a hardware-only hazard
+  in which 80STORE (turned on by the 80-column firmware, i.e. by any
+  BLOAD/BRUN from BASIC.SYSTEM in 80-column mode) makes aux `$0400-$07FF`
+  follow PAGE2 and ignore RAMRD/RAMWRT, so TT slots in that range would land
+  on the main text page. At `TTBASE = $4000` the table no longer covers
+  `$0400-$07FF` *or* `$2000-$3FFF`, so that failure mode disappears rather
+  than being fended off by a `sta CLR80STORE`.
+
+  Two lessons, both paid for twice. When a cost is attributed to a *feature*,
+  check whether it is really attributable to the current *arrangement*. And
+  when a rule in the memory map is corroborated by a real failure, that is not
+  yet evidence the rule explains the failure — find the mechanism before you
+  price the trade, because a documented precaution makes a very convincing
+  false cause.
 
 - **Hi-res page 1, and the actual artwork.** The 28-px/4-byte square priced
   above was sized for *invented* glyphs. The real asset

@@ -44,6 +44,14 @@ type Machine struct {
 	// It does NOT itself change Sargon's mode — the caller must simply refrain
 	// from calling EasyMode(). See cmd/sargon-symmatch.
 	HardMode bool
+
+	// wrapStrikes counts CONSECUTIVE polls that saw Sargon's newest move number
+	// go backwards at the far end of its move-list capacity. One such poll is
+	// more likely the mid-search repaint's blank frame than a real list wrap, so
+	// sargonCommitted requires two in a row (polls are >= pollChunk apart, longer
+	// than the repaint) before it declares the screen record fiction. Any normal
+	// reading clears it.
+	wrapStrikes int
 }
 
 func romDir() string {

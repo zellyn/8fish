@@ -248,31 +248,26 @@ func (m *Machine) sargonCommitted(baseNo int) (bool, error) {
 	}
 	if no < baseNo && baseNo >= MaxSargonMoves-1 {
 		// CONFIRM before condemning the game. A backwards number near the
-		// capacity is ALSO what the mid-search repaint looks like (it blanks the
-		// newest rows for ~167K cycles; measured in TestRepaintWatch), and a
-		// spurious ErrListWrapped ends the game as a harness artifact. Only a
-		// reading that survives longer than the repaint window is a real wrap.
-		// Reachable at all only since move numbers past 99 became readable — the
-		// window baseNo >= 126 used to be unreachable, because the driver froze
-		// at move 100.
-		if err := m.Run(repaintSettle); err != nil {
-			return false, err
-		}
-		no2, _, ok2 := m.LastSargonEntry()
-		if !ok2 {
+		// capacity is ALSO exactly what the mid-search repaint looks like (it
+		// blanks the newest rows for ~167K cycles; measured in TestRepaintWatch),
+		// and a spurious ErrListWrapped ends a game as a harness artifact — the
+		// very thing this file exists to avoid. Callers poll pollChunk (500K
+		// cycles) apart, longer than the repaint window, so a reading that
+		// repeats on the NEXT poll cannot be a blank frame.
+		//
+		// This window (baseNo >= 126) only became reachable when move numbers
+		// past 99 became readable at all: before that the driver froze at 100.
+		// Deliberately observation-based rather than "settle and re-read": it
+		// must not hand Sargon cycles of thinking that the budget did not.
+		m.wrapStrikes++
+		if m.wrapStrikes < 2 {
 			return false, nil
 		}
-		if no2 < baseNo {
-			return false, ErrListWrapped
-		}
-		return no2 > baseNo, nil
+		return false, ErrListWrapped
 	}
+	m.wrapStrikes = 0
 	return no > baseNo, nil
 }
-
-// repaintSettle is longer than Sargon's measured ~167K-cycle move-list repaint
-// window, so a list read after it cannot be a blank frame.
-const repaintSettle = 400_000
 
 // confirmMoveScreen polls up to maxSteps for Hard-mode move acceptance: OUR
 // move-list entry advances past baseOwnNo (our move landed in the list) with no

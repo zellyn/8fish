@@ -104,7 +104,7 @@ exactly this stub and it is proven to work in the emulator.
 | 80-col text | AUX `$0400-$07FF` = 1,024 B **of the TT** (128 of 4096 entries, 3.1%) | no | ~750 *derived* (every row split across two banks; 80STORE/PAGE2 per write) | ~2x | reject |
 | hi-res page 1 (`$2000-$3FFF`) | MAIN `$2000-$3FFF` | **yes** | ~1,850 *derived* | ~80,000 cyc *derived* | stage 2, viable |
 | hi-res page 2 (`$4000-$5FFF`) | that is engine CODE | — | — | — | impossible |
-| double hi-res | MAIN **and** AUX `$2000-$3FFF` = 8,192 B **of the TT** (1024 of 4096 entries, **25%**) | yes | ~2,600 *derived* | ~160,000 cyc *derived* | reject |
+| double hi-res | MAIN **and** AUX `$2000-$3FFF`, and **zero TT entries** (the table now starts at aux `$4000`) | yes | **347 code + 96 tables measured**, plus 456 B built at init and a 1,824 B tile blob | **193,667 cyc measured** (189 ms) | **BUILT AND PROVEN; blocked on DELIVERY, not on RAM** |
 
 Derivations for the rejected/deferred rows:
 
@@ -210,6 +210,91 @@ Derivations for the rejected/deferred rows:
     number preserves the 1-on-1-off dither phase exactly. 42 px = 6 DHGR bytes
     (3 aux + 3 main), which makes every square byte-aligned and removes
     pre-shifting entirely.
+
+### 3.1.1 Double hi-res, BUILT — and where it actually stops
+
+Implemented 2026-07-31 (`asm/dhgr.s`, `cmd/gentiles`, `internal/tiles`). Every
+number in the bullet above was re-measured against the pixels and held; the
+generator now ASSERTS each of them, so re-drawing the board fails the build
+instead of rendering garbage on the IIe.
+
+What the implementation added to the analysis:
+
+- **42 is a multiple of 14, and that is the whole trick.** A 14-px pitch keeps
+  every file at the *same* bit phase, so a tile is horizontally
+  position-independent. `assets/README.md`'s "at most 8 bit-phases per sprite"
+  is unnecessary — there is exactly one phase. The trim being EVEN is what
+  preserves the dither, which is globally locked to "even absolute x is lit";
+  in DHGR bytes that is the constant pair aux `$55`, main `$2A`.
+- **Byte columns 0 and 5 of every tile are background too**, so only the middle
+  four are stored: 4 B x 19 rows = **76 B/tile, 24 tiles = 1,824 B** (not the
+  2,964 B a 6-byte row implies). The two empty-square tiles are synthesised at
+  init from the background constants.
+- **The artwork really does carry all 24 combinations**: rows 2 and 5 hold the
+  king and queen *swapped* relative to the back rank, which is what supplies
+  king-on-dark / queen-on-light and their mirrors. Nothing is hand-maintained.
+- **Byte cost, measured from the link map** (`asm/dhgrtest.lbl`):
+  `dhinit` 105 B + `dhboard` 242 B = **347 B of code**; `TILEIDX`/`TILEOFFL`/
+  `TILEOFFH` = **96 B** of generated index tables. Those 443 B are all that
+  rides in the UI payload. The scanline-base and blank-tile tables are **456 B
+  built at init**, and the artwork is **1,824 B**; those 2,280 B live in LC
+  bank 2 (`$D000-$DFFF`, 4,096 B and until now entirely unused), leaving
+  1,816 B spare there.
+- **Cost: 193,667 cycles (189 ms) per whole-board repaint**, measured by
+  difference. That is ~2x the 90,000 this section previously derived — the
+  derivation assumed ~12 cyc/store and the straightforward loop runs ~26 — but
+  it is still 0.6% of a 30 s move, so repaint-everything holds and partial
+  repaints stay designed out. There is easy headroom in an unrolled inner loop
+  if it is ever wanted.
+- **`sta CLR80STORE` is now LOAD-BEARING, not defence in depth.** This renderer
+  reaches the aux half through RAMWRT (the discipline D4 already uses for the
+  TT), not through 80STORE/PAGE2. With 80STORE *on*, `$2000-$3FFF` follows
+  PAGE2 and ignores RAMWRT, so the aux half would silently land in main. The
+  TT relocation removed the *other* 80STORE hazard (the table no longer covers
+  `$0400-$07FF` or `$2000-$3FFF` at all), but this one is new and points the
+  opposite way. Note goapple2 models neither 80STORE nor AN3/DHIRES, so **no
+  test in this repo can catch getting those switches wrong** — same
+  hardware-only exposure `asm/m8.s` already documents.
+
+**It is proven by parity, not by eyeball.** `TestDHGRRenderParity` asserts the
+6502's whole 16,384-byte screen is byte-identical to `internal/tiles`'
+independent Go model, over four positions including one that exercises all 24
+tiles — the same discipline as the engine's search gates.
+
+**What blocks shipping it is DELIVERY, and the wall is not the one we expected.**
+Two independent walls, both arithmetic:
+
+1. *No room in main RAM at load time.* Standard Delivery loads one contiguous
+   span into main. At load time the free main holes are 164 B (above the staged
+   UI payload), 785 B (above the book) and 1,102 B (above the engine, below the
+   `$BFF0` traps). The largest is **1,102 B < 1,824 B**: the tile blob does not
+   fit anywhere, at all. It *can* only live in the space the book VACATES when
+   it moves to aux — which by definition is not free until init has run.
+2. *No room on the sector list.* Perfectly packed — no gaps at all, which the
+   single-span layout cannot actually achieve — the pieces are now
+   57 + 4,444 + 7,407 + 1,824 + 31,906 = **45,638 B**, and that 4,444 is
+   today's `m8.bin`, i.e. it does NOT yet include the renderer (another ~540 B
+   of code and tables, which would also overrun the staged payload's 164 B of
+   room below the book — the same squeeze a third time). `diskii mksd` caps an
+   image at 45,056 B, and the real ceiling is the boot sector itself: Standard
+   Delivery's loader is a **page table at `$084E-$08FF`** (one destination page
+   per sector, `$C0` terminating), self-modified through the low byte of the
+   `LDA $084E` at `$0806`. 178 bytes of table minus the terminator is **177
+   sectors = 45,312 B maximum, ever**. We are 326 B over that, so no repacking,
+   no base move and no gap-squeezing gets there.
+
+Both walls say the same thing, and it is the thing `internal/delivery`'s own
+doc-comment predicted: *when the margins run out the answer is a different
+LOADER, not a smaller program.* The tiles must arrive **after** the book has
+been lifted to aux — i.e. sequentially chain-loaded into the freed
+`$2000-$3FFF`. That is mechanism, not capacity, and the mechanism is cheap
+because the loader survives: our image starts at `$0D00`, so the boot sector's
+code at `$0800-$08FF` is never overwritten, its sequential read state
+(`$27`, `$3D`, `$40`, `$41`) is intact, and re-entering at `$0802` with a fresh
+page table written into page `$08` continues reading from the next sector.
+The cost is the Go side (a second span in `delivery.Image`/`SectorOffset` and a
+post-`mksd` patch of the table) plus banking ROM back in around the `$C65C`
+read — NOT a hand-rolled sector reader.
 
 ### 3.2 The chosen encoding
 

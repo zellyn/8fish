@@ -22,6 +22,7 @@ package ui_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -153,7 +154,12 @@ func TestDiskLedger(t *testing.T) {
 		}
 		t.Logf("%s:", name)
 		for _, p := range loaded {
-			t.Logf("    $%04X-$%04X  %6d B  %s", p.Org, p.Org+len(p.Data)-1, len(p.Data), p.Path)
+			dest := ""
+			if p.RunsAt != 0 {
+				dest = fmt.Sprintf("  -> $%04X", p.RunsAt)
+			}
+			t.Logf("    $%04X-$%04X  %6d B  %s%s",
+				p.Org, p.Org+len(p.Data)-1, len(p.Data), p.Path, dest)
 		}
 		for _, sp := range st.Spans {
 			t.Logf("      span $%04X-$%04X = %d sectors (pages $%02X-$%02X)",
@@ -930,4 +936,65 @@ func TestDiskEscapeSwapsScreens(t *testing.T) {
 			"the board was not repainted")
 	}
 	t.Log("ESC swaps board <-> 40-column text screen, both intact")
+}
+
+// TestBoardNeedsTheChainLoad gates the ONE deliberate difference between the
+// two links' behaviour, from both sides.
+//
+// The renderer blits from Language Card bank 1, and only the chain loader can
+// put the artwork there -- a BRUN of m8boot.bin has no boot loader left to
+// re-enter. So the payload's UIDHGRDEF byte is $00 in both m8.bin and
+// m8sd.bin (which TestDiskLayout requires: the payloads must stay
+// byte-identical), and the chain loader patches it to $01 in RAM after the
+// copy. A build that got this backwards would paint 1,824 bytes of whatever
+// was in LC bank 1 as a chessboard.
+//
+// Asserting it on the ARTEFACTS rather than only on the booted machine is the
+// point: the emulated BLOAD path in internal/ui/m8.go pokes the blob in for
+// fidelity, so a booted-machine test alone could not tell the two apart.
+func TestBoardNeedsTheChainLoad(t *testing.T) {
+	lbl, err := ui.ParseLbl(filepath.Join(root, "asm", "m8.lbl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, ok := lbl["UIDHGRDEF"]
+	if !ok {
+		t.Fatal("asm/m8.lbl has no UIDHGRDEF: the board's default was renamed")
+	}
+	off := int(def) - 0xE000
+	for _, name := range []string{"m8.bin", "m8sd.bin"} {
+		b, err := os.ReadFile(filepath.Join(root, "asm", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if off < 0 || off >= len(b) {
+			t.Fatalf("UIDHGRDEF at $%04X is outside %s", def, name)
+		}
+		if b[off] != 0 {
+			t.Errorf("%s has UIDHGRDEF = $%02X at $%04X, want $00: the payload must not "+
+				"default to the board, because only the chain loader can make the "+
+				"artwork resident", name, b[off], def)
+		}
+	}
+
+	// And the chain loader really does patch it. `lda #$01 / sta UIDHGRDEF`
+	// must be in the disk copier and NOT in the BLOAD one.
+	want := []byte{0xA9, 0x01, 0x8D, byte(def), byte(def >> 8)}
+	disk, err := os.ReadFile(filepath.Join(root, "asm", "m8sdboot.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bload, err := os.ReadFile(filepath.Join(root, "asm", "m8boot.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(disk, want) {
+		t.Errorf("m8sdboot.bin never stores $01 to UIDHGRDEF ($%04X): the disk would "+
+			"boot to the 40-column screen with the artwork sitting unused in LC", def)
+	}
+	if bytes.Contains(bload, want) {
+		t.Errorf("m8boot.bin stores $01 to UIDHGRDEF ($%04X), but a BRUN has no chain "+
+			"loader and therefore no artwork: it would paint garbage as a board", def)
+	}
+	t.Logf("UIDHGRDEF $%04X = $00 in both payloads; only m8sdboot.bin patches it", def)
 }

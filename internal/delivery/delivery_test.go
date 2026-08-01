@@ -16,16 +16,28 @@ func TestStageCeilingIsTheRealCeiling(t *testing.T) {
 		t.Errorf("the page table at $%04X-$08FF holds %d entries plus a terminator, "+
 			"but MaxStageSectors is %d", 0x0800+bootTableOff, got, MaxStageSectors)
 	}
-	if MaxImage != MaxStageSectors*SectorBytes {
-		t.Errorf("MaxImage %d != %d sectors * %d B", MaxImage, MaxStageSectors, SectorBytes)
+	// And it is the number `diskii mksd` enforces. That agreement is the
+	// whole point of the assertion: the tool's "44 KB cap" was treated for
+	// months as an arbitrary policy, and it is not -- it is this table,
+	// counted. (Comparing MaxImage against its own definition would prove
+	// nothing, so compare against the tool's documented figure instead.)
+	const diskiiCap = 45056
+	if MaxImage != diskiiCap {
+		t.Errorf("MaxImage is %d but `diskii mksd` refuses over %d: if the tool's cap "+
+			"and one page table have stopped being the same number, one of them is "+
+			"not what this package thinks it is", MaxImage, diskiiCap)
 	}
 }
 
 // TestOverfullStageSaysSplitIt is the gate on the gate: a stage that outgrows
 // one page table must fail, and must say what to do about it.
 func TestOverfullStageSaysSplitIt(t *testing.T) {
+	// Two spans, not one: a single span of more than 256 sectors would trip
+	// the duplicate-page check first (page numbers are bytes and wrap), and
+	// the message this test is about is the ceiling one.
 	s := Stage{Name: "stage 1", Spans: []Span{
-		{Org: 0x0D00, Data: make([]byte, (MaxStageSectors+1)*SectorBytes)},
+		{Org: 0x0200, Data: make([]byte, 100*SectorBytes)},
+		{Org: 0x6600, Data: make([]byte, (MaxStageSectors+1-100)*SectorBytes)},
 	}}
 	err := s.Check()
 	if err == nil {
@@ -35,7 +47,7 @@ func TestOverfullStageSaysSplitIt(t *testing.T) {
 		t.Errorf("the over-ceiling message does not point at the chain load: %v", err)
 	}
 	// One sector fewer is exactly the ceiling, and must pass.
-	s.Spans[0].Data = s.Spans[0].Data[:MaxStageSectors*SectorBytes]
+	s.Spans[1].Data = s.Spans[1].Data[:(MaxStageSectors-100)*SectorBytes]
 	if err := s.Check(); err != nil {
 		t.Errorf("a full-but-legal %d-sector stage failed Check: %v", s.Sectors(), err)
 	}

@@ -149,10 +149,15 @@ type Piece struct {
 	Path string // relative to the repo root
 	Org  int    // load address
 	Data []byte // filled in by Load
-	// Staged marks a piece that is not delivered to the address it runs at:
-	// the UI payload (lifted to $E000), the tile blob (lifted to LC bank 1)
-	// and the book (lifted to aux $0200).
-	Staged bool
+	// RunsAt is where the piece ends up if that is NOT where it is delivered:
+	// the UI payload is lifted to $E000, the tile blob to Language Card
+	// bank 1, the book to aux $0200. Zero means "runs where it loads", which
+	// is true only of the copier and the engine.
+	//
+	// Three of the five pieces are staged, and that is the whole shape of
+	// this delivery: the loader can only write MAIN, so anything that lives
+	// anywhere else arrives somewhere it does not stay.
+	RunsAt int
 }
 
 // A Span is one contiguous, page-aligned run of the delivered image. Spans are
@@ -236,7 +241,7 @@ func (s Stage) Check() error {
 func Stage1Pieces() []Piece {
 	return []Piece{
 		{Path: filepath.Join("asm", "m8sdboot.bin"), Org: CopierOrg},
-		{Path: filepath.Join("asm", "m8.bin"), Org: PayloadOrg, Staged: true},
+		{Path: filepath.Join("asm", "m8.bin"), Org: PayloadOrg, RunsAt: 0xE000},
 		{Path: filepath.Join("asm", "engine.bin"), Org: EngineOrg},
 	}
 }
@@ -245,8 +250,8 @@ func Stage1Pieces() []Piece {
 // has re-entered the surviving loader.
 func Stage2Pieces() []Piece {
 	return []Piece{
-		{Path: filepath.Join("internal", "tiles", "tileblob.bin"), Org: TilesOrg, Staged: true},
-		{Path: filepath.Join("internal", "book", "bookblob.bin"), Org: BookOrg, Staged: true},
+		{Path: filepath.Join("internal", "tiles", "tileblob.bin"), Org: TilesOrg, RunsAt: TilesLC},
+		{Path: filepath.Join("internal", "book", "bookblob.bin"), Org: BookOrg, RunsAt: BookAux},
 	}
 }
 
@@ -367,8 +372,12 @@ func LedgerOf(stage1, stage2 Stage) Ledger {
 	l.Stage2Spare = MaxStageSectors - l.Stage2Sectors
 	l.TotalSectors = 1 + l.Stage1Sectors + l.Stage2Sectors
 	l.DiskSpare = SectorsPerDisk - l.TotalSectors
+	// The copier is a page-aligned 256-byte slot, so unless it exactly fills
+	// it the payload is its own span; when it does fill it, SpansOf merges the
+	// two. Handle both, and take the END from whichever span CONTAINS
+	// PayloadOrg rather than from a span whose base happens to match.
 	for _, sp := range stage1.Spans {
-		if sp.Org == PayloadOrg || (sp.Org == CopierOrg && len(sp.Data) > SectorBytes) {
+		if sp.Org <= PayloadOrg && PayloadOrg < sp.Org+len(sp.Data) {
 			l.PayloadOrg = PayloadOrg
 			l.PayloadEnd = sp.Org + len(sp.Data)
 			l.PayloadRoom = EngineOrg - l.PayloadEnd
@@ -484,23 +493,34 @@ func Build(root, imgPath, dskPath string) (Ledger, error) {
 	if err := os.WriteFile(dskPath, dsk, 0o644); err != nil {
 		return l, err
 	}
-	// Round-trip immediately: a disk that does not read back as the stages we
-	// handed it is not a disk we should ship.
-	for _, c := range []struct {
-		name  string
-		first int
-		want  []byte
-	}{
-		{"stage 1", 0, img},
-		{"stage 2", l.Stage1Sectors, s2},
-	} {
-		back, err := ExtractPages(dsk, c.first, len(c.want)/SectorBytes)
+	// Round-trip immediately, FROM THE FILE. Reading back out of the same
+	// in-memory slice we just wrote would only prove SectorOffset is
+	// injective, which TestSectorOffset already does; re-reading the file
+	// proves the disk on disk is the disk we meant. The boot sector is
+	// included, because the page table this function just patched is the one
+	// thing on the disk that nothing else writes.
+	written, err := os.ReadFile(dskPath)
+	if err != nil {
+		return l, err
+	}
+	if !bytes.Equal(written[:SectorBytes], dsk[:SectorBytes]) {
+		return l, fmt.Errorf("delivery: %s's boot sector does not read back as the "+
+			"patched one", dskPath)
+	}
+	if got := written[bootTableOff : bootTableOff+len(stage1.PageTable())]; !bytes.Equal(got, stage1.PageTable()) {
+		return l, fmt.Errorf("delivery: %s's page table is not stage 1's span list", dskPath)
+	}
+	first := 0
+	for _, st := range []Stage{stage1, stage2} {
+		want := st.Bytes()
+		back, err := ExtractPages(written, first, st.Sectors())
 		if err != nil {
 			return l, err
 		}
-		if !bytes.Equal(back, c.want) {
-			return l, fmt.Errorf("delivery: %s does not read back as %s", dskPath, c.name)
+		if !bytes.Equal(back, want) {
+			return l, fmt.Errorf("delivery: %s does not read back as %s", dskPath, st.Name)
 		}
+		first += st.Sectors()
 	}
 	return l, nil
 }

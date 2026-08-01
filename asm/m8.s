@@ -44,12 +44,25 @@
 ; repaint, and a bank switch that gets left in the wrong state hides LCCODE
 ; from the next transposition-table probe. Bank 2 stays entirely free.
 ;
-;   $D000-$D040   LCCODE      the engine's aux read primitives (65 B)
+;   $D000-$D063   LCCODE      the engine's aux primitives (ttfetch, and now
+;                             bkfetch/bkhdr for the book: 100 B, from the
+;                             LINKER -- internal/delivery's
+;                             TestLanguageCardBank1Layout reads the real
+;                             __LCCODE_SIZE__ rather than trusting this line,
+;                             which said 65 B for one commit after it stopped
+;                             being true)
 ;   $D300-$DA1F   DHTILES     the 24 tiles, 1,824 B, delivered by stage 2
-;   $DA20-$DBE7   DHROWL/H    152 scanline base addresses, built by dhinit
-;   $DBE8-$DC7F   dhblnk      the two synthesised empty-square tiles
-;   $DC80-$DFFF   free        896 B
+;   $DA20-$DAB7   DHROWL      152 scanline base addresses (low), built by dhinit
+;   $DAB8-$DB4F   DHROWH      152 scanline base addresses (high)
+;   $DB50-$DBE7   dhblnk      the two synthesised empty-square tiles (2 x 76)
+;   $DBE8-$DFFF   free        1,048 B
 ; ---------------------------------------------------------------------------
+; Exported so the LINKER writes them into asm/m8.lbl: internal/delivery's
+; TestLanguageCardBank1Layout reads the real addresses out of the label file
+; rather than recomputing them, which is the difference between a gate and a
+; second copy of the arithmetic.
+        .export DHTILES, DHROWL, DHROWH, dhblnk
+
 DHTILES   = $D300
 
 ; BOOKSTAGE is where the opening book LANDS -- from stage 2 of the chain load,
@@ -189,6 +202,9 @@ sd2done:
         jsr copyp
         lda $C08B               ; back to LC RAM read + write
         lda $C08B
+        lda #1                  ; the artwork is resident: boot to the BOARD
+        sta UIDHGRDEF           ;  (a RAM patch of the payload, not a build
+                                ;   difference -- see m8main)
 .endif
 
         jmp $E000               ; the payload's first three bytes are a jump
@@ -228,7 +244,10 @@ cpl:    lda (ZPTR),y
 ; as ROM while ROM is banked in for $FCA8, and an aux destination reads back as
 ; main with RAMRD off; either way the second pass would write garbage over the
 ; first. See internal/delivery's package doc.
-SD2TILES  = $0E00               ; the UI payload's staging area, now dead
+SD2TILES  = UIPAYLOAD           ; the UI payload's staging area, now dead. Not
+                                ;  a second copy of the address: it is the
+                                ;  linker symbol the copier already reads the
+                                ;  payload from, so the two cannot desync.
 SD2TILEN  = (TILE_BLOB_SIZE + 255) / 256
 SD2BOOK   = BOOKSTAGE           ; main hi-res page 1: the DHGR main half
 SD2BOOKN  = (BOOK_BLOB_SIZE + 255) / 256
@@ -351,10 +370,13 @@ m8main:
         ; fetched from ROM and any copy written here is dead. The Autostart
         ; handler then makes its own warm/cold decision on the power-up byte:
         ; it takes the WARM path, jmp ($03F2) into Applesoft, iff
-        ; $03F4 == $03F3 EOR $A5. 8fish uses only $0300-$030C and Standard
-        ; Delivery never touches page 3, so that test would PASS on a booted
-        ; disk and hand the machine to a BASIC whose entire zero page the
-        ; engine has trampled: neither 8fish nor a reboot.
+        ; $03F4 == $03F3 EOR $A5. Nothing 8fish or the boot ROM puts in page 3
+        ; reaches $03F3/$03F4 -- the engine's scratch stops at $030C, the book
+        ; probe's pads run $03D6-$03E6, and the Disk II ROM's own buffers stop
+        ; at $03D5 (all gated by internal/delivery's TestPage3Layout) -- so
+        ; that test would PASS on a booted disk and hand the machine to a BASIC
+        ; whose entire zero page the engine has trampled: neither 8fish nor a
+        ; reboot.
         ;
         ; So invalidate it. Ctrl-Reset then COLD boots, which restarts 8fish
         ; off the disk still in the drive. On the BLOAD path it is strictly
@@ -412,14 +434,27 @@ m8main:
         lda #0
         sta UIHUMAN             ; the human plays White by default
         ; The board screen. dhclear/dhinit are run ONCE -- the border never
-        ; changes and the scanline tables never change -- and the display is
-        ; handed to double hi-res, which is what the machine shows from the
-        ; moment it finishes booting. ESC swaps to the 40-column screen.
+        ; changes and the scanline tables never change.
+        ;
+        ; WHICH SCREEN COMES UP is NOT a constant here, and that is the point.
+        ; The renderer blits from DHTILES in Language Card bank 1, and only the
+        ; chain loader can put the artwork there: a BRUN of m8boot.bin has no
+        ; boot loader to re-enter, so on that path $D300 holds whatever the
+        ; last program left behind. Defaulting to the board would paint 1,824
+        ; bytes of garbage as a chessboard until the user pressed ESC.
+        ;
+        ; So the default lives in UIDHGRDEF, a byte of the payload that is $00
+        ; in both links -- m8.bin and m8sd.bin stay byte-identical, which
+        ; TestDiskLayout requires -- and the chain loader stores $01 into it in
+        ; RAM after lifting the payload. The disk boots to the board; a BRUN
+        ; boots to the text screen and ESC is a no-op it can still take.
         jsr dhclear
         jsr dhinit
-        lda #1
+        lda UIDHGRDEF
         sta UIDHGR
+        beq :+
         jsr uidhon
+:
         jsr m8new
 
 ; The main loop. Every position change goes through uisync, and every
@@ -455,9 +490,10 @@ m8irq:  rti
 ; CALLED ONLY AFTER m8machine. See the note in the copier: on a machine whose
 ; aux switches are not switches, this loop is a 7 KB write over main $0200.
 ;
-; Byte count: BOOK_BLOB_SIZE rounded up to whole pages. The overrun is at most
-; 255 bytes past the blob and lands at aux $1EEF-$1FFF, still below the DHGR
-; aux half at $2000 (asserted by internal/delivery's TestMainMemoryLayout).
+; Byte count: BOOK_BLOB_SIZE rounded up to whole pages -- 29 pages for 7,407 B,
+; so it copies 17 bytes past the blob into aux $1EEF-$1EFF. Still well below
+; the DHGR aux half at $2000, which internal/delivery's TestMainMemoryLayout
+; asserts against the real blob size rather than against this sentence.
 ; ---------------------------------------------------------------------------
 m8bookaux:
         lda #<BOOKSTAGE
@@ -1413,12 +1449,15 @@ urdx:   rts
 ; switch state below rather than trusting this comment.
 ; ---------------------------------------------------------------------------
 uiswap:
+        lda UIDHGRDEF           ; no artwork resident => there is no board to
+        beq uiswx               ;  swap to (see m8main); ESC does nothing
         lda UIDHGR
         eor #1
         sta UIDHGR
         beq uidhoff
         jsr uidhon
         jmp dhboard             ; the board screen is stale: repaint it
+uiswx:  rts
 
 ; uidhon: hand the display to double hi-res, full screen.
 uidhon:
@@ -2320,3 +2359,9 @@ m_needsiie: SCRSTR "8FISH NEEDS A 128K APPLE IIE"
 ; ---------------------------------------------------------------------------
         .include "dhgr.s"
         .include "tiles.inc"
+
+; UIDHGRDEF: which screen comes up, and whether ESC has a second one to offer.
+; $00 in BOTH links, so m8.bin and m8sd.bin stay byte-identical; the chain
+; loader stores $01 here in RAM once it has put the artwork in Language Card
+; bank 1. See m8main.
+UIDHGRDEF: .byte 0

@@ -27,8 +27,8 @@
 ; end of the CODE segment and reached only via its own entry point
 ; (bookentry), which the harness/bridge invokes solely when a book is
 ; loaded. The normal search entry ($4000) is not modified, so every
-; existing test (which never loads a book, so $2000 has no 'BK' magic) runs
-; the byte-identical search path — TestMicroAB grand totals are unchanged.
+; existing test (which never loads a book, so aux BOOK_BASE has no 'BK'
+; magic) runs the byte-identical search path — TestMicroAB grand totals are unchanged.
 ; On real hardware the resident engine's own move loop chains the two:
 ;   jsr evalinit / jsr bookprobe / bcs playbook / <normal search>.
 ;
@@ -60,10 +60,18 @@ BK_RUN    = RUNPTR      ; $3E-$3F  ZP pointer to the run's first entry, in AUX
 ; indexing (BKENT,y), which is both smaller and faster than the (ENTPTR),y it
 ; replaces -- the pointer arithmetic all happens in aux space now.
 ; They are placed ABOVE the Disk II boot ROM's own page-3 scratch: that ROM
-; builds its denibble table at $0356-$03D5 and uses $0300-$0355 as the 2-of-6
-; buffer on every sector it reads, and asm/m8.s re-enters it to chain-load
-; stage 2. They are also below $03F2-$03F4, the Autostart reset vector and
-; power-up byte that m8main writes.
+; builds its denibble table at $0356-$03D5 (the top is $02D6+$FF, from its own
+; `eor $02D6,y`) and uses $0300-$0355 as the 2-of-6 buffer on EVERY sector it
+; reads -- and asm/m8.s re-enters it to chain-load stage 2. They are also below
+; $03F2-$03F4, the Autostart reset vector and power-up byte that m8main writes.
+; The margin above the ROM is ONE BYTE, which is why it is a gate
+; (internal/delivery TestPage3Layout, which reads the ceiling out of the ROM
+; image) and not a comment. defs.inc's blanket claim that "nothing is defined
+; between UNDOPD's tail ($02B7) and PIECESQ ($0800)" is about the ENGINE's own
+; allocations; it was never true of the boot ROM or the text page.
+        .export BKENT, BKHDR    ; internal/delivery's TestPage3Layout reads
+                                ;  these out of asm/engine.lbl and checks them
+                                ;  against the Disk II ROM's own page-3 ceiling
 BKENT     = $03D6       ; 9 bytes ($03D6-$03DE): one entry, copied from aux
 BKHDR     = $03DF       ; 8 bytes ($03DF-$03E6): the blob header, from aux
 BOOK_HDR_SIZE = BOOK_ENTRIES - BOOK_BASE
@@ -310,8 +318,10 @@ midptr:
                                 ;   midptr's caller)
 
 ; --------------------------------------------------------------------------
-; keycmp: unsigned 32-bit compare entries[ENTPTR].Key vs HASH0-3 (both LE).
-; Returns C=1 if entryKey >= target, C=0 if entryKey < target. Clobbers A,Y.
+; keycmp: unsigned 32-bit compare the FETCHED entry's Key vs HASH0-3 (both LE).
+; Returns C=1 if entryKey >= target, C=0 if entryKey < target. Clobbers A.
+; The caller must have fetched the entry into BKENT (midptr and the two walk
+; loops all do).
 ; --------------------------------------------------------------------------
 keycmp:
         sec
@@ -326,7 +336,8 @@ keycmp:
         rts
 
 ; --------------------------------------------------------------------------
-; keyeq: Z=1 iff entries[ENTPTR].Key == HASH0-3. Clobbers A,Y.
+; keyeq: Z=1 iff the FETCHED entry's Key == HASH0-3. Clobbers A. Same
+; precondition as keycmp: BKENT holds the entry ENTPTR points at.
 ; --------------------------------------------------------------------------
 keyeq:
         lda BKENT+BOOK_E_KEY+0
@@ -386,8 +397,12 @@ bmnext:
 ;
 ; Zero page follows ALTZP, not RAMRD, so (ENTPTR),y still reads its pointer
 ; out of MAIN zero page while the DATA byte comes from aux. Stores follow
-; RAMWRT (off), so the destination is MAIN. That is the whole trick, and it is
-; the same one D4 records for the transposition table.
+; RAMWRT, which the caller must leave OFF -- with it on, the copy would land
+; in aux and the probe would compare against main garbage. Every caller does
+; (dhboard, m8bookaux and m8machine each restore it), and ttfetch has exactly
+; the same precondition; it is written down here because it is a precondition
+; and not an accident. That is the whole trick, and it is the one D4 records
+; for the transposition table.
 ; --------------------------------------------------------------------------
         .segment "LCCODE"
 

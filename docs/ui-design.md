@@ -1548,6 +1548,38 @@ because goapple2 models MIXED as state and not as a scanner:
 | **Where the graphics/text split actually falls** | goapple2 has no video scanner: `Mixed` is a modelled bit, and no test here has ever rendered scanline 160 | if the split is not at 160 the board's bottom border is eaten, or a row of text is; the board itself is drawn 4-155 with a 4-line margin either side, so there is slack for an off-by-a-few but not for an off-by-a-lot |
 | **80-column text pixels** | the same reason as DHGR pixels in §13.5: the byte layout is checked against the model, but nothing here has driven the 14M shift register in 80-column TEXT mode | inverse video, or the aux/main column interleave, coming out wrong — the title bar is the loudest place it would show |
 
+### 14.7 ★ HARDWARE-VERIFIED: DHGR is displayed 7 dots to the LEFT
+
+Reported by zellyn on 2026-08-01, and this is a different KIND of fact from
+everything else in §13.5/§14.6 — it was **observed on a real Apple IIe**, not
+modelled. While implementing IIe graphics for OpenEmulator he found that the
+simplest correct implementation shifted the screen **left by 7 dots** (7
+560-resolution "small pixels" = one 7-bit byte, half a 14-dot cell), and was
+then surprised to see **the same shift on his physical IIe**.
+
+**What it costs 8fish: about a millimetre, and we are not compensating.**
+The board spans x=112 to x=447 of 560 (`DHCOL0`=8, 8 squares x 42 dots), so
+it is centred with 112 dots of margin either side. Shifted left by 7 that
+becomes 105/119 — a 14-dot asymmetry, 2.5% of screen width. Compensating
+would be expensive out of proportion to the gain: 7 dots is HALF a 14-dot
+cell, so it changes which BANK each byte belongs to. That is a re-slice of
+the tile blob, not an offset.
+
+**What it does NOT affect: any gate in this repo.** The shift is in the
+display pipeline, not in memory. `internal/tiles` decodes aux-then-main per
+column pair and the parity tests compare BYTES, so a whole-screen offset is
+invisible to them by construction. (An interleave ERROR would be caught —
+see the paragraph below — but that is a different failure.)
+
+**Why it is recorded here anyway.** It is the first hardware-verified datum
+this project has about the video pipeline, and it is evidence that
+OpenEmulator's model is a usable reference for the rows above: if goapple2's
+`videoscan` package were taught DHGR and MIXED from that model, "where the
+graphics/text split falls" and "80-column text pixels" would stop being
+prose caveats and become gates. That is the same move that retired the
+80STORE caveat — the oracle already existed (a2audit), only the emulator
+side was missing.
+
 The aux/main interleave itself (aux byte = even column) is NOT on this list:
 `Window()` de-interleaves it the same way the scanner does, and
 `TestDiskBoots` asserts real strings — "8FISH 1.0", "WHITE TO MOVE", "YOUR

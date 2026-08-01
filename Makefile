@@ -12,7 +12,7 @@ endif
 
 DISKII := diskii
 
-.PHONY: all hello perft banktest entropytest uitest m8 engine tables dsk test test-full test-siblings clean
+.PHONY: all hello perft banktest entropytest uitest m8 engine tables tiles dsk test test-full test-siblings clean
 
 all: hello perft engine test
 
@@ -40,6 +40,8 @@ m8: asm/m8.bin
 engine: asm/engine.bin
 
 tables: asm/tables.s
+
+tiles: internal/tiles/tileblob.bin
 
 asm/banktest.bin: asm/banktest.s asm/banktest.cfg
 	cd asm && $(CA65) banktest.s -o banktest.o
@@ -97,6 +99,16 @@ asm/8fish.dsk: asm/m8sdboot.bin asm/m8.bin asm/engine.bin internal/book/bookblob
 
 asm/tables.s: cmd/gentables/main.go cmd/gentables/pesto.go
 	go run ./cmd/gentables
+
+# The board tiles are sliced from the hand-drawn DazzleDraw artwork, which
+# is the single source of truth. ONE gentiles run writes both outputs --
+# internal/tiles/tileblob.bin (embedded by package tiles, and committed)
+# and asm/tiles.inc -- so only the blob carries the rule; asm/tiles.inc is
+# a committed generated file exactly like asm/book.inc. The generator
+# asserts every geometric assumption against the actual pixels, so a
+# re-drawn board fails HERE rather than rendering garbage on the IIe.
+internal/tiles/tileblob.bin: assets/chess-dazzledraw-save.bin cmd/gentiles/main.go internal/tiles/tiles.go
+	go run ./cmd/gentiles
 
 asm/perft.bin: asm/perft.s asm/board.s asm/movegen.s asm/defs.inc asm/tables.s asm/perft.cfg
 	cd asm && $(CA65) perft.s -o perft.o

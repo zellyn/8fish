@@ -16,3 +16,9 @@
 # was written without it (which is how the shipped board ended up as FEN
 # letters). Keep it tracked.
 !assets/*.bin
+
+# Generated blobs that SHIP. They are embedded by Go (//go:embed) and are
+# build inputs for the disk image, so they must be TRACKED despite the
+# blanket *.bin rule above -- the same reasoning as the artwork asset.
+!internal/book/bookblob.bin
+!internal/tiles/tileblob.bin

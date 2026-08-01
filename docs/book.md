@@ -1,9 +1,11 @@
 # Resident opening book
 
 A hand-curated opening book, compiled to a compact binary blob laid out
-**exactly** as it will sit resident at `$2000-$3FFF` (the verified-free
-hi-res page-1 hole, which the engine never uses — it displays via the
-text screen). The engine now probes it **on-device**: the 6502 driver
+**exactly** as it sits resident in AUXILIARY RAM at `$0200-$1EEF`. (It used
+to live in main `$2000-$3FFF`, the hi-res page-1 hole; the double-hi-res
+board needed those 8 KB, so as of 2026-07-31 the blob is delivered to main
+`$2000` by stage 2 of the disk's chain load and lifted to aux `$0200` before
+anything runs. See "Where it lives, and how it is read" below.) The engine now probes it **on-device**: the 6502 driver
 binary-searches the resident blob and plays book moves itself (see
 "Resident asm probe" below). The original Go-side bridge probe remains as
 the reference the asm probe is proven byte-for-byte equal to.
@@ -170,7 +172,7 @@ the identical position decomposition. The same blob is therefore probeable
 byte-for-byte by both this Go bridge and a future asm-resident binary
 search.
 
-## Blob layout (as it sits at `$2000`)
+## Blob layout (as it sits at aux `$0200`)
 
 ```
 +0   magic 'B','K'
@@ -236,13 +238,13 @@ Before each search, `think` calls `probeBook`:
 v1 holds the blob **bridge-side**: the bridge plays book moves before it
 ever invokes the emulated engine, so the blob need not be present in
 machine memory. The bytes are nonetheless laid out exactly as they will
-sit at `$2000`, so promoting to an asm-resident probe is a pure read-side
-addition — no format change.
+sit where the resident blob sits, so promoting to an asm-resident probe was
+a pure read-side addition — no format change.
 
-**Real-hardware equivalent:** at startup the loader reads the ~3.9 KB blob
-from disk **once** into `$2000-$3FFF` (e.g. 8 consecutive 512-byte
-sectors, ~4 KB) and never touches it again. It is independent of the
-transposition table, which also lives in the aux bank, above it at `$4000`.
+**Real-hardware equivalent:** at startup the loader reads the blob from disk
+**once** into main `$2000`, the copier lifts it to aux `$0200`, and nothing
+writes it again. It is independent of the transposition table, which is also
+in the aux bank, above it at `$4000`.
 `asm/book.inc` gives the resident base and field offsets the loader and probe
 share.
 
@@ -278,7 +280,7 @@ Entry point `bookentry` (a standalone harness/bridge entry, NOT the normal
 4. **Play** `BOOK_E_FROM/TO/FLAGS` directly into `BESTFROM/TO/FLAGS`
    (already engine move encoding); copy `BOOK_E_NAMEID` to `CUROPENING`,
    the "which opening am I in" byte. `BOOKHIT`=1. No node search runs.
-5. **Miss** (no `BK` magic at `$2000`, or key not found) → `BOOKHIT`=0; the
+5. **Miss** (no `BK` magic at the resident base, or key not found) → `BOOKHIT`=0; the
    caller runs the normal search, unchanged.
 
 312 entries → at most 9 key comparisons per probe; trivial against a
@@ -303,17 +305,19 @@ probe never writes `HASH0-3`.
 and shifts the page-aligned `TABLES`/`LCCODE` only by whole pages (low
 bytes unchanged → no page-crossing cycle changes). The normal `$4000`
 search entry is not modified and never branches into book code. With no
-book loaded (`$2000` has no magic — the state for every existing test) the
+book loaded (the resident base has no magic — the state for every existing
+test) the
 search path is byte-identical: `TestMicroAB`/`Improving`/`Adopted` grand
 totals are unchanged.
 
 ### Blob delivery
 
-On real hardware the loader reads the ~3.9 KB blob once from disk into
-`$2000-$3FFF` (e.g. 8×512-byte sectors) and never touches it again;
-independent of the aux-bank TT. In the harness, `chesstest.LoadBook(m,
-blob)` pokes the identical bytes; `chesstest.AsmBookProbe` drives one probe
-pass. Existing tests never call `LoadBook`, so `$2000` stays clear.
+On real hardware stage 2 of the chain load reads the blob once from disk into
+main `$2000`, `m8bookaux` lifts it to aux `$0200`, and nothing writes it
+again; independent of the aux-bank TT at `$4000`. In the harness,
+`chesstest.LoadBook(m, blob)` pokes the identical bytes straight into
+`m.Mem.Aux`; `chesstest.AsmBookProbe` drives one probe pass. Existing tests
+never call `LoadBook`, so the resident base stays clear.
 
 ### Correctness gate (asm == Go)
 
@@ -330,9 +334,11 @@ confirms misses match. `TestBookFollowThenSearchDriver` and ucibridge's
 **The overlap this note is about no longer exists.** `BOOK_BASE` is AUX `$0200`
 as of 2026-07-31 (main `$2000-$3FFF` is the double-hi-res MAIN half; see
 `docs/ui-design.md` §13), so a move-stack overrun past `MOVESTACKTOP = $2000`
-can no longer reach the book at all — it now runs into the BOARD, where the
-symptom is visible garbage on the next repaint rather than a silently wrong
-opening move. `MOVESTACKTOP` stays `$2000` and
+can no longer reach the book at all — it now runs into the BOARD's main half.
+The symptom is visible garbage, but PERMANENT rather than repainted: `dhboard`
+only rewrites byte columns 8-31 of scanlines 4-155, and main `$2000-$207F` is
+scanline 0's top border, written once by `dhclear` at boot. Still an
+improvement on a silently wrong opening move. `MOVESTACKTOP` stays `$2000` and
 `chesstest.TestMoveStackWatermark` stays exactly as it was; only what is on the
 other side of the line changed. The reasoning below is kept because it is the
 record of how the overlap was priced.

@@ -35,7 +35,9 @@
 ;   background constants (dhinit), so the blob carries 24 tiles, not 26.
 ;
 ; The caller must have selected the LC bank holding the tile blob, and must
-; have put the machine in DHGR mixed mode.
+; have put the machine in DHGR FULL-SCREEN mode (uidhon: 80COL on, AN3 low,
+; HIRES, TEXT off, MIXED off -- mixed mode does not fit; see docs/ui-design
+; section 13.4 and the 2026-07-31 results entry).
 
 ; ---- geometry ----
 DHCOL0    = 8           ; first DHGR byte column of the board (x = 112)

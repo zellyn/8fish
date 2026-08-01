@@ -406,6 +406,19 @@ bmnext:
 ; --------------------------------------------------------------------------
         .segment "LCCODE"
 
+; RAMWRT MUST BE OFF when either of these is called, and unlike ttfetch --
+; whose comment says "exactly the same precondition" -- getting it wrong here
+; is neither transient nor local. ttfetch's landing pad is main scratch, so a
+; slipped switch misreads once. BKENT/BKHDR are $03D6-$03E6, and with RAMWRT
+; on those stores land at AUX $03D6-$03E6, which is blob offset $01D6-$01E6:
+; INSIDE ENTRIES 52-53 OF THE RESIDENT BOOK. One slip corrupts the book
+; permanently, and every later probe whose binary search touches that range
+; reads the damage. Nothing asserts the precondition at bookprobe entry, and
+; the parity test runs with the switches at their power-on default -- so a
+; regression here would pass every gate we have. What DOES catch it:
+; chesstest.AsmBookProbe compares the whole aux blob against the bytes it
+; poked, after every probe in the parity suite.
+;
 ; bkfetch: BKENT = the 9-byte book entry at aux (ENTPTR). Clobbers A,Y.
 bkfetch:
         sta $C003               ; RAMRD on

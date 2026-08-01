@@ -240,7 +240,7 @@ cpl:    lda (ZPTR),y
 ; Where stage 2 lands in MAIN, and how many pages of it there are. Both blobs
 ; are staged in main and copied on rather than read straight to their homes,
 ; and that is the boot ROM's doing, not caution: its denibblise pass READS THE
-; BUFFER BACK (`lda ($26),y` at $C6D9). A Language Card destination reads back
+; BUFFER BACK (`lda ($26),y` at $C6DC). A Language Card destination reads back
 ; as ROM while ROM is banked in for $FCA8, and an aux destination reads back as
 ; main with RAMRD off; either way the second pass would write garbage over the
 ; first. See internal/delivery's package doc.
@@ -265,6 +265,15 @@ sd2tab:
         .endrepeat
         .byte $C0
 SD2TABLEN = * - sd2tab
+
+; The store loop above runs X from SD2TABLEN down to 1 writing `sta $084E,x`,
+; so the highest byte it touches is $084E+SD2TABLEN. Past $08FF it would walk
+; out of the boot sector's page into $0900+ (the engine's per-ply arrays), and
+; the loader would then read its table off the end of page $08 and back into
+; its own code at $0800. delivery.Stage.Check() enforces the 176-sector
+; ceiling on the GO side; nothing stopped ca65 from emitting a longer table
+; until this line. It is the same ceiling seen from the assembler.
+.assert SD2TABLEN <= 177, error, "stage 2's page table would overrun $08FF: SD2TABLEN > 177 sectors (the blobs grew; see internal/delivery)"
 .endif
 
 ; ---------------------------------------------------------------------------

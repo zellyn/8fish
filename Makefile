@@ -103,16 +103,38 @@ asm/tables.s: cmd/gentables/main.go cmd/gentables/pesto.go
 	go run ./cmd/gentables
 
 # The board tiles are sliced from the hand-drawn DazzleDraw artwork, which
-# is the single source of truth. ONE gentiles run writes both outputs --
-# internal/tiles/tileblob.bin (embedded by package tiles, and committed)
-# and asm/tiledefs.inc + asm/tiles.inc -- so only the blob carries the
-# rule; the .inc files are committed generated files exactly like
-# asm/book.inc. The generator
-# asserts every geometric assumption against the actual pixels, so a
-# re-drawn board fails HERE rather than rendering garbage on the IIe.
-internal/tiles/tileblob.bin asm/tiledefs.inc asm/tiles.inc &: \
-		assets/chess-dazzledraw-save.bin cmd/gentiles/main.go internal/tiles/tiles.go
+# is the single source of truth. ONE gentiles run writes THREE outputs --
+# internal/tiles/tileblob.bin (embedded by package tiles, and committed) and
+# asm/tiledefs.inc + asm/tiles.inc, committed generated files exactly like
+# asm/book.inc. The generator asserts every geometric assumption against the
+# actual pixels, so a re-drawn board fails HERE rather than rendering garbage
+# on the IIe.
+#
+# ONE recipe, THREE outputs, and make must not build a consumer of one before
+# the recipe has run. The obvious spelling is a GNU Make grouped target
+# (`out1 out2 out3 &: deps`) -- but `&:` needs make >= 4.3 and macOS still
+# ships 3.81, which parses it as four INDEPENDENT targets (one of them named
+# literally `&`). Their mtimes then float apart, and `make dsk` will assemble
+# the copier from a stale asm/tiledefs.inc and then regenerate the blob:
+#
+#   cd asm && ca65 -g -D SDCHAIN m8.s ...   <- stage-2 page table, OLD sizes
+#   go run ./cmd/gentiles                   <- blob regenerated
+#   go run ./cmd/mkdsk                      <- disk built from the NEW blob
+#
+# which ships a disk whose stage-2 page table disagrees with the disk, exits
+# 0, and prints a normal-looking ledger. The Go gates cannot catch it: they
+# re-assemble from the regenerated .inc, so they never see the artifact `make
+# dsk` produced. Verified by reproduction on GNU Make 3.81, 2026-08-01.
+#
+# So express the same thing in a way 3.81 understands: the blob carries the
+# real rule, and the two .inc files depend on the blob with an empty recipe
+# (the gentiles run that made the blob already wrote them). Any consumer of a
+# .inc therefore forces the blob to be up to date FIRST.
+internal/tiles/tileblob.bin: assets/chess-dazzledraw-save.bin cmd/gentiles/main.go internal/tiles/tiles.go
 	go run ./cmd/gentiles
+
+asm/tiledefs.inc asm/tiles.inc: internal/tiles/tileblob.bin
+	@:
 
 asm/perft.bin: asm/perft.s asm/board.s asm/movegen.s asm/defs.inc asm/tables.s asm/perft.cfg
 	cd asm && $(CA65) perft.s -o perft.o

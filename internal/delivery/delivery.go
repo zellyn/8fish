@@ -28,7 +28,7 @@
 // the boot sector's code at $0800-$08FF is never overwritten and its sequential
 // read state is intact when it jumps to the copier:
 //
-//	$26 = $00        read buffer low            (set once at $C659)
+//	$26 = $00        read buffer low            (set once at $C652)
 //	$41              current track              (checked against every address
 //	                                             field the ROM reads)
 //	$2B = slot<<4    and X = $2B on entry
@@ -55,7 +55,7 @@
 //
 // Stage 2 lands in MAIN and is copied on, rather than being read straight into
 // the Language Card or into aux. That is not caution, it is the boot ROM: its
-// denibblise pass READS THE BUFFER BACK (`lda ($26),y` at $C6D9). Reading back
+// denibblise pass READS THE BUFFER BACK (`lda ($26),y` at $C6DC). Reading back
 // a Language Card destination while ROM is banked in for $FCA8 (WAIT, which
 // the loader's track step calls) returns ROM; reading back an aux destination
 // with RAMRD off returns main. Either way the second pass would denibblise
@@ -112,7 +112,8 @@ const (
 	// EngineOrg is where engine.bin runs.
 	EngineOrg = 0x4000
 	// TilesLC is where the copier installs the tile blob: Language Card
-	// bank 1, above the engine's 65-byte LCCODE at $D000. Keep equal to
+	// bank 1, above the engine's LCCODE at $D000 (100 B: the aux-bank TT
+	// primitives plus the book's bkfetch/bkhdr). Keep equal to
 	// asm/m8.s's DHTILES.
 	TilesLC = 0xD300
 
@@ -535,10 +536,39 @@ func patchPageTable(dsk []byte, s Stage, start int) error {
 			bootTableOff+len(tab)-SectorBytes, 0x0800+bootTableOff)
 	}
 	boot := dsk[0:SectorBytes]
-	if boot[bootJmpOff-1] != 0x4C {
-		return fmt.Errorf("delivery: boot sector $%04X is $%02X, not a JMP ($4C): this is not "+
-			"the Standard Delivery loader this package knows how to patch",
-			0x0800+bootJmpOff-1, boot[bootJmpOff-1])
+	// Assert the loader's SHAPE before writing 147 bytes into it. Everything
+	// below depends on three facts about peterferrie's Standard Delivery boot
+	// sector, and if a future `diskii mksd` moves any of them this function
+	// would happily write a page table over loader CODE, pass Build's own
+	// read-back check (which only compares the file against what it just
+	// wrote), and exit 0 with a normal-looking ledger.
+	//
+	// These same bytes are asserted from the other side by internal/ui's
+	// TestBootSectorPageTable -- but a test only runs when someone runs it,
+	// and `make dsk` is a command a person types. Four byte compares here cost
+	// nothing and make the BUILD refuse rather than the disk fail on a IIe.
+	//
+	//	$0800  $01           the ROM's "one sector per call" count
+	//	$0802  EE 06 08      INC $0806 -- pre-increments the table pointer, which
+	//	                     is why the first entry read is $084F and not $084E
+	//	$0805  AD 4E 08      LDA $084E,  the self-modified table read
+	//	$084C  4C lo hi      JMP <start>, the terminator
+	for _, want := range []struct {
+		off  int
+		val  byte
+		what string
+	}{
+		{0x00, 0x01, `the ROM's "one sector per call" count at $0800`},
+		{0x02, 0xEE, "the INC $0806 at $0802 (the table pointer's pre-increment)"},
+		{0x05, 0xAD, "the LDA $084E at $0805 (the self-modified table read)"},
+		{bootJmpOff - 1, 0x4C, "the terminator's JMP at $084C"},
+	} {
+		if boot[want.off] != want.val {
+			return fmt.Errorf("delivery: boot sector $%04X is $%02X, want $%02X -- %s. "+
+				"This is not the Standard Delivery loader this package knows how to "+
+				"patch; patching it anyway would write the page table over loader code",
+				0x0800+want.off, boot[want.off], want.val, want.what)
+		}
 	}
 	boot[bootJmpOff] = byte(start)
 	boot[bootJmpOff+1] = byte(start >> 8)

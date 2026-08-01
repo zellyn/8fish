@@ -1,6 +1,7 @@
 package chesstest
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 
@@ -38,7 +39,8 @@ type BookProbeResult struct {
 // point) over pos with the 32-bit random value r, returning the move the
 // on-device probe selects. It is the exact selection a real-hardware engine
 // performs: a fresh machine is built with the position poked, the blob
-// loaded at $2000, r poked into BOOKRND, and execution started at bookentry
+// loaded into AUX $0200 (LoadBook -- the resident home since the DHGR board
+// took main $2000-$3FFF), r poked into BOOKRND, and execution started at bookentry
 // (which computes HASH0-3 via evalinit, then binary-searches + weighted-
 // picks). The parity test asserts this equals internal/book.Book.Probe.
 //
@@ -65,6 +67,27 @@ func AsmBookProbe(bin []byte, defs Defs, bookentry uint16, blob []byte, pos *Pos
 	}
 	if code != 0 {
 		return nil, fmt.Errorf("book probe exited with code %d", code)
+	}
+	// THE BLOB IS READ-ONLY, and since it moved to aux that is worth checking
+	// rather than assuming. bkfetch/bkhdr copy entries out of aux into BKENT/
+	// BKHDR at main $03D6-$03E6 with RAMRD on and RAMWRT off; if RAMWRT is
+	// ever left on, those stores land at AUX $03D6-$03E6 instead -- blob
+	// offset $01D6-$01E6, inside entries 52-53 -- and corrupt the book
+	// permanently. The probe would still return a plausible move, and every
+	// later probe over that key range would quietly read damaged data.
+	//
+	// Comparing the whole blob after each probe turns that from a latent
+	// switch-discipline argument into something the parity suite fails on.
+	// It is O(blob) per probe against an emulated 6502 search, i.e. free.
+	if got := m.Mem.Aux[BookBase : BookBase+len(blob)]; !bytes.Equal(got, blob) {
+		for i := range blob {
+			if blob[i] != got[i] {
+				return nil, fmt.Errorf("the probe MODIFIED the resident blob at aux "+
+					"$%04X (offset %d of %d): $%02X became $%02X. The blob is read-only; "+
+					"a write into it means bkfetch/bkhdr ran with RAMWRT on (see asm/book.s)",
+					BookBase+i, i, len(blob), blob[i], got[i])
+			}
+		}
 	}
 
 	res := &BookProbeResult{Cycles: m.Cycles}

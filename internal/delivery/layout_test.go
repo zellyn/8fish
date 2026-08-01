@@ -293,11 +293,10 @@ func TestLanguageCardLayout(t *testing.T) {
 	}
 }
 
-// TestDebugBufferPlacement: GDVBUF, the GDVERIFY-only 4 KB sweep buffer, is
-// documented in asm/defs.inc as living "above the resident book blob". The
-// book has since grown past it. It is harmless today only because no test
-// loads a book into a GDVERIFY machine — which is a property of the tests,
-// not of the map, and therefore has to be stated somewhere that fails.
+// TestDebugBufferPlacement: GDVBUF, the GDVERIFY-only 4 KB sweep buffer, sits
+// in main RAM among things that have moved twice. Whatever it currently
+// overlaps is a property of the memory map, not of which tests happen to run,
+// so it has to be stated somewhere that FAILS rather than in a comment.
 func TestDebugBufferPlacement(t *testing.T) {
 	defs := readSyms(t, "asm/defs.inc")
 	book := fileLen(t, "internal/book/bookblob.bin")
@@ -306,30 +305,49 @@ func TestDebugBufferPlacement(t *testing.T) {
 		t.Skip("GDVBUF not defined")
 	}
 	const gdvBufSize = 32 * 128
-	t.Logf("GDVBUF $%04X-$%04X (%d B); resident book $%04X-$%04X (%d B)",
-		buf, buf+gdvBufSize-1, gdvBufSize, BookOrg, BookOrg+book-1, book)
+	t.Logf("GDVBUF $%04X-$%04X (%d B); book: resident at AUX $%04X-$%04X, staged "+
+		"once at main $%04X-$%04X during boot (%d B)",
+		buf, buf+gdvBufSize-1, gdvBufSize, BookAux, BookAux+book-1,
+		BookOrg, BookOrg+book-1, book)
 	if buf+gdvBufSize > EngineOrg {
 		t.Errorf("GDVBUF $%04X+%d runs into the engine at $%04X", buf, gdvBufSize, EngineOrg)
 	}
-	// RESOLVED 2026-07-28, taking this test's own second option. The buffer
-	// DOES overlap the book and now must: the book spans $2000-$3CEE since
-	// the widening, and there is no other 4 KB hole in MAIN. So a GDVERIFY
-	// build and a loaded book are MUTUALLY EXCLUSIVE, which is an invariant
-	// rather than an accident, and it is enforced where the GDVERIFY machine
-	// is built — chesstest.newStubMachine fails if a book is resident.
-	// asm/defs.inc no longer claims the buffer sits above the book.
+	// REWRITTEN 2026-08-01, because what the buffer overlaps CHANGED. It used
+	// to overlap the resident book at main $2000-$3CEE, and the invariant was
+	// "a GDVERIFY build and a loaded book are mutually exclusive", enforced in
+	// chesstest.newStubMachine. The book now lives in AUX $0200-$1EEF, so that
+	// overlap — and the guard that enforced it — are gone.
 	//
-	// What this test still gates is the part that has no other home: the
-	// buffer must not run into the ENGINE, and the overlap must stay confined
-	// to the book region so the invariant above is the ONLY thing being
-	// relied on.
-	if buf < BookOrg {
-		t.Errorf("GDVBUF $%04X starts below the book at $%04X: the deliberate "+
-			"overlap is with the BOOK only, and anything below $%04X is engine "+
-			"scratch that a GDVERIFY sweep would corrupt with nothing asserting it",
-			buf, BookOrg, BookOrg)
+	// What GDVBUF overlaps NOW is the DHGR MAIN half. Double hi-res page 1 is
+	// aux $2000-$3FFF + main $2000-$3FFF, and GDVBUF is main $3000-$3FFF: the
+	// bottom half of the board's main bytes. So the live invariant is that a
+	// GDVERIFY build and the on-device board are mutually exclusive. That is
+	// fine — the sweep is a debug-only entry that renders nothing — but it is
+	// an invariant, not an accident, and this is where it is stated so that
+	// moving either one fails.
+	//
+	// It also still overlaps where stage 2 STAGES the book ($2000) before the
+	// copier lifts it to aux. That is harmless in a way worth writing down:
+	// staging happens once, during boot, before any engine code runs, and a
+	// GDVERIFY sweep can only run long afterwards.
+	const dhgrMainLo, dhgrMainHi = 0x2000, 0x3FFF
+	if buf+gdvBufSize-1 < dhgrMainLo || buf > dhgrMainHi {
+		t.Errorf("GDVBUF $%04X-$%04X no longer overlaps the DHGR main half "+
+			"($%04X-$%04X). That is not necessarily wrong, but this test and "+
+			"asm/defs.inc both document the overlap as deliberate, so one of "+
+			"them is now lying — fix the comments, not this assertion",
+			buf, buf+gdvBufSize-1, dhgrMainLo, dhgrMainHi)
+	}
+	if buf < BookAux+bookAuxMax {
+		t.Errorf("GDVBUF $%04X starts below aux $%04X: the resident book lives at "+
+			"aux $%04X and up, and main/aux addresses this low are engine scratch "+
+			"that a GDVERIFY sweep would corrupt with nothing asserting it",
+			buf, BookAux+bookAuxMax, BookAux)
 	}
 }
+
+// bookAuxMax is the aux window the resident book may occupy ($0200-$1FFF).
+const bookAuxMax = 0x2000 - BookAux
 
 // readCfgSymbol pulls `NAME: type = export, value = $HEX;` out of a ld65
 // config's SYMBOLS block.

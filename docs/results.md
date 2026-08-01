@@ -3,6 +3,96 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-01 — adversarial review of the board merge: a build rule that could ship a BROKEN DISK, and a gate that had gone quiet
+
+Two reviewers went at the chain-load branch before it merged, one on the
+loader/delivery half and one on the engine-visible half (the book's move to
+aux). Both verified their base ref first — the fix from 07-31 held, 0 commits
+behind. Everything below was reproduced here before being fixed.
+
+**★ `make dsk` could ship a disk whose stage-2 page table disagrees with the
+disk. Reproduced end to end.** The tiles rule used a GNU Make **grouped
+target** (`out1 out2 out3 &: deps`) to say "one gentiles run writes all
+three". `&:` needs make >= 4.3; **macOS ships 3.81**, which parses it as four
+INDEPENDENT targets — one of them named literally `&`. Their mtimes then float
+apart, and make will assemble the copier from a stale `asm/tiledefs.inc` and
+regenerate the blob afterwards:
+
+    cd asm && ca65 -g -D SDCHAIN m8.s ...   <- stage-2 page table, OLD sizes
+    go run ./cmd/gentiles                   <- blob regenerated
+    go run ./cmd/mkdsk                      <- disk built from the NEW blob
+
+Demonstrated with a stale `TILE_BLOB_SIZE = 1500`: the copier shipped **6**
+tile pages where the disk carried **8**, so tile pages 7-8 would land at
+`$2000`, the entire opening book would arrive two pages low, and its last two
+pages would fall off the end of the table. `make dsk` exits 0 and prints a
+normal-looking ledger.
+
+**The Go gates could not have caught it**, and that is the part worth keeping:
+they re-assemble from the freshly regenerated `.inc`, so the tests never see
+the artifact `make dsk` produced. A green suite and a broken disk, from the
+same tree. Fixed with the portable spelling (the two `.inc` files depend on
+the blob, empty recipe), verified by `make -n` ordering before and after.
+
+**A gate that had gone quiet.** `chesstest.newStubMachine`'s guard asserted
+that a GDVERIFY build and a resident book were mutually exclusive, because
+GDVBUF (main `$3000`) overlapped the book at main `$2000-$3CEE`. It could no
+longer fire, for **two independent reasons**: it read `m.Mem.MAIN[BOOK_BASE]`
+while `BOOK_BASE` had become an AUX address, and `LoadBook` now writes
+`m.Mem.Aux`; and main `$0200` is PWBITS/PBBITS, always zero on a fresh
+machine. The invariant it guarded had also dissolved — the book is in aux, so
+there is no overlap to be exclusive about. Deleted, and replaced with the
+invariant that IS live: GDVBUF sits inside the **DHGR main half**, so a
+GDVERIFY build and the on-device board are mutually exclusive
+(`TestDebugBufferPlacement`). `asm/defs.inc`'s GDVBUF comment has now been
+wrong twice — first "above the blob" with a pre-widening size, then
+"overlaps the resident book" — and says so.
+
+**Two new assertions, both mutation-checked here:**
+- `patchPageTable` now checks the loader's SHAPE before writing 147 bytes into
+  it (`$0800 = $01`, `INC $0806` at `$0802`, `LDA $084E` at `$0805`, the `JMP`
+  at `$084C`). Those four bytes were asserted only by a test; a `diskii`
+  upgrade that moved the table would have had `make dsk` write a page table
+  over loader code and exit 0. Flipping one expected byte makes the build
+  refuse, as it should.
+- `.assert SD2TABLEN <= 177` in `asm/m8.s`. The store loop writes
+  `sta $084E,x`, so a longer table runs past `$08FF` into the engine's per-ply
+  arrays and the loader wraps its table read into its own code at `$0800`.
+  The Go side enforced the 176-sector ceiling; ca65 did not.
+- `AsmBookProbe` now compares the whole aux blob after **every** probe in the
+  parity suite (264 positions, 4,194 probes). `bkfetch`/`bkhdr` copy entries
+  out of aux with RAMWRT off; leave RAMWRT on and those stores land at AUX
+  `$03D6-$03E6` = blob offset `$01D6-$01E6`, **inside entries 52-53**, so one
+  slipped switch corrupts the book permanently rather than misreading once.
+  A targeted mutation (RAMWRT on for `bkhdr`'s 8 stores only) is caught with
+  the exact predicted address: *"MODIFIED the resident blob at aux $03DF
+  (offset 479 of 7407)"*.
+
+**Two comments cited ROM addresses that are not the instructions they name.**
+Checked byte-for-byte against the P5 ROM image: the denibble read-back is
+`lda ($26),y` at **`$C6DC`**, not `$C6D9` (which is the `DEX`); and `$26` is
+set at **`$C652`**, not `$C659` (not an instruction boundary at all). The
+mechanism the comments describe is right, which is exactly why the wrong
+address would have survived — nobody re-derives an address that is already
+being used to justify a correct decision.
+
+**What the reviewers CONFIRMED**, which matters as much as what they found:
+the `$084F` page-table offset (proved with a disambiguating disk, since the
+shipping one has `Base == $0D00` making the JMP's high byte and the first
+table entry both `$0D`); the read-back mechanism; `BKENT`/`BKHDR`'s one-byte
+margin above the Disk II ROM's denibble table, at both ends; that the two page
+tables are derived independently in ca65 and Go and compared; and — walking it
+instruction by instruction — that the book probe's SELECTION is byte-identical
+after the move to aux, with `BKENT` refilled at exactly the four points where
+`ENTPTR` changes. Nothing in the Language Card page moved; `ttfetch` is still
+`$D000`.
+
+Stale claims corrected in `asm/defs.inc` (RUNPTR is a save slot now, not an
+indirect base; aux `$0200+` is the book, not the TT; page 3 is free of ENGINE
+allocations but NOT of the Disk II ROM), `cmd/genbook` (the generator emitted
+a stale header four lines above the `BOOK_BASE = $0200` it also emits),
+`docs/book.md`, `internal/delivery`, and `asm/dhgr.s`.
+
 ## 2026-07-31 — the DHGR board SHIPS: two-stage chain load, book to aux, 7.01 s boot
 
 The disk boots to the hand-drawn double-hi-res board. Full write-up in

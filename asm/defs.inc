@@ -161,7 +161,11 @@ CUROPENING = $3D        ; "which opening am I in": the NAMEID (name-table
                         ;  Free ZP: $3D-$3F were unallocated (CLSP $3C ..
                         ;  BOARD $40). Meaningful only after a book hit.
 RUNPTR     = $3E         ; 16-bit ($3E-$3F): the probe's equal-key-run /
-                        ;  weighted-pick pointer (ZP for (RUNPTR),y reads).
+                        ;  weighted-pick pointer. It is a plain 16-bit SAVE
+                        ;  SLOT now, not an indirect base: since the blob
+                        ;  moved to aux the probe reads entries through
+                        ;  bkfetch, so nothing does (RUNPTR),y any more and
+                        ;  it no longer needs to be in zero page at all.
 
 NPAWNS    = $32         ; pawns of BOTH colors currently on the board,
                         ;  maintained incrementally. Seeded by ptbuild
@@ -234,7 +238,8 @@ PDIRTY    = $D6         ; nonzero: PSTRUCT is stale for the current
                         ; PERSISTENT pawn-file bitmask state: built by
                         ; evalinit (ptbuild), kept current by pbtoggle
                         ; XOR toggles in make/unmake. Nothing else may
-                        ; write it. (AUX $0200+ is the TT; unrelated.)
+                        ; write it. (AUX $0200+ is the resident opening
+                        ; BOOK, and the TT is aux $4000+; both unrelated.)
 EVTMP     = $D7         ; eval scratch
 PSQSQ     = $D8         ; psqt: square (possibly rank-flipped)
 PSQPIECE  = $D9         ; psqt: piece byte
@@ -528,24 +533,33 @@ SMODE      = $0DE0      ; child window mode for the move being searched:
 GDVMSP     = $0213      ; GDVERIFY: MSP saved across the throwaway generate
 GDVBASE    = $0215      ; GDVERIFY: ttmvsweep's first from-square
 GDVBUF     = $3000      ; GDVERIFY: ttmvsweep's 32x128 result buffer.
-                        ;  DELIBERATELY OVERLAPS THE RESIDENT BOOK. It must:
-                        ;  the book now spans $2000-$3CEE (7407 B after the
-                        ;  2026-07-28 widening) and there is no other 4 KB
-                        ;  hole in MAIN, so a GDVERIFY build and a loaded
-                        ;  book are MUTUALLY EXCLUSIVE. That is fine -- the
-                        ;  sweep is a debug-only entry that probes no book --
-                        ;  but it is an invariant, not an accident, and
-                        ;  chesstest.newStubMachine asserts it.
+                        ;  DELIBERATELY OVERLAPS THE DHGR MAIN HALF. Double
+                        ;  hi-res page 1 is aux $2000-$3FFF + main $2000-$3FFF,
+                        ;  and there is no other 4 KB hole in MAIN, so a
+                        ;  GDVERIFY build and the on-device BOARD are MUTUALLY
+                        ;  EXCLUSIVE. That is fine -- the sweep is a debug-only
+                        ;  entry that renders nothing -- but it is an invariant,
+                        ;  not an accident, and internal/delivery's
+                        ;  TestDebugBufferPlacement asserts it.
                         ;
-                        ;  This comment used to justify $3000 as being ABOVE
-                        ;  the blob, quoting $2000-$2F19: the size the book
-                        ;  had BEFORE it was widened. That made it the third
-                        ;  comment in this file to assert a memory-map fact
-                        ;  that had quietly stopped being true (see also the
-                        ;  deleted $2000-$207F reservation, and the stale
-                        ;  $0E00 staging address in docs/ui-design.md). Prefer
-                        ;  a test that enforces the invariant over a comment
-                        ;  that asserts it.
+                        ;  It also overlaps where stage 2 STAGES the book
+                        ;  ($2000) before the copier lifts it to aux $0200.
+                        ;  Harmless: staging happens once, during boot, before
+                        ;  any engine code runs.
+                        ;
+                        ;  THIS COMMENT HAS NOW BEEN WRONG TWICE. It first
+                        ;  justified $3000 as being ABOVE the blob, quoting
+                        ;  $2000-$2F19 -- the size the book had BEFORE the
+                        ;  2026-07-28 widening. It was then rewritten to claim
+                        ;  a deliberate overlap with the RESIDENT book, which
+                        ;  stopped being true on 2026-08-01 when the book moved
+                        ;  to aux $0200 to free the DHGR main half. The guard
+                        ;  that was supposed to enforce that second version had
+                        ;  by then become unfireable (it read MAIN at what was
+                        ;  now an AUX address) and is deleted. Prefer a test
+                        ;  that enforces the invariant over a comment that
+                        ;  asserts it -- and when the map moves, go and find
+                        ;  the comments, because they do not fail.
 
 ; The `ca65 -D LEGALVERIFY` debug variant (the pre-make evasion filter's live
 ; equivalence assertion) borrows $0218-$0222, which the shipped image leaves
@@ -707,9 +721,18 @@ CLSPRES    = $0278      ; 32 bytes: per-ply move-list class presence (CLSP
                         ;  capture; conservative - a consumed TT move may
                         ;  leave a set bit with nothing left to find).
 
-; FT2_ADAPT adaptive-effort scratch (page 3, $0300-$030A — free RAM: nothing
-; is defined between UNDOPD's tail ($02B7) and PIECESQ ($0800), and the 6502
-; stack lives in page 1). CEILMAX/UNSTCEIL/MINSPEND are POKED by the host each
+; FT2_ADAPT adaptive-effort scratch (page 3, $0300-$030C). "Free RAM" here
+; means free of ENGINE allocations -- nothing the engine defines sits between
+; UNDOPD's tail ($02B7) and PIECESQ ($0800), and the 6502 stack lives in page
+; 1. It is NOT free of the machine: the Disk II boot ROM uses $0300-$0355 as
+; its 2-of-6 nibble buffer on every sector it reads and builds its denibble
+; table at $0359-$03D5, and asm/m8.s re-enters that ROM to chain-load stage 2.
+; These bytes therefore overlap the ROM's buffer, which is benign for the one
+; reason that has to stay true: the engine has not run when stage 2 is read,
+; and the disk is never read again afterwards. The book's BKENT/BKHDR landing
+; pads live ABOVE the ROM's table at $03D6-$03E6 (see asm/book.s and
+; internal/delivery's TestPage3Layout, which reads the ceiling out of the ROM
+; image). CEILMAX/UNSTCEIL/MINSPEND are POKED by the host each
 ; move (the host already runs the per-game bank, so it does all the ceiling
 ; arithmetic — no multiply on-device): CEILMAX = panic target = the hard max
 ; = min(4*BASE, income+bank); UNSTCEIL = instability target = min(3*BASE,

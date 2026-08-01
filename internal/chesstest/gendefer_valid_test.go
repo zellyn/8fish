@@ -75,19 +75,27 @@ func newStubMachine(t *testing.T, bin []byte, pos *Position, sub uint16) *harnes
 	if err != nil {
 		t.Fatal(err)
 	}
-	// GDVBUF (ttmvsweep's 32x128 buffer at $3000) DELIBERATELY overlaps the
-	// resident book, which spans $2000-$3CEE since the 2026-07-28 widening --
-	// there is no other 4 KB hole in MAIN. A GDVERIFY build and a loaded book
-	// are therefore mutually exclusive, and this is where that invariant is
-	// enforced rather than merely asserted in a comment: a book loaded here
-	// would be shredded by the sweep, and the sweep's results by the book.
-	if bookBase := defs["BOOK_BASE"]; bookBase != 0 {
-		if m.Mem.Main[bookBase] == 'B' && m.Mem.Main[bookBase+1] == 'K' {
-			t.Fatalf("a resident book is loaded at $%04X, but this is a GDVERIFY "+
-				"machine whose GDVBUF sweep buffer at $3000 overlaps it: the two "+
-				"are mutually exclusive (see asm/defs.inc GDVBUF)", bookBase)
-		}
-	}
+	// THE GUARD THAT USED TO BE HERE IS GONE, because the invariant it enforced
+	// dissolved on 2026-08-01. It asserted that a GDVERIFY machine had no
+	// resident book, because GDVBUF (ttmvsweep's 32x128 buffer at main $3000)
+	// overlapped the book at main $2000-$3CEE.
+	//
+	// The book now lives in AUXILIARY RAM $0200-$1EEF -- the DHGR board needed
+	// main $2000-$3FFF -- so the two cannot overlap and there is nothing left
+	// to be mutually exclusive about.
+	//
+	// Worth recording HOW it would have failed if it had merely been left
+	// alone, because it is this project's recurring shape: it read
+	// m.Mem.MAIN[BOOK_BASE] while BOOK_BASE became an AUX address, and
+	// chesstest.LoadBook writes m.Mem.Aux. Main $0200 is PWBITS/PBBITS, always
+	// zero on a fresh machine. So it could never fire again, for two
+	// independent reasons, and would have gone on reporting "invariant holds"
+	// forever. A gate that cannot fail is worse than no gate.
+	//
+	// What IS still true, and now lives in internal/delivery's
+	// TestDebugBufferPlacement: GDVBUF sits inside the DHGR main half, so a
+	// GDVERIFY build and the on-device board are mutually exclusive.
+	_ = defs["BOOK_BASE"]
 	board := defs["BOARD"]
 	for rank := uint16(0); rank < 8; rank++ {
 		base := rank * 16

@@ -92,6 +92,74 @@ aux/main column interleave itself is NOT on that list: `Window()`
 de-interleaves it the way the scanner does and the gates assert real strings
 read back out of both banks.
 
+## 2026-08-01 — ★ the DISPLAY is a gate now: goapple2 learns IIe double-res video, and zellyn's 7-dot shift is MEASURED
+
+zellyn implemented Apple IIe graphics for OpenEmulator, found that the simplest
+correct implementation shifted the screen **left by 7 dots**, and was then
+surprised to see **the same shift on his physical IIe**. That made
+`libemulation` a reference cross-checked against real hardware, and it was
+worth spending on: goapple2's `videoscan` scanned 40-column text, lo-res and
+hi-res out of one bank, so everything about the double-resolution display was
+prose.
+
+**What the 7-dot shift IS.** The aux byte is clocked out **half a cell early**:
+cell *c* runs x=14c−7..14c−1 (aux) then x=14c..14c+6 (main), so the whole
+double-resolution picture sits 7 dots left of where the same bytes appear in 40
+columns. In OpenEmulator it is one term — the 80-column painters start at
+`x*14 - CELL_WIDTH/2`, the 40-column ones at `x*14`.
+
+**And it is a MOVE, not a crop.** The port's first model dropped the dots at
+x<0, and the 80-column readback test immediately spelled the screen's first
+character as a space. Wrong: those dots land in the **overscan**, which is
+exactly why the effect reads as "shifted" rather than "lost a character". The
+frame's coordinate space starts at MinX = −7.
+
+**Three caveats retired, and they were retired the same way 80STORE was:** the
+oracle existed, only the emulator side was missing. §13.5's "video output
+itself", §14.6's "where the graphics/text split falls" and "80-column text
+pixels" are now `internal/ui/videoscan_test.go`, which boots the SHIPPING DISK
+from `$C600`, runs one complete 65x262 field through the scanner, and asserts
+what a monitor would show: the split at scanline 160, the board on 4–155 with
+blank borders, all four 80-column rows read back as text, and the video sense
+(inverse/normal) correct.
+
+**Verified here, not taken on report.** Deleting the shift term fails **7**
+goapple2 tests and **all five** chess6502 gates, with the diagnostic naming the
+hardware observation: *"the board's memory fits the rendered dots at offsets
+[0]; want exactly one, −7"*. goapple2's `videoscan`/`iie`/`chargen` and
+chess6502's `make test` are green; `shiny/shiny.go` still carries its
+uncommitted local changes, untouched.
+
+**★ ONE GATE FELT SUFFICIENT AND WAS NOT.** A *half* mutation — the MIXED split
+moved in the data path but not the address path — did **not** fail
+`TestDiskScannerMixedSplit`: the scanner fetched text bytes and drew them as
+hi-res, matching no DHGR row, so the split still "looked" right. The window
+readback tests caught it. Worth recording next to the other gate failures this
+week: a mutation that survives your best single gate is not proof the gate is
+wrong, it is proof the gate is narrow.
+
+**§14.7's prediction was 105/119; the measurement is 105/120.** The extra dot is
+the ARTWORK, not the hardware — the h-file's last dot column is background in
+all eight squares. The left edge is exact.
+
+**Also found on the way:** `go test ./videoscan` **had never been able to run** —
+three `%s` verbs applied to a `byte`/`rune` in `convert.go`, and vet's printf
+check runs as part of `go test`, so the whole package failed to build. Fixed in
+its own commit. The per-cell repaint cache was also a package-level variable, so
+two Scanners over different memories silently shared it. And two screen facts no
+byte-level gate could see are now asserted: the prompt cursor is a solid inverse
+block (56/56 dots) one column past the prompt, and the title bar is inverse for
+exactly its first 40 columns, not all 80.
+
+**What is still NOT verified**, written up in ui-design §15.4 rather than
+implied away: glyph shapes (both sides use the same generator — what is gated is
+geometry and video sense), NTSC colour (this is monochrome dots), double lo-res
+(modelled by neither side; `RenderFrame` returns an error rather than drawing
+something plausible and wrong), the overscan extent, and all of §13.5's
+surviving table. **This is emulation agreeing with emulation**, cross-checked
+against a model that was itself checked against a real IIe for one datum. It is
+a large step up from prose and it is not a hardware test.
+
 ## 2026-08-01 — ★ the residual Sargon quirk class, ROOT-CAUSED: SARGON'S MOVE NUMBER IS NOT DECIMAL PAST 99
 
 Every standard-start game that reached move 100 was ending as a harness

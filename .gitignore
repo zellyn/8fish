@@ -22,3 +22,10 @@
 # blanket *.bin rule above -- the same reasoning as the artwork asset.
 !internal/book/bookblob.bin
 !internal/tiles/tileblob.bin
+
+# stray binaries from `go build ./cmd/...` in the repo root
+/genbook
+/sargon
+/sprt
+/genopenings
+/sargon-xboard

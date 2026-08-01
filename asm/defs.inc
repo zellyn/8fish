@@ -775,8 +775,13 @@ MOVESTACKTOP = $2000    ; exclusive end; generator overflow-checks this.
                         ;  constant, so it does NOT grow when the book
                         ;  grows.
 
-; Transposition table: 4096 x 8 bytes in AUX $0200-$81FF (see D6).
-TTBASE     = $0200
+; Transposition table: 4096 x 8 bytes in AUX $4000-$BFFF (see D6, and the
+; double-hi-res reassessment in docs/ui-design.md). The table sits ABOVE the
+; DHGR aux half ($2000-$3FFF) and fills aux exactly to the top: $C000-$4000
+; = $8000 = 4096 x 8. Relocation is a pure change of two `adc #>TTBASE`
+; immediates in TTADDR; the search tree is unaffected (TestMicroAB).
+; Bound to Go by internal/ucibridge/ttbase_test.go.
+TTBASE     = $4000
 
 ; ---- Keyboard (real hardware; M8 driver + entropy collector) ----
 ; The M8 UI drives these directly: monitor ROM is unmapped while LC RAM is

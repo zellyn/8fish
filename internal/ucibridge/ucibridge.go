@@ -1000,8 +1000,8 @@ func (b *Bridge) ponderBudgetCycles(args []string) uint64 {
 }
 
 // ttBase is the aux-bank byte offset of the transposition table (asm TTBASE,
-// $0200). Entries are 8 bytes; see PonderMove for the entry layout.
-const ttBase = 0x0200
+// $4000). Entries are 8 bytes; see PonderMove for the entry layout.
+const ttBase = 0x4000
 
 // ponderProbeMs is the emulated-time budget of the source-(b) fallback search
 // used to predict the opponent's reply when the TT slot is empty/mismatched.

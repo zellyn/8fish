@@ -12,7 +12,7 @@ The disk boots to the hand-drawn double-hi-res board. Full write-up in
 
 | | sectors | of one page table | contents |
 |---|---|---|---|
-| stage 1 | 146 | 176 | copier $0D00 (171 B), UI payload $0E00 (5,064 B), engine $4000 (31,941 B) |
+| stage 1 | 146 | 176 | copier $0D00 (176 B), UI payload $0E00 (5,074 B), engine $4000 (31,941 B) |
 | stage 2 | 37 | 176 | tile blob $0E00 (1,824 B), opening book $2000 (7,407 B) |
 | disk | 184 | of 560 | 376 sectors free |
 
@@ -49,10 +49,11 @@ not a speed-up). Plus a one-time ~115,000 for `dhclear`. The 40-column screen
 is repainted every time as well (23,826 cycles) so ESC is instantaneous;
 together that is 0.7% of a 30-second move.
 
-**Language Card budget**: UICODE 5,064 B of 5,888 (was 4,453); the renderer is
-380 B of code + 96 B of generated tables. 1,064 B of the $E000-$FFEF LC still
-free. The 1,824-byte artwork is in LC BANK 1 at $D300 and costs the payload
-nothing; LC bank 2 is still entirely unused (4,096 B).
+**Language Card budget**: UICODE 5,074 B of 5,888 (was 4,453); the renderer is
+380 B of code + 97 B of generated tables and the board-default byte. 1,054 B of
+the $E000-$FFEF LC still free. The 1,824-byte artwork plus its 456 B of
+init-built tables are in LC BANK 1 at $D300-$DBE7 and cost the payload nothing,
+leaving 1,048 B free there; LC bank 2 is still entirely unused (4,096 B).
 
 **Proof**: `TestDiskBoardParity` boots the shipping `.dsk` from `$C600` and
 asserts all 16,384 bytes of DHGR page 1 against `internal/tiles`' independent
@@ -66,13 +67,26 @@ ASSERTED on the booted disk rather than documented as hardware-only hopes. This
 project's own lesson — the ALTCHARSET bug was found only when someone modelled
 the switch — paid out again, this time confirming the code was already right.
 
-**Two bugs found by gates, neither by inspection:**
+**Which screen comes up is patched, not compiled.** The renderer blits from LC
+bank 1 and only the chain loader can put artwork there, so a BRUN of
+m8boot.bin would have painted 1,824 bytes of leftovers as a chessboard. The
+default is a payload byte that is $00 in both links; the chain loader stores $1
+into it in RAM. Found by adversarial review, not by a gate — there was no gate,
+because internal/ui's BLOAD path pokes the blob in for fidelity and could not
+tell the two apart. There is one now (TestBoardNeedsTheChainLoad), and it
+asserts on the artefacts.
+
+**Three bugs found by gates, one by review:**
 - the aux-capability probe wrote aux `$0300`, which stopped being transposition
   table and became the RESIDENT BOOK when the table moved to `$4000`. It probes
   `$3F00` now: DHGR page 1 in both banks, scratch by construction.
 - the book's main→aux copy, run from the copier, overwrote the copier itself on
   an Apple ][+ (where `$C005` is not a soft switch), so the machine check that
   prints NEEDS A 128K APPLE IIE never ran. It runs AFTER the check now.
+- `internal/chesstest`'s TABLES ceiling guard computed the image top with a
+  hardcoded copy of `__LCCODE_SIZE__`. Growing LCCODE by 35 B did not fail it —
+  826 B of slack — it just made the printed headroom 35 B too generous. It
+  reads the linker symbol now.
 
 **Engine**: `TestMicroAB` matches `microABGolden` — the search tree is
 untouched. `engine.bin` grew 35 B (31,906 → 31,941) for the book probe's two

@@ -1,14 +1,30 @@
 # Resident opening book
 
-A hand-curated opening book, compiled to a compact binary blob laid out
-**exactly** as it sits resident in AUXILIARY RAM at `$0200-$1EEF`. (It used
-to live in main `$2000-$3FFF`, the hi-res page-1 hole; the double-hi-res
-board needed those 8 KB, so as of 2026-07-31 the blob is delivered to main
-`$2000` by stage 2 of the disk's chain load and lifted to aux `$0200` before
-anything runs. See "Where it lives, and how it is read" below.) The engine now probes it **on-device**: the 6502 driver
-binary-searches the resident blob and plays book moves itself (see
-"Resident asm probe" below). The original Go-side bridge probe remains as
-the reference the asm probe is proven byte-for-byte equal to.
+A hand-curated opening book, compiled to **two** binary pieces, each laid out
+**exactly** as it sits resident:
+
+| piece | file | size | resident home | read by |
+|---|---|---|---|---|
+| header + entries | `internal/book/bookblob.bin` | 5,705 B | **AUX `$0800-$1E48`** | the asm probe, ~100 entries per probe |
+| name table | `internal/book/booknames.bin` | 1,702 B | **LANGUAGE CARD BANK 2 `$D000`** | `uibookname`, once per book move |
+
+**Why two pieces (2026-08-01).** The book has been evicted twice by the
+screen. It lived in main `$2000-$3FFF` (the hi-res page-1 hole) until that
+became the MAIN half of double hi-res page 1; it lived at aux `$0200` until
+the board shipped in MIXED MODE, whose four-row text window is 80-column text
+whose EVEN columns are fetched from aux `$0400-$07FF` — four 40-byte spans in
+the middle of the old blob. Splitting the name table out leaves 5,705 B of
+header + entries, which start at `$0800`, above the text page entirely.
+
+The split follows a line the code already drew: **`bookprobe` has never read a
+name.** Only `uibookname` walks the table, and it runs at `$E000`, which
+Language Card bank switching does not re-map, so it can bank in 2, read, and
+bank back. See `docs/ui-design.md` §14.
+
+The engine probes the book **on-device**: the 6502 driver binary-searches the
+resident entries and plays book moves itself (see "Resident asm probe" below).
+The original Go-side bridge probe remains as the reference the asm probe is
+proven byte-for-byte equal to.
 
 ## Files
 
@@ -17,13 +33,14 @@ the reference the asm probe is proven byte-for-byte equal to.
 | **`internal/book/openings.txt`** | **the source of truth**: 179 lines in human SAN (`# name` + `ECO: moves`) — 48 deep main lines plus a BREADTH section. Edit this. |
 | `cmd/genbook/` | the compiler: parses `openings.txt`, validates every line legal move-by-move through refchess, and generates everything below |
 | `internal/book/lines.go` | **generated** Go `book.Lines` (UCI) — `DO NOT EDIT` |
-| `internal/book/bookblob.bin` | **generated** resident blob (embedded by package book) |
+| `internal/book/booknames.bin` | **generated** resident NAME TABLE (embedded by package book; goes to LC bank 2) |
+| `internal/book/bookblob.bin` | **generated** resident ENTRIES blob (embedded by package book; goes to aux `$0800`) |
 | `asm/book.inc` | **generated** asm layout defs for the resident probe |
 | `internal/book/build.go` | validates every line legal move-by-move through refchess (refuses illegal lines); keys each position on the engine hash |
 | `internal/book/book.go` | blob format, encode/decode, binary-search probe, weighted pick, `HashFEN` keying |
 | `internal/refchess/san.go` | `ParseSAN`/`SAN`: resolve SAN ⇄ moves against the legal-move generator (used by the compiler) |
 
-The pipeline is `openings.txt` → `cmd/genbook` → `lines.go` + `bookblob.bin` + `book.inc`.
+The pipeline is `openings.txt` → `cmd/genbook` → `lines.go` + `bookblob.bin` + `booknames.bin` + `book.inc`.
 A single command does the whole thing:
 
 ```
@@ -172,12 +189,14 @@ the identical position decomposition. The same blob is therefore probeable
 byte-for-byte by both this Go bridge and a future asm-resident binary
 search.
 
-## Blob layout (as it sits at aux `$0200`)
+## Blob layout
+
+**ENTRIES** (as it sits at aux `$0800`):
 
 ```
 +0   magic 'B','K'
 +2   entryCount   (uint16 LE)
-+4   nameOff      (uint16 LE, base-relative)
++4   nameAddr     (uint16 LE, the name table's ABSOLUTE resident address)
 +6   nameCount    (byte)
 +7   stride       (byte, = 9)
 +8   entries[entryCount], 9 bytes each, SORTED ascending by key:
@@ -187,8 +206,19 @@ search.
         +6 flags  move flags (bits 0-2 = promotion; matches BESTFLAGS)
         +7 weight weighted-pick weight
         +8 nameID name-table index
-nameOff  name table: nameCount × [len:1B, text bytes]
 ```
+
+**NAME TABLE** (as it sits at LC bank 2 `$D000`):
+
+```
++0   nameCount × [len:1B, text bytes]
+```
+
+`+4` used to be `nameOff`, a base-relative offset into the same blob. It is an
+ABSOLUTE ADDRESS now, because the table is somewhere else entirely.
+`uibookname` reads the address out of the header rather than having it
+assembled in, so moving the table again is a `cmd/genbook` change and nothing
+else.
 
 `from`/`to`/`flags` are the engine's own move encoding (0x88 + `FL_PROMO`),
 so the bytes feed straight into the move machinery — the asm probe never
@@ -203,17 +233,22 @@ current-opening byte; text lookup is host-side only (logging).
 
 ## Sizes (current build)
 
-- 179 lines → 633 entries (5697 B) + 80 distinct names (1702 B) + 8 B header
-- **blob = 7407 bytes** = 90.4% of the 8 KB hole, **785 bytes free**
-- `TestBlobSize` fails if free headroom drops below 256 B. The old "≤ 6 KB
-  margin target" is gone: it was set when the book was 48 deep lines using
-  47% of the hole, and nothing else wants `$2000-$3FFF`. Breadth is what the
+- 179 lines → 633 entries (5697 B) + 8 B header = **5,705 B of entries**,
+  92.9% of aux `$0800-$1FFF` (6,144 B), **439 bytes free**
+- 80 distinct names = **1,702 B of name table**, 41.6% of Language Card
+  bank 2 (4,096 B), **2,394 bytes free**
+- `TestBlobSize` fails if the entries' free headroom drops below 256 B.
+  `TestResidentPiecesFitTheirHomes` fails if either piece outgrows its home,
+  or if the entries ever start below `$0800` — i.e. on the 80-column text
+  page. The old "≤ 6 KB margin target" is gone: it was set when the book was
+  48 deep lines using 47% of a hole nothing else wanted. Breadth is what the
   space is for.
-- The name table is 22% of the blob. `genbook` still prints the
-  word-tokenised alternative each build (currently 1242 B, a 460 B saving);
-  it is not implemented, because it would need a decoder in `uibookname`
-  (`asm/m8.s`) and 460 B is not yet worth that. If the book needs to grow
-  again, that is the next lever, before cutting lines.
+- `genbook` still prints the word-tokenised alternative to the name table each
+  build (currently 1242 B, a 460 B saving); it is not implemented, because it
+  would need a decoder in `uibookname` (`asm/m8.s`). It is now worth even less
+  than before: the name table is in bank 2 with 2,394 B spare, so 460 B buys
+  nothing anybody wants. **The lever that matters if the book grows is the
+  ENTRIES' 439 bytes**, and there tokenising the names does not help at all.
 
 ## Bridge integration (`internal/ucibridge`)
 
@@ -241,23 +276,35 @@ machine memory. The bytes are nonetheless laid out exactly as they will
 sit where the resident blob sits, so promoting to an asm-resident probe was
 a pure read-side addition — no format change.
 
-**Real-hardware equivalent:** at startup the loader reads the blob from disk
-**once** into main `$2000`, the copier lifts it to aux `$0200`, and nothing
-writes it again. It is independent of the transposition table, which is also
-in the aux bank, above it at `$4000`.
-`asm/book.inc` gives the resident base and field offsets the loader and probe
-share.
+**Real-hardware equivalent:** at startup the loader reads both pieces from disk
+**once** into main (`$1600` for the names, `$2000` for the entries), the copier
+puts the names in Language Card bank 2 and `m8bookaux` lifts the entries to aux
+`$0800`, and nothing writes either again. Both are independent of the
+transposition table, which is also in the aux bank, above them at `$4000`.
+`asm/book.inc` gives both resident bases and the field offsets the loader and
+probe share.
 
-**Where it lives, and how it is read (2026-07-31).** The blob is delivered to
-main `$2000` by stage 2 of the disk's chain load and lifted to AUX `$0200` by
-`m8bookaux` before anything runs. `bookprobe` is fetched from main `$4000`, so
-it cannot turn RAMRD on — that would switch instruction fetches too, and aux
+**Where it lives, and how it is read (2026-08-01).** The ENTRIES are delivered
+to main `$2000` by stage 2 of the disk's chain load and lifted to AUX `$0800`
+by `m8bookaux` before anything runs. `bookprobe` is fetched from main `$4000`,
+so it cannot turn RAMRD on — that would switch instruction fetches too, and aux
 `$4000-$BFFF` is the transposition table. It reads the blob through `bkhdr` and
 `bkfetch`, two primitives in the same Language Card page as `ttfetch`, which
 copy the 8-byte header and one 9-byte entry into main `$03DF`/`$03D6`. Every
 comparison below that is unchanged, which is why `TestBookProbeParityASMvsGo`
-needed no new cases: the proof is about the SELECTION, and the selection did
-not move.
+needed no new cases across either move: the proof is about the SELECTION, and
+the selection has never moved.
+
+The NAME TABLE is delivered to main `$1600` and copied into Language Card
+bank 2 by the copier (`$C081` twice: read ROM, write LC RAM, bank 2). Only
+`uibookname` reads it, with `$C083` twice — bank 2 with WRITE ENABLED, because
+write-protecting the card protects all of `$D000-$FFFF` including the `$F780`
+buffer this routine writes into — and it restores bank 1 before returning.
+While bank 2 is in, `LCCODE` (`$D000`) and `DHTILES` (`$D300`) are hidden, so
+no transposition-table probe and no board repaint may happen inside that
+window; the window is straight-line code with no `jsr` in it.
+`internal/ui.TestBookNameRestoresBank1` asserts both halves — that the right
+name comes out, and that bank 1 comes back.
 
 ## Resident asm probe (implemented)
 
@@ -312,12 +359,14 @@ totals are unchanged.
 
 ### Blob delivery
 
-On real hardware stage 2 of the chain load reads the blob once from disk into
-main `$2000`, `m8bookaux` lifts it to aux `$0200`, and nothing writes it
-again; independent of the aux-bank TT at `$4000`. In the harness,
-`chesstest.LoadBook(m, blob)` pokes the identical bytes straight into
-`m.Mem.Aux`; `chesstest.AsmBookProbe` drives one probe pass. Existing tests
-never call `LoadBook`, so the resident base stays clear.
+On real hardware stage 2 of the chain load reads both pieces once from disk
+into main (`$1600`, `$2000`), the copier puts the names in LC bank 2 and
+`m8bookaux` lifts the entries to aux `$0800`, and nothing writes either again;
+both independent of the aux-bank TT at `$4000`. In the harness,
+`chesstest.LoadBook(m, blob)` pokes the entries straight into `m.Mem.Aux` and
+`internal/ui`'s boot path pokes the names into `m.Mem.MainD000Bank2`;
+`chesstest.AsmBookProbe` drives one probe pass. Existing tests never call
+`LoadBook`, so the resident base stays clear.
 
 ### Correctness gate (asm == Go)
 
@@ -331,8 +380,8 @@ confirms misses match. `TestBookFollowThenSearchDriver` and ucibridge's
 
 ### Coexistence note (move stack) — settled 2026-07-28, DISSOLVED 2026-07-31
 
-**The overlap this note is about no longer exists.** `BOOK_BASE` is AUX `$0200`
-as of 2026-07-31 (main `$2000-$3FFF` is the double-hi-res MAIN half; see
+**The overlap this note is about no longer exists.** `BOOK_BASE` is AUX `$0800`
+as of 2026-08-01 (it was aux `$0200` from 2026-07-31) (main `$2000-$3FFF` is the double-hi-res MAIN half; see
 `docs/ui-design.md` §13), so a move-stack overrun past `MOVESTACKTOP = $2000`
 can no longer reach the book at all — it now runs into the BOARD's main half.
 The symptom is visible garbage, but PERMANENT rather than repainted: `dhboard`

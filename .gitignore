@@ -20,7 +20,10 @@
 # Generated blobs that SHIP. They are embedded by Go (//go:embed) and are
 # build inputs for the disk image, so they must be TRACKED despite the
 # blanket *.bin rule above -- the same reasoning as the artwork asset.
+# The book is TWO pieces: the entries (resident in aux) and the name table
+# (resident in Language Card bank 2). See package book's doc.
 !internal/book/bookblob.bin
+!internal/book/booknames.bin
 !internal/tiles/tileblob.bin
 
 # stray binaries from `go build ./cmd/...` in the repo root

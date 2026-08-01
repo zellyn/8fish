@@ -331,6 +331,14 @@ func (m *DiskMachine) Screen() *Screen {
 	return &s
 }
 
+// Window snapshots the mixed-mode 80-column text window -- the four rows under
+// the board -- out of BOTH banks. In 80-column text the aux byte is the even
+// column and the main byte the odd one, so nothing short of both banks is a
+// reading of that window.
+func (m *DiskMachine) Window() *Window80 {
+	return window80(&m.Mem.Main, &m.Mem.Aux)
+}
+
 // Unhandled returns the $C0xx locations the IIe model does not implement that
 // the booted program touched, if any.
 func (m *DiskMachine) Unhandled() map[uint16]int { return m.Mem.Memory.Unhandled }

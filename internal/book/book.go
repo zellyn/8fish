@@ -1,16 +1,32 @@
-// Package book is the engine's resident opening book: a hand-curated set
-// of sound main-line openings, compiled to a compact binary blob that is
-// laid out EXACTLY as it will sit resident at $2000-$3FFF (the verified-
-// free hi-res page-1 hole) so a future asm probe is a pure read-side
+// Package book is the engine's resident opening book: a hand-curated set of
+// sound main-line openings, compiled to TWO binary pieces laid out EXACTLY as
+// they sit resident on the machine, so the asm probe is a pure read-side
 // addition.
+//
+// TWO PIECES, AND WHY (2026-08-01). The book used to be one contiguous blob:
+// header + entries + name table. It is now split, because the two halves have
+// completely different readers and completely different homes:
+//
+//	ENTRIES  header + sorted entry array -> AUXILIARY RAM $0800-$1FFF.
+//	         Read by asm/book.s's bookprobe, thousands of times per game,
+//	         through a Language Card primitive.
+//	NAMES    the length-prefixed name table -> LANGUAGE CARD BANK 2 $D000.
+//	         Read by asm/m8.s's uibookname, once per book move, to render
+//	         "BOOK: <name>". bookprobe NEVER touches it.
+//
+// The split is what buys MIXED MODE. Double hi-res forces 80-column text,
+// whose even columns come from AUX $0400-$07FF -- straight through the middle
+// of the old blob's aux home at $0200. Moving the 1,702-byte name table to the
+// Language Card leaves header+entries, which fit ABOVE the text page entirely.
+// See docs/ui-design.md §13.4 and §14.
 //
 // KEYING (the correctness hinge): entries are keyed on the engine's
 // 32-bit Zobrist hash — the asm HASH0-3. That hash is reproduced here by
 // mirror.Pos.Hash, which is byte-identical to the value baked into
 // engine.bin (proven by TestBookKeyMatchesASM, which reads the actual
 // ZKEYS/STMKEY/CASTKEYS/EPKEYS bytes out of engine.bin and recomputes the
-// hash from scratch). The identical blob therefore probes correctly from
-// both this Go-side bridge and a future asm-resident binary search.
+// hash from scratch). The identical entries blob therefore probes correctly
+// from both this Go-side bridge and the asm-resident binary search.
 package book
 
 import (
@@ -21,30 +37,61 @@ import (
 	"github.com/zellyn/chess6502/internal/mirror"
 )
 
-// On-disk / in-RAM layout constants. The blob is laid out to sit at
-// BaseAddr; every field offset below is relative to the blob start, which
-// equals its resident address minus BaseAddr.
+// On-disk / in-RAM layout constants. The entries blob is laid out to sit at
+// BaseAddr; every field offset below is relative to its start, which equals
+// its resident address minus BaseAddr.
 const (
-	// BaseAddr is the blob's resident base: AUXILIARY RAM $0200. It used to
-	// be main $2000 -- the hi-res page 1 hole -- but that is the MAIN half of
-	// double hi-res page 1, which the board renderer needs, so the book moved
-	// to the aux hole below the DHGR aux half. asm/m8.s's copier does the
-	// move at boot; asm/book.s reads the blob through a Language Card
-	// primitive because RAMRD would switch instruction fetches too.
-	BaseAddr = 0x0200
-	// MaxSize is aux $0200-$1FFF: everything below the DHGR aux half.
-	MaxSize     = 0x2000 - BaseAddr
+	// BaseAddr is the ENTRIES blob's resident base: AUXILIARY RAM $0800.
+	//
+	// It has moved twice, and each move was forced by the screen. It was main
+	// $2000 (the hi-res page-1 hole) until that became the MAIN half of double
+	// hi-res page 1; it was aux $0200 until mixed mode needed aux $0400-$07FF
+	// for the 80-column text window's even columns. $0800 is the first page
+	// ABOVE that window, and the entries end well below the DHGR aux half at
+	// $2000. asm/m8.s's copier does the move at boot; asm/book.s reads the blob
+	// through a Language Card primitive because RAMRD would switch instruction
+	// fetches too.
+	BaseAddr = 0x0800
+	// MaxSize is aux $0800-$1FFF: everything between the 80-column text page
+	// and the DHGR aux half.
+	MaxSize = 0x2000 - BaseAddr
+
+	// AuxTextLo/AuxTextHi bracket the 80-column text page's AUXILIARY half,
+	// $0400-$07FF -- the even columns of all 24 rows, including the four the
+	// mixed-mode window shows. The resident book MUST NOT overlap it; that is
+	// the entire reason BaseAddr is $0800, and internal/delivery's
+	// TestBookClearsTheAuxTextPage is where it FAILS rather than a comment.
+	AuxTextLo = 0x0400
+	AuxTextHi = 0x0800
+
+	// NamesAddr is the NAME TABLE's resident base: LANGUAGE CARD BANK 2
+	// $D000. Bank 2 and not bank 1 because bank 1 is full -- LCCODE at $D000,
+	// the artwork at $D300, the scanline tables above it, leaving 1,048 B
+	// contiguous -- while bank 2 is 4,096 B and was entirely unused.
+	//
+	// The name table is the ONE thing in the book that can live behind a bank
+	// switch, because the probe never reads it: only asm/m8.s's uibookname
+	// does, and uibookname runs at $E000, which bank switching does not touch.
+	NamesAddr = 0xD000
+	// NamesMaxSize is all of Language Card bank 2, $D000-$DFFF.
+	NamesMaxSize = 0x1000
+
 	Magic0      = 'B'
 	Magic1      = 'K'
 	HeaderSize  = 8
 	EntryStride = 9 // key:4 from:1 to:1 flags:1 weight:1 nameID:1
 
-	// Header field offsets (from blob base).
-	offMagic   = 0 // 2 bytes 'B','K'
-	offCount   = 2 // uint16 LE: entry count
-	offNameOff = 4 // uint16 LE: offset from base to name table
-	offNameCt  = 6 // byte: name count
-	offStride  = 7 // byte: entry stride (== EntryStride)
+	// Header field offsets (from the entries blob's base).
+	offMagic = 0 // 2 bytes 'B','K'
+	offCount = 2 // uint16 LE: entry count
+	// offNameAddr holds the name table's ABSOLUTE resident address, not an
+	// offset into this blob: the table is not in this blob any more. It is
+	// stored rather than hard-coded in asm so that moving the table is a
+	// genbook change and nothing else -- uibookname reads the address from
+	// here.
+	offNameAddr = 4 // uint16 LE: resident address of the name table
+	offNameCt   = 6 // byte: name count
+	offStride   = 7 // byte: entry stride (== EntryStride)
 
 	// Entry field offsets (from an entry's base).
 	eKey    = 0 // uint32 LE == HASH0..3
@@ -66,32 +113,28 @@ type Entry struct {
 	From, To, Flags, Weight, NameID byte
 }
 
-// Book is a parsed blob: entries sorted ascending by Key (for binary
-// search) and the name table (NameID -> "ECO Name" text, host-side only).
+// Book is a parsed book: entries sorted ascending by Key (for binary
+// search) and the name table (NameID -> "ECO Name" text).
 type Book struct {
-	entries []Entry
-	names   []string
-	blob    []byte
+	entries   []Entry
+	names     []string
+	blob      []byte // the ENTRIES piece: header + entry array
+	namesBlob []byte // the NAMES piece: length-prefixed strings
 }
 
-// Encode builds the resident blob from entries and names. Entries are
-// sorted by Key (stable, so equal-Key move order is preserved). The
-// returned bytes are exactly what loads at BaseAddr.
-func Encode(entries []Entry, names []string) []byte {
+// Encode builds the two resident pieces from entries and names. Entries are
+// sorted by Key (stable, so equal-Key move order is preserved). The returned
+// slices are exactly what loads at BaseAddr and at NamesAddr.
+func Encode(entries []Entry, names []string) (entriesBlob, namesBlob []byte) {
 	es := make([]Entry, len(entries))
 	copy(es, entries)
 	sort.SliceStable(es, func(i, j int) bool { return es[i].Key < es[j].Key })
 
-	nameOff := HeaderSize + len(es)*EntryStride
-	total := nameOff
-	for _, n := range names {
-		total += 1 + len(n)
-	}
-	blob := make([]byte, total)
+	blob := make([]byte, HeaderSize+len(es)*EntryStride)
 	blob[offMagic] = Magic0
 	blob[offMagic+1] = Magic1
 	binary.LittleEndian.PutUint16(blob[offCount:], uint16(len(es)))
-	binary.LittleEndian.PutUint16(blob[offNameOff:], uint16(nameOff))
+	binary.LittleEndian.PutUint16(blob[offNameAddr:], uint16(NamesAddr))
 	blob[offNameCt] = byte(len(names))
 	blob[offStride] = EntryStride
 
@@ -105,19 +148,30 @@ func Encode(entries []Entry, names []string) []byte {
 		b[eNameID] = e.NameID
 	}
 
-	p := nameOff
+	total := 0
 	for _, n := range names {
-		blob[p] = byte(len(n))
-		copy(blob[p+1:], n)
+		total += 1 + len(n)
+	}
+	nb := make([]byte, total)
+	p := 0
+	for _, n := range names {
+		nb[p] = byte(len(n))
+		copy(nb[p+1:], n)
 		p += 1 + len(n)
 	}
-	return blob
+	return blob, nb
 }
 
-// Load parses a resident blob (as produced by Encode).
-func Load(blob []byte) (*Book, error) {
+// Load parses the two resident pieces (as produced by Encode).
+//
+// namesBlob may be nil: the name text is HOST-SIDE ONLY (logging and the
+// on-device "BOOK: <name>" row, which reads its own copy out of Language Card
+// bank 2). Nothing about move SELECTION depends on it, so a caller that has
+// only an entries blob -- `cmd/sprt --bookA <file>`, for instance -- gets a
+// fully working book whose Name() returns "".
+func Load(blob, namesBlob []byte) (*Book, error) {
 	if len(blob) < HeaderSize {
-		return nil, fmt.Errorf("book: blob too short (%d bytes)", len(blob))
+		return nil, fmt.Errorf("book: entries blob too short (%d bytes)", len(blob))
 	}
 	if blob[offMagic] != Magic0 || blob[offMagic+1] != Magic1 {
 		return nil, fmt.Errorf("book: bad magic %q%q", blob[offMagic], blob[offMagic+1])
@@ -126,10 +180,9 @@ func Load(blob []byte) (*Book, error) {
 		return nil, fmt.Errorf("book: stride %d != %d", s, EntryStride)
 	}
 	count := int(binary.LittleEndian.Uint16(blob[offCount:]))
-	nameOff := int(binary.LittleEndian.Uint16(blob[offNameOff:]))
 	nameCt := int(blob[offNameCt])
-	if HeaderSize+count*EntryStride > len(blob) || nameOff > len(blob) {
-		return nil, fmt.Errorf("book: truncated blob")
+	if HeaderSize+count*EntryStride > len(blob) {
+		return nil, fmt.Errorf("book: truncated entries blob")
 	}
 
 	entries := make([]Entry, count)
@@ -145,28 +198,40 @@ func Load(blob []byte) (*Book, error) {
 		}
 	}
 
-	names := make([]string, 0, nameCt)
-	p := nameOff
-	for range nameCt {
-		if p >= len(blob) {
-			return nil, fmt.Errorf("book: name table truncated")
+	var names []string
+	if namesBlob != nil {
+		names = make([]string, 0, nameCt)
+		p := 0
+		for range nameCt {
+			if p >= len(namesBlob) {
+				return nil, fmt.Errorf("book: name table truncated")
+			}
+			n := int(namesBlob[p])
+			p++
+			if p+n > len(namesBlob) {
+				return nil, fmt.Errorf("book: name string truncated")
+			}
+			names = append(names, string(namesBlob[p:p+n]))
+			p += n
 		}
-		n := int(blob[p])
-		p++
-		if p+n > len(blob) {
-			return nil, fmt.Errorf("book: name string truncated")
-		}
-		names = append(names, string(blob[p:p+n]))
-		p += n
 	}
-	return &Book{entries: entries, names: names, blob: blob}, nil
+	return &Book{entries: entries, names: names, blob: blob, namesBlob: namesBlob}, nil
 }
 
-// Size is the blob byte length (the resident footprint).
+// Size is the ENTRIES piece's byte length: the book's AUX footprint.
 func (b *Book) Size() int { return len(b.blob) }
 
-// Blob returns the raw resident bytes (for injection at $2000).
-func (b *Book) Blob() []byte { return b.blob }
+// NamesSize is the NAMES piece's byte length: the book's Language Card
+// bank 2 footprint.
+func (b *Book) NamesSize() int { return len(b.namesBlob) }
+
+// EntriesBlob returns the raw bytes that go resident at aux BaseAddr -- the
+// piece the asm probe reads, and the one chesstest.LoadBook installs.
+func (b *Book) EntriesBlob() []byte { return b.blob }
+
+// NamesBlob returns the raw bytes that go resident in Language Card bank 2 at
+// NamesAddr, or nil if the book was loaded without them.
+func (b *Book) NamesBlob() []byte { return b.namesBlob }
 
 // Entries returns the sorted entry slice (read-only; for tests/tools).
 func (b *Book) Entries() []Entry { return b.entries }

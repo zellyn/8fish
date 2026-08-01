@@ -132,6 +132,7 @@ func TestMainMemoryLayout(t *testing.T) {
 
 	engine := fileLen(t, "asm/engine.bin")
 	book := fileLen(t, "internal/book/bookblob.bin")
+	booknames := fileLen(t, "internal/book/booknames.bin")
 	tileblob := fileLen(t, "internal/tiles/tileblob.bin")
 	m8 := fileLen(t, "asm/m8.bin")
 	bloadBoot := fileLen(t, "asm/m8boot.bin")
@@ -155,15 +156,28 @@ func TestMainMemoryLayout(t *testing.T) {
 	})
 	// STAGE 2 lands after the copier has lifted the payload to $E000, so it
 	// reuses the payload's staging area. Both blobs are then copied on -- the
-	// tiles to Language Card bank 1, the book to aux $0200 -- and main
-	// $2000-$3FFF is left free for the DHGR main half.
+	// tiles to LC bank 1, the names to LC bank 2, the entries to aux $0800 --
+	// and main $2000-$3FFF is left free for the DHGR main half.
 	t.Log("STANDARD DELIVERY stage 2 (landing zones in MAIN, then copied on):")
 	disjoint(t, "SD stage 2", []region{
 		{"copier + chain loader (m8sdboot.bin)", CopierOrg, CopierOrg + sdBoot},
 		{"staged tile blob", TilesOrg, TilesOrg + tileblob},
+		{"staged book name table", NamesOrg, NamesOrg + booknames},
 		{"staged opening book", BookOrg, BookOrg + book},
 		{"engine image", EngineOrg, EngineOrg + engine},
 	})
+	// The name table's landing zone is DERIVED on the asm side
+	// (SD2NAMES = SD2TILES + SD2TILEN*256, so the two blobs are one span on
+	// the disk). Recompute it here rather than trusting the constant: if
+	// tileblob.bin grows past a page boundary, the copier's source address
+	// moves and this one has to move with it or stage 2 reads the artwork's
+	// tail as names.
+	if want := TilesOrg + (tileblob+SectorBytes-1)/SectorBytes*SectorBytes; NamesOrg != want {
+		t.Errorf("NamesOrg is $%04X but the tile blob (%d B at $%04X) ends at page "+
+			"$%04X: asm/m8.s derives SD2NAMES from TILE_BLOB_SIZE, so the two now "+
+			"disagree about where stage 2 puts the name table",
+			NamesOrg, tileblob, TilesOrg, want)
+	}
 
 	t.Log("BLOAD layout (asm/m8.cfg):")
 	bloadBase := readCfgSymbol(t, "asm/m8.cfg", "UIPAYLOAD")
@@ -175,7 +189,7 @@ func TestMainMemoryLayout(t *testing.T) {
 	})
 
 	// The book must fit its landing zone at $2000, and -- the constraint that
-	// actually binds now -- its RESIDENT home in aux $0200, below the DHGR aux
+	// actually binds now -- its RESIDENT home in aux $0800, below the DHGR aux
 	// half at $2000. Nothing else enforces either: the engine reads BOOK_COUNT
 	// out of the blob at run time, so an oversized blob is simply written over
 	// whatever follows it.
@@ -187,8 +201,9 @@ func TestMainMemoryLayout(t *testing.T) {
 		t.Errorf("book blob is %d B: at its resident aux base $%04X it runs %d B into "+
 			"the DHGR aux half at $2000", book, BookAux, BookAux+book-0x2000)
 	}
-	t.Logf("resident book: aux $%04X-$%04X, %d B of the %d B below the DHGR aux half "+
-		"(%d B spare)", BookAux, BookAux+book-1, book, 0x2000-BookAux, 0x2000-BookAux-book)
+	t.Logf("resident book entries: aux $%04X-$%04X, %d B of the %d B below the DHGR aux "+
+		"half (%d B spare)", BookAux, BookAux+book-1, book, 0x2000-BookAux,
+		0x2000-BookAux-book)
 	// The tile blob's resident home is Language Card bank 1, above the
 	// engine's LCCODE, and it must not run past $DFFF into the unbanked
 	// $E000-$FFFF where the UI lives.
@@ -196,11 +211,29 @@ func TestMainMemoryLayout(t *testing.T) {
 		t.Errorf("tile blob is %d B at LC $%04X: it runs %d B past $DFFF into the UI",
 			tileblob, TilesLC, TilesLC+tileblob-0xE000)
 	}
-	// asm/book.inc is generated alongside the blob; if only one is
+	// And the name table's home is Language Card BANK 2. Same ceiling, same
+	// reason: $E000-$FFFF is NOT banked, so an overrun would land on the UI's
+	// own code in both banks.
+	if NamesLC+booknames > 0xE000 {
+		t.Errorf("the book's name table is %d B at LC bank 2 $%04X: it runs %d B past "+
+			"$DFFF into the UI, which is unbanked", booknames, NamesLC,
+			NamesLC+booknames-0xE000)
+	}
+	t.Logf("resident book names: LC bank 2 $%04X-$%04X, %d B of 4096 (%d B spare)",
+		NamesLC, NamesLC+booknames-1, booknames, 0x1000-booknames)
+	// asm/book.inc is generated alongside the blobs; if only one is
 	// regenerated the asm probe walks the wrong shape.
 	if got, want := bookinc["BOOK_BLOB_SIZE"], book; got != want {
 		t.Errorf("asm/book.inc says BOOK_BLOB_SIZE = %d but internal/book/bookblob.bin is %d B: "+
 			"re-run `go run ./cmd/genbook`", got, want)
+	}
+	if got, want := bookinc["BOOK_NAMES_SIZE"], booknames; got != want {
+		t.Errorf("asm/book.inc says BOOK_NAMES_SIZE = %d but internal/book/booknames.bin "+
+			"is %d B: re-run `go run ./cmd/genbook`", got, want)
+	}
+	if got := bookinc["BOOK_NAMES"]; got != NamesLC {
+		t.Errorf("asm/book.inc BOOK_NAMES = $%04X, delivery.NamesLC = $%04X: the copier "+
+			"and uibookname disagree about where the name table lives", got, NamesLC)
 	}
 	if got := bookinc["BOOK_BASE"]; got != BookAux {
 		t.Errorf("asm/book.inc BOOK_BASE = $%04X, delivery.BookAux = $%04X: the probe and "+
@@ -236,6 +269,68 @@ func TestMainMemoryLayout(t *testing.T) {
 	}
 }
 
+// TestBookClearsTheAuxTextPage is the gate the whole 2026-08-01 change exists
+// to satisfy, and it is stated where it FAILS rather than in a comment.
+//
+// The board ships in MIXED MODE. Mixed mode plus double hi-res means the
+// four-row text window is EIGHTY-column text, and 80-column text is fetched
+// two bytes per column: the AUX byte is the even column, the MAIN byte the
+// odd one. So the aux half of the whole text page, $0400-$07FF, belongs to
+// the video scanner -- rows 20-23 are $0650-$0677, $06D0-$06F7, $0750-$0777
+// and $07D0-$07F7, four spans in the MIDDLE of it.
+//
+// The resident opening book is the only thing that has ever wanted that
+// memory. It fitted at aux $0200 when it was 7,407 B including its name
+// table; moving the name table to Language Card bank 2 left 5,705 B, which
+// starts at $0800 and clears the page entirely.
+//
+// Two ways this could silently break: someone moves BOOK_BASE back down, or
+// the entries grow DOWNWARD (they cannot today, but a future "start it lower
+// to gain headroom" would). Both are the same assertion, and both are read
+// from the built artefacts.
+func TestBookClearsTheAuxTextPage(t *testing.T) {
+	buildArtefacts(t)
+	bookinc := readSyms(t, "asm/book.inc")
+	book := fileLen(t, "internal/book/bookblob.bin")
+
+	// $0400-$07FF: the 80-column text page's aux half, all 24 rows.
+	const textLo, textHi = 0x0400, 0x0800
+	base := bookinc["BOOK_BASE"]
+	if base == 0 {
+		t.Fatal("BOOK_BASE missing from asm/book.inc")
+	}
+	if base != BookAux {
+		t.Errorf("asm/book.inc BOOK_BASE = $%04X but delivery.BookAux = $%04X", base, BookAux)
+	}
+	end := base + book // exclusive
+	if base < textHi && end > textLo {
+		lo, hi := max(base, textLo), min(end, textHi)
+		t.Fatalf("THE RESIDENT BOOK OVERLAPS THE 80-COLUMN TEXT PAGE'S AUX HALF.\n"+
+			"  book:      aux $%04X-$%04X (%d B)\n"+
+			"  text page: aux $%04X-$%04X (the EVEN columns of all 24 rows)\n"+
+			"  overlap:   $%04X-$%04X, %d bytes\n"+
+			"Mixed mode's four-row window (text rows 20-23) is fetched from aux "+
+			"$0650, $06D0, $0750 and $07D0. Whatever is under those spans is what "+
+			"the player would read as the status line. Either the book goes back "+
+			"above $0800, or the board goes back to full screen -- there is no "+
+			"third option, and a book split across the window is not a book.",
+			base, end-1, book, textLo, textHi-1, lo, hi-1, hi-lo)
+	}
+	t.Logf("the resident book is aux $%04X-$%04X; the 80-column text page's aux half "+
+		"($%04X-$%04X) is clear by %d bytes", base, end-1, textLo, textHi-1, base-textHi)
+
+	// The four window rows, spelled out, so the numbers in every comment about
+	// this change are checked against the real interleave rather than retyped.
+	for row := 20; row < 24; row++ {
+		rb := 0x0400 + (row%8)*0x80 + (row/8)*0x28
+		if rb >= base && rb < end {
+			t.Errorf("window row %d's aux base $%04X is inside the book", row, rb)
+		}
+		t.Logf("  window row %d: aux $%04X-$%04X (even columns) + main $%04X-$%04X (odd)",
+			row, rb, rb+39, rb, rb+39)
+	}
+}
+
 // TestLanguageCardLayout: the UI's code, its static data and the 6502 vectors
 // tile $E000-$FFFF without overlapping, measured from the linker.
 func TestLanguageCardLayout(t *testing.T) {
@@ -257,6 +352,7 @@ func TestLanguageCardLayout(t *testing.T) {
 		{"UI variables + screen buffers", m8vars, m8vars + 0x100},
 		{"game history from/to/flags", 0xF800, 0xFB00},
 		{"game hash history", 0xFB00, 0xFF00},
+		{"UI80BUF (the mixed-mode window's 80-column staging line)", 0xFF00, 0xFF50},
 		{"6502 vectors", vectors, 0x10000},
 	})
 	if lcBase+code > m8vars {
@@ -315,7 +411,7 @@ func TestDebugBufferPlacement(t *testing.T) {
 	// REWRITTEN 2026-08-01, because what the buffer overlaps CHANGED. It used
 	// to overlap the resident book at main $2000-$3CEE, and the invariant was
 	// "a GDVERIFY build and a loaded book are mutually exclusive", enforced in
-	// chesstest.newStubMachine. The book now lives in AUX $0200-$1EEF, so that
+	// chesstest.newStubMachine. The book now lives in AUX $0800-$1E48, so that
 	// overlap — and the guard that enforced it — are gone.
 	//
 	// What GDVBUF overlaps NOW is the DHGR MAIN half. Double hi-res page 1 is
@@ -422,8 +518,33 @@ func TestLanguageCardBank1Layout(t *testing.T) {
 			"$E000-$FFEF", top-1)
 	}
 	t.Logf("  bank 1 used $D000-$%04X, %d B free below $E000", top-1, 0xE000-top)
-	t.Logf("  bank 2 ($D000-$DFFF, reached with one $C083/$C08B switch): 4096 B, "+
-		"entirely unused")
+
+	// BANK 2 is not empty any more: it holds the opening book's name table.
+	// That is the whole reason mixed mode fits -- the 1,702 bytes moved OUT of
+	// the aux blob, off the 80-column text page, and into the last contiguous
+	// 4 KB in the machine.
+	//
+	// The bank-1 free run is what makes bank 2 the only answer, so measure it
+	// rather than asserting it: if a future change frees enough of bank 1 to
+	// hold the table, the bank switch in uibookname stops being necessary and
+	// somebody should know.
+	booknames := fileLen(t, "internal/book/booknames.bin")
+	t.Log("LANGUAGE CARD BANK 2 ($D000-$DFFF):")
+	disjoint(t, "LC bank 2", []region{
+		{"the opening book's name table (uibookname reads it)", NamesLC, NamesLC + booknames},
+	})
+	if NamesLC+booknames > 0xE000 {
+		t.Errorf("the name table runs past $DFFF: $E000-$FFFF is NOT banked, it is the "+
+			"UI's own code in both banks (%d B over)", NamesLC+booknames-0xE000)
+	}
+	t.Logf("  bank 2 used $%04X-$%04X, %d B free", NamesLC, NamesLC+booknames-1,
+		0xE000-(NamesLC+booknames))
+	if free := 0xE000 - top; free >= booknames {
+		t.Errorf("Language Card bank 1 now has %d B free, enough for the %d-byte name "+
+			"table. uibookname's bank switch (and the copier's second copy) exist only "+
+			"because it did not fit; if it does now, they are complexity with no reason",
+			free, booknames)
+	}
 }
 
 // TestPage3Layout gates the one part of the memory map that had nothing but a

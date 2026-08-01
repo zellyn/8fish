@@ -223,7 +223,7 @@ func TestDiskLedger(t *testing.T) {
 		var want []byte
 		switch p.Org {
 		case delivery.BookOrg:
-			want = book.DefaultBlob()
+			want = book.DefaultEntries()
 		case delivery.TilesOrg:
 			want = tiles.DefaultBlob()
 		default:
@@ -461,7 +461,7 @@ func TestDiskBoots(t *testing.T) {
 	// ---- 2a. STAGE 2 arrived, and was put where it belongs -----------------
 	// The chain load is invisible from the screen, so assert its two products
 	// directly: the artwork in Language Card bank 1 (m.Mem.Main[$D000-$DFFF]
-	// IS bank 1 in goapple2's model) and the opening book in AUX $0200.
+	// IS bank 1 in goapple2's model) and the opening book's entries in AUX $0800.
 	blob := tiles.DefaultBlob()
 	if got := m.Mem.Main[delivery.TilesLC : delivery.TilesLC+len(blob)]; !bytes.Equal(got, blob) {
 		for i := range blob {
@@ -474,7 +474,7 @@ func TestDiskBoots(t *testing.T) {
 	}
 	t.Logf("STAGE 2: %d B of artwork resident at LC bank 1 $%04X-$%04X",
 		len(blob), delivery.TilesLC, delivery.TilesLC+len(blob)-1)
-	bk := book.DefaultBlob()
+	bk := book.DefaultEntries()
 	if got := m.Mem.Aux[delivery.BookAux : delivery.BookAux+len(bk)]; !bytes.Equal(got, bk) {
 		for i := range bk {
 			if bk[i] != got[i] {
@@ -506,9 +506,12 @@ func TestDiskBoots(t *testing.T) {
 			"($C00D) AND AN3 driven low ($C05E); with either wrong the board comes out "+
 			"as 280-dot hi-res reading only the main half", m.Mem.Col80, m.Mem.An3)
 	}
-	if m.Mem.Text || m.Mem.Mixed || m.Mem.Page2 || !m.Mem.Hires {
+	// MIXED is ON, and that is the shipping arrangement: graphics on scanlines
+	// 0-159 (the board is 4-155) with a four-row 80-column text window under
+	// it. A full-screen board would leave the player typing blind.
+	if m.Mem.Text || !m.Mem.Mixed || m.Mem.Page2 || !m.Mem.Hires {
 		t.Errorf("display state wrong for the board: TEXT=%v MIXED=%v PAGE2=%v HIRES=%v, "+
-			"want false/false/false/true", m.Mem.Text, m.Mem.Mixed, m.Mem.Page2, m.Mem.Hires)
+			"want false/true/false/true", m.Mem.Text, m.Mem.Mixed, m.Mem.Page2, m.Mem.Hires)
 	}
 	// ★ 80STORE. This USED to be untestable: goapple2's IIe model implemented
 	// neither 80STORE state and counted both switch addresses in Unhandled,
@@ -541,19 +544,54 @@ func TestDiskBoots(t *testing.T) {
 	t.Logf("BOOTED FROM DISK in %d cycles (%.2f s of emulated IIe time), PC $%04X:\n%s",
 		m.Cycles, float64(m.Cycles)/1_020_484, m.CPU.PC(), &got)
 
-	want, err := ui.BootShipping(root, book.DefaultBlob())
+	want, err := ui.BootShipping(root, book.DefaultEntries())
 	if err != nil {
 		t.Fatalf("harness boot for comparison: %v", err)
 	}
 	ref := want.Screen()
-	if got.Raw != ref.Raw {
-		for row := range 24 {
-			if got.Raw[row] != ref.Raw[row] {
-				t.Errorf("row %d differs:\n disk: %q\n ref:  %q", row,
-					got.Text(row), ref.Text(row))
-			}
+	// ROWS 0-19 ONLY, and the exclusion is the mixed-mode window, not a
+	// weakening. Text rows 20-23 are the window's MAIN half -- its ODD columns
+	// -- so while the board is up those 160 bytes are half of an 80-column
+	// line, not 40-column text. The harness reference has no artwork resident
+	// (UIDHGRDEF is $00 in m8.bin; see TestBoardNeedsTheChainLoad), so it is
+	// on the 40-column screen and its rows 20-23 are the help and prompt rows.
+	// Both are correct; they are different screens. The window itself is
+	// asserted below, from both banks.
+	differs := false
+	for row := range ui.Win80Top {
+		if got.Raw[row] != ref.Raw[row] {
+			differs = true
+			t.Errorf("row %d differs:\n disk: %q\n ref:  %q", row,
+				got.Text(row), ref.Text(row))
 		}
+	}
+	if differs {
 		t.Fatalf("the disk boot paints a different screen from the gated shipping image")
+	}
+
+	// ---- 3b. and the MIXED-MODE WINDOW is what the player reads -------------
+	// Four rows of 80 columns, de-interleaved from aux (even) and main (odd).
+	// This is the screen a IIe actually shows under the board, and nothing
+	// else in the suite reads it, so assert its content field by field.
+	win := m.Window()
+	t.Logf("the mixed-mode text window (80 columns x 4 rows, aux+main):\n%s", win)
+	for _, c := range []struct {
+		row  int
+		want string
+		what string
+	}{
+		{0, "8FISH 1.0", "the title bar"},
+		{0, "LEVEL 4", "the level"},
+		{0, "YOU ARE WHITE", "which colour the player has"},
+		{0, "WHITE TO MOVE", "whose move it is"},
+		{3, "YOUR MOVE?", "the input prompt"},
+		{2, "N-NEW T-TAKEBACK", "the first help line"},
+		{3, "L-LEVEL S-SIDES", "the second help line"},
+	} {
+		if !strings.Contains(win.Text(c.row), c.want) {
+			t.Errorf("the window's row %d does not carry %s (%q):\n%q",
+				ui.Win80Top+c.row, c.what, c.want, win.Text(c.row))
+		}
 	}
 
 	// And it really is a start position, not just "the same 960 bytes".
@@ -653,8 +691,21 @@ func TestDiskPlays(t *testing.T) {
 	if !legal {
 		t.Errorf("black's reply %q is not a legal move after 1 e4", reply)
 	}
-	t.Logf("BLACK REPLIED %s -- the resident opening book at $2000 came off the disk "+
-		"and was probed (the screen names the line)", reply)
+	t.Logf("BLACK REPLIED %s -- the resident opening book came off the disk and was "+
+		"probed (the screen names the line)", reply)
+
+	// The opening's NAME is the one field in the window that comes out of
+	// LANGUAGE CARD BANK 2, so this is the only end-to-end check that the
+	// split book's second piece arrived on the disk, got copied into bank 2,
+	// and was read back through uibookname's bank switch -- all the way to
+	// pixels a player sees without leaving the board.
+	if got := m.Window().Text(1); !strings.Contains(got, "BOOK:") {
+		t.Errorf("the window's second row does not name the opening: %q\n"+
+			"the name table lives in Language Card bank 2; nothing else on this "+
+			"screen depends on that copy having arrived", got)
+	} else {
+		t.Logf("the window names the opening: %q", strings.TrimSpace(got[40:]))
+	}
 
 	// The book answered, which means nothing SEARCHED yet. Play offbeat moves
 	// until the engine has to think, then check that it did -- and that the
@@ -665,8 +716,9 @@ func TestDiskPlays(t *testing.T) {
 		n := 0
 		// The transposition table is aux $4000-$BFFF (all 4096 entries; it
 		// moved off $0200 when the DHGR aux half claimed $2000-$3FFF). Aux
-		// $0200-$1EEE below it is the resident opening book, which the copier
-		// filled at boot, so counting from $0200 would count the book.
+		// $0800-$1E48 below it is the resident opening book's entries, which
+		// the copier filled at boot, so counting from $0200 would count the
+		// book -- and $0400-$07FF below THAT is the 80-column text page.
 		for _, b := range m.Mem.Aux[0x4000:0xC000] {
 			if b != 0 {
 				n++
@@ -699,11 +751,34 @@ func TestDiskPlays(t *testing.T) {
 		t.Fatal("never left the book, so nothing searched")
 	}
 	n := auxTouched()
-	t.Logf("AUX RAM: %d non-zero bytes in the transposition table at $0200-$81FF "+
-		"(aux) after the first real search", n)
+	t.Logf("AUX RAM: %d non-zero bytes in the transposition table at aux $4000-$BFFF "+
+		"after the first real search", n)
 	if n == 0 {
 		t.Error("the engine searched but wrote nothing to the aux-RAM transposition " +
 			"table: the copier's LCCODE install or the RAMWRT path is broken")
+	}
+
+	// ---- and the MIXED-MODE WINDOW followed the game ------------------------
+	// This is the only test that plays real moves on the real disk, so it is
+	// the only place the window's LIVE fields -- whose move it is, and the
+	// think line the search rebuilds between iterations -- can be checked
+	// against a game that actually happened. A window that painted correctly
+	// at boot and then froze would pass every other gate in this package.
+	win := m.Window()
+	t.Logf("the window after a real search:\n%s", win)
+	if !m.Mem.Mixed {
+		t.Error("MIXED went off during play: the text window is not on screen any more")
+	}
+	if got := win.Text(0); !strings.Contains(got, "TO MOVE") {
+		t.Errorf("the window's status row does not say whose move it is: %q", got)
+	}
+	// The think line is depth + score + move, rebuilt by uithinkln between
+	// completed iterations. After a real search it cannot be blank.
+	if got := strings.TrimSpace(win.Text(1)[:40]); got == "" {
+		t.Error("the window's think line is blank after a search: uithinkln does not " +
+			"reach the window, so the board screen shows no depth or score")
+	} else {
+		t.Logf("the window's think line reads %q", got)
 	}
 }
 
@@ -884,14 +959,25 @@ func TestDiskBoardParity(t *testing.T) {
 	t.Logf("the shipping disk's DHGR page 1 is byte-identical to internal/tiles' model, "+
 		"all %d bytes, from a cold $C600 boot", len(want))
 
-	// And write it out, doubled vertically so the 560x192 board is not a
-	// letterbox, so a human can look at what the disk actually painted.
+	// And write it out, doubled vertically so the board is not a letterbox, so
+	// a human can look at what the disk actually painted.
+	//
+	// ONLY SCANLINES 0-159. The disk boots MIXED, so the graphics scanner stops
+	// at 160 and the bottom 32 scanlines of the screen are the four-row text
+	// window instead. Page 1's memory for those scanlines is still there (and
+	// still asserted above, all 16,384 bytes), but rendering it as pixels would
+	// be a picture of something no IIe displays. The window is decoded as TEXT,
+	// underneath, which is what a IIe does show.
+	const mixedH = 160 // MIXED: graphics on scanlines 0-159
+	if !m.Mem.Mixed {
+		t.Error("the disk did not boot MIXED: the four-row text window is not on screen")
+	}
 	s, err := tiles.Decode(screen)
 	if err != nil {
 		t.Fatal(err)
 	}
-	img := image.NewGray(image.Rect(0, 0, tiles.ScreenW, 2*tiles.ScreenH))
-	for y := range tiles.ScreenH {
+	img := image.NewGray(image.Rect(0, 0, tiles.ScreenW, 2*mixedH))
+	for y := range mixedH {
 		for x := range tiles.ScreenW {
 			if s.At(x, y) {
 				img.SetGray(x, 2*y, color.Gray{0xEE})
@@ -899,6 +985,8 @@ func TestDiskBoardParity(t *testing.T) {
 			}
 		}
 	}
+	t.Logf("MIXED MODE, scanlines 160-191 -- the four-row 80-column window:\n%s",
+		m.Window())
 	out := filepath.Join(os.TempDir(), "8fish-disk-board.png")
 	f, err := os.Create(out)
 	if err != nil {
@@ -928,7 +1016,12 @@ func TestDiskEscapeSwapsScreens(t *testing.T) {
 		t.Fatalf("the disk did not boot to the board: DHires=%v TEXT=%v",
 			m.Mem.DHires(), m.Mem.Text)
 	}
-	before := m.Screen().String()
+	if !m.Mem.Mixed {
+		t.Fatal("the disk did not boot to MIXED mode: there is no text window under " +
+			"the board, and the player would be typing blind")
+	}
+	before := *m.Screen()
+	winBefore := m.Window().Text(3)
 
 	const keyBudget2 = 400_000_000
 	if err := m.Key(0x1B, keyBudget2); err != nil { // ESC
@@ -938,15 +1031,40 @@ func TestDiskEscapeSwapsScreens(t *testing.T) {
 		t.Errorf("after ESC the display is not the 40-column text screen: TEXT=%v "+
 			"80COL=%v ALTCHARSET=%v", m.Mem.Text, m.Mem.Col80, m.Mem.AltCharset)
 	}
-	if got := m.Screen().String(); got != before {
-		t.Errorf("ESC changed the text screen's contents:\nbefore:\n%s\nafter:\n%s", before, got)
+	after := *m.Screen()
+	// ROWS 0-19 are untouched by the swap: the board screen keeps the whole
+	// 40-column screen painted behind it, which is what makes ESC cheap.
+	for row := range ui.Win80Top {
+		if before.Raw[row] != after.Raw[row] {
+			t.Errorf("ESC changed 40-column row %d:\n before: %q\n after:  %q",
+				row, before.Text(row), after.Text(row))
+		}
+	}
+	// ROWS 20-23 are the exception, and the ONE thing mixed mode cost. They
+	// are the window's MAIN half -- its odd columns -- while the board is up,
+	// so ESC has to repaint them. What matters is that they come back as TEXT,
+	// not that they never changed.
+	for row, want := range map[int]string{
+		20: "N-NEW T-TAKEBACK R-RESIGN D-DRAW",
+		21: "L-LEVEL S-SIDES Q-QUIT ?-HELP",
+		23: "YOUR MOVE?",
+	} {
+		if !strings.Contains(after.Text(row), want) {
+			t.Errorf("after ESC, 40-column row %d does not read as text (%q not in %q): "+
+				"uiswap must repaint the rows the window borrowed", row, want, after.Text(row))
+		}
 	}
 	if err := m.Key(0x1B, keyBudget2); err != nil { // ESC back
 		t.Fatalf("ESC back: %v", err)
 	}
-	if !m.Mem.DHires() || m.Mem.Text || m.Mem.Store80 {
-		t.Errorf("ESC did not come back to the board: DHires=%v TEXT=%v 80STORE=%v",
-			m.Mem.DHires(), m.Mem.Text, m.Mem.Store80)
+	if !m.Mem.DHires() || m.Mem.Text || !m.Mem.Mixed || m.Mem.Store80 {
+		t.Errorf("ESC did not come back to the board: DHires=%v TEXT=%v MIXED=%v 80STORE=%v",
+			m.Mem.DHires(), m.Mem.Text, m.Mem.Mixed, m.Mem.Store80)
+	}
+	// ...and the window came back with it, unchanged.
+	if got := m.Window().Text(3); got != winBefore {
+		t.Errorf("the text window's prompt row did not survive the round trip:\n "+
+			"before: %q\n after:  %q", winBefore, got)
 	}
 	// And the board is still painted -- the swap back repaints it, so a
 	// renderer that only worked once would show here.

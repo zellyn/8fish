@@ -28,6 +28,65 @@ func buildOrFatal(t *testing.T) *Book {
 	return bk
 }
 
+// TestResidentPiecesFitTheirHomes (deliverable d): the two resident pieces fit
+// where they go, and -- the constraint the split exists for -- the entries
+// clear the 80-column text page's aux half entirely.
+//
+// The delivery-side gate (internal/delivery's TestBookClearsTheAuxTextPage)
+// checks the same thing against the SHIPPED addresses; this one checks it
+// against a freshly compiled book, so growing openings.txt fails here first.
+func TestResidentPiecesFitTheirHomes(t *testing.T) {
+	bk := buildOrFatal(t)
+	if BaseAddr < AuxTextHi {
+		t.Fatalf("the book is based at aux $%04X, inside or below the 80-column text "+
+			"page's aux half ($%04X-$%04X). Mixed mode's four text rows are fetched "+
+			"from there; the book cannot be under them", BaseAddr, AuxTextLo, AuxTextHi-1)
+	}
+	if BaseAddr+bk.Size() > 0x2000 {
+		t.Errorf("the entries are %d B at aux $%04X: %d B into the DHGR aux half at $2000",
+			bk.Size(), BaseAddr, BaseAddr+bk.Size()-0x2000)
+	}
+	if bk.NamesSize() > NamesMaxSize {
+		t.Errorf("the name table is %d B: %d B more than all of Language Card bank 2 (%d B)",
+			bk.NamesSize(), bk.NamesSize()-NamesMaxSize, NamesMaxSize)
+	}
+	t.Logf("entries %d / %d B at aux $%04X-$%04X (%d B spare below the DHGR aux half)",
+		bk.Size(), MaxSize, BaseAddr, BaseAddr+bk.Size()-1, MaxSize-bk.Size())
+	t.Logf("names   %d / %d B at LC bank 2 $%04X-$%04X (%d B spare)",
+		bk.NamesSize(), NamesMaxSize, NamesAddr, NamesAddr+bk.NamesSize()-1,
+		NamesMaxSize-bk.NamesSize())
+}
+
+// TestLoadWithoutNames: the name table is optional, because nothing about
+// SELECTION reads it. `cmd/sprt --bookA <blob>` depends on this.
+func TestLoadWithoutNames(t *testing.T) {
+	entries, names, err := Build(Lines)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, _ := Encode(entries, names)
+	bk, err := Load(blob, nil)
+	if err != nil {
+		t.Fatalf("Load without names: %v", err)
+	}
+	full := buildOrFatal(t)
+	if len(bk.Entries()) != len(full.Entries()) {
+		t.Errorf("a nameless book has %d entries, the full one %d",
+			len(bk.Entries()), len(full.Entries()))
+	}
+	if got := bk.Name(0); got != "" {
+		t.Errorf("a nameless book returned Name(0) = %q, want \"\"", got)
+	}
+	// The move it plays must be identical: names are display, not selection.
+	for _, e := range full.Entries()[:1] {
+		g, _, ok1 := bk.Probe(e.Key, 0)
+		w, _, ok2 := full.Probe(e.Key, 0)
+		if ok1 != ok2 || g != w {
+			t.Errorf("nameless probe %v/%v differs from the full book's %v/%v", g, ok1, w, ok2)
+		}
+	}
+}
+
 // TestLinesLegal (deliverable a): every curated line is legal move-by-
 // move through refchess, and re-validating independently confirms it.
 func TestLinesLegal(t *testing.T) {
@@ -59,12 +118,11 @@ func TestBuildRefusesIllegal(t *testing.T) {
 	}
 }
 
-// TestBlobSize (deliverable d): the resident blob fits the 8 KB hole (and
-// comfortably under the 6 KB target).
+// TestBlobSize (deliverable d): the resident ENTRIES fit their aux window.
 func TestBlobSize(t *testing.T) {
 	bk := buildOrFatal(t)
 	if bk.Size() >= MaxSize {
-		t.Fatalf("blob %d >= %d (8 KB)", bk.Size(), MaxSize)
+		t.Fatalf("entries blob %d >= %d (aux $%04X-$1FFF)", bk.Size(), MaxSize, BaseAddr)
 	}
 	// The old 6 KB "margin target" dated from the 48-line depth-first book,
 	// which used 47% of the hole. Breadth is what the book is FOR, and the
@@ -72,13 +130,20 @@ func TestBlobSize(t *testing.T) {
 	// floor: leave at least 256 bytes so openings.txt stays editable without
 	// an immediate re-budget.
 	if free := MaxSize - bk.Size(); free < 256 {
-		t.Errorf("blob %d bytes leaves only %d free of %d; keep >= 256 B of headroom",
-			bk.Size(), free, MaxSize)
+		t.Errorf("entries blob %d bytes leaves only %d free of %d; keep >= 256 B of "+
+			"headroom", bk.Size(), free, MaxSize)
 	}
-	t.Logf("blob=%d bytes  entries=%d  free=%d", bk.Size(), len(bk.Entries()), MaxSize-bk.Size())
-	// The embedded (generated) blob must match a fresh build.
-	if got, want := len(DefaultBlob()), bk.Size(); got != want {
-		t.Errorf("embedded blob %d bytes != freshly built %d; run `go run ./cmd/genbook`", got, want)
+	t.Logf("entries=%d bytes  count=%d  free=%d  |  names=%d bytes  free=%d",
+		bk.Size(), len(bk.Entries()), MaxSize-bk.Size(),
+		bk.NamesSize(), NamesMaxSize-bk.NamesSize())
+	// The embedded (generated) pieces must match a fresh build.
+	if got, want := len(DefaultEntries()), bk.Size(); got != want {
+		t.Errorf("embedded entries blob %d bytes != freshly built %d; run "+
+			"`go run ./cmd/genbook`", got, want)
+	}
+	if got, want := len(DefaultNames()), bk.NamesSize(); got != want {
+		t.Errorf("embedded name table %d bytes != freshly built %d; run "+
+			"`go run ./cmd/genbook`", got, want)
 	}
 }
 

@@ -108,7 +108,9 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		bk, err := book.Load(blob)
+		// nil names: a named blob file is an ENTRIES blob, and the name text
+		// is logging-only -- nothing about move selection reads it.
+		bk, err := book.Load(blob, nil)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", path, err)
 			os.Exit(1)

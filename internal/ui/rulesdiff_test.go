@@ -797,7 +797,7 @@ func TestTakebackAcrossABookMove(t *testing.T) {
 	if testing.Short() {
 		t.Skip("boots with the resident book")
 	}
-	blob := book.DefaultBlob()
+	blob := book.DefaultEntries()
 	u, err := ui.Boot(root, blob)
 	if err != nil {
 		t.Fatalf("boot: %v", err)

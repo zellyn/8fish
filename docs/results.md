@@ -3,6 +3,119 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-01 — ★ the residual Sargon quirk class, ROOT-CAUSED: SARGON'S MOVE NUMBER IS NOT DECIMAL PAST 99
+
+Every standard-start game that reached move 100 was ending as a harness
+artifact scored as a draw. Reproduced live at the measurement budget, traced to
+the byte, fixed, and re-measured.
+
+**The mechanism, measured on the machine.** Sargon III renders its move-list
+number with a two-digit routine that adds `'0'` to each column and never
+carries out of the tens, so the tens column runs off the end of the digits:
+
+| move | 99 | 100 | 109 | 110 | 119 | 126 | 128 |
+|---|---|---|---|---|---|---|---|
+| shown | `99` | `:0` | `:9` | `;0` | `;9` | `<6` | `<8` |
+
+Found by diffing **all of main RAM** across consecutive moves: `$1388` is the
+only byte that increments by exactly one per full move AND equals the number on
+screen. Forcing it just under each boundary and playing on gives the table
+above directly (`TestMoveNumberRendering`).
+
+**Why that killed games.** Since 2026-07-26 the displayed move NUMBER — not the
+column text — is the driver's commit and move-accepted signal, because it is
+the only reading immune to the mid-search repaint. `strconv.Atoi(":0")` fails,
+so from move 100 the row vanished from the parsed list: `LastSargonEntry` and
+`LastOwnEntry` froze at 99, Sargon's replies were **on screen and invisible**
+however long the driver waited, every injected move looked unaccepted, and the
+game died on `no reply after CTRL-T` and was adjudicated a draw. Verbatim from
+the failing game's dump — Sargon's reply is right there:
+
+	      98  D6-D2        F3-G3
+	      99  C3-B2        C1-F1
+	      :0  B2-C3
+
+**★ The fix that removed one artifact class created this one.** `eb1e719` moved
+commit detection from the column TEXT to the move NUMBER. That was right — it
+removed the stale-token desyncs that cost 15 of 300 games — and it quietly made
+the driver depend on parsing a field that stops being decimal at move 100.
+Nothing tested past 99 because nothing had ever *looked* past 99: the old
+text-based driver did not care what the number said, which is also why the
+three games (across 600) that reached move 128 were ever observed. The 2026-07-29 audit named this
+class correctly ("games that pass move 99, where the move-number column
+overflows to `:0`") and it was never verified or fixed; it stood as the whole
+residual quirk count of that gauntlet (10/504 = 2.0%).
+
+**The measurement.** Same binary, same disk, same budget, standard start, books
+live on both sides; the arms differ only in the parse.
+
+| standard-start, B = 30M cyc/move | games | quirk-adjudications | games that crossed move 100 | what happened to them |
+|---|---|---|---|---|
+| **before** | 83 | **1 (1.2%)** | 1 | 1/1 died there |
+| **after** | 170 | **0 (0.0%)** | 12 | **12/12 finished by a rule** |
+
+**Read the third column, not the second.** 1-in-83 against 0-in-170 is by
+itself weak (Fisher p ~ 0.33) — the event is rare because only ~2% of games get
+that far. The decisive number is CONDITIONAL: reaching move 100 was a
+mechanically certain death (1/1 here, 10/10 in the 2026-07-29 gauntlet), and
+after the fix 12 games crossed it and **all 12** ended by a rule of chess —
+5 checkmates, 2 insufficient-material, 1 fifty-move, and 4 at the `move-cap`
+adjudication at Sargon's 127-move capacity (254 plies). One of them is 8fish
+losing a 251-ply game it would previously have been handed a draw in.
+
+The before arm's 1.2% is a FLOOR, not an estimate: it was stopped mid-flight to
+free cores, and the games in progress when a run is stopped are exactly the long
+ones. The complete-run figure to quote for the defect is the gauntlet's 2.0%.
+
+**★ And these artifacts were NOT conservative, which corrects 2026-07-26.** That
+entry argued the quirk draws "cost 8fish wins and cannot manufacture them", so
+the score was an under-estimate. Measured: of the 12 games that crossed move
+100, 8fish scored **1 win, 4 losses, 7 draws = 0.375**, not the 0.5 an
+adjudicated draw hands it. Games long enough to reach move 100 are games 8fish
+did NOT win, and forcing them to draws was generous to 8fish: at a 2%
+incidence that is +0.25% of score, about **+2 Elo**. Small, and in the opposite
+direction from the one that was claimed.
+
+Both arms: **0** `CrossCheckHistory` desyncs, **0** unreadable/illegal Sargon
+tokens, **0** Hard-Mode/LEVEL-9 mode warnings. The 2026-07-26 repaint class
+stays fixed; nothing else showed up.
+
+Neither arm's Elo is worth quoting at these sample sizes (before 64.5%, after
+66.5%); the point of the runs is the artifact count. Spend symmetry held
+throughout (mean per-game `spend_ratio` 0.96).
+
+**Gates.** `TestParseListNumber` and `TestParseMoveListPastNinetyNine` (fast,
+over rows captured verbatim from the live failure) and `TestMoveNumberRendering`
+/ `TestMoveNumberRenderingTensRollover` (`SARGON_SLOW`), which force Sargon's
+counter to 97 and 118 and require the driver to keep playing through 100 and
+120 with every reply legal on an independent referee. All four fail with the
+decode reverted, and the live pair fails **exactly as production did**, with
+`no reply after CTRL-T` and Sargon's move sitting on the `:0` row.
+
+**Two related instrument defects, found on the way and fixed:**
+
+- **`ErrListWrapped` would have replaced one artifact class with another.** It
+  fired the first time Sargon's newest move number went backwards near the
+  127-move capacity — but that is also exactly what the repaint's blank frame
+  looks like, and the window (`baseNo >= 126`) was unreachable only because the
+  driver froze at 100. It now requires the reading to REPEAT on the next poll
+  (polls are >= 500K cycles apart, past the ~167K repaint). Observation-based
+  on purpose: a "settle and re-read" would hand Sargon thinking cycles the
+  budget never granted it.
+- **Six exits from `playGame` returned a draw with NO `TERMINATION` line at
+  all** (bad FEN, machine construction, boot, InfiniteLevel, the Hard-Mode
+  assertion, setboard). Same shape as the 2026-07-31 `plies=-1` regex defect
+  one level further up: there the line existed and the regex missed it, here
+  there was no line to miss. Every exit now logs exactly one `TERMINATION`.
+
+**What the entry of 2026-07-26 got wrong, for the record.** Its guess at the
+17 quirks was "most plausibly a mis-scrape of one of Sargon's 2078 instant book
+replies", from the correlation with the book-heavy run. The correlation was
+real and the mechanism was not: it was the repaint, which fires on the FIRST
+search after Sargon leaves its book — which is why a book-heavy run showed it
+and the pool run did not. Diagnosed and fixed the same evening (`eb1e719`);
+this entry is the class that was left.
+
 ## 2026-08-01 — adversarial review of the board merge: a build rule that could ship a BROKEN DISK, and a gate that had gone quiet
 
 Two reviewers went at the chain-load branch before it merged, one on the

@@ -25,8 +25,15 @@ import (
 // BaseAddr; every field offset below is relative to the blob start, which
 // equals its resident address minus BaseAddr.
 const (
-	BaseAddr    = 0x2000 // resident base: hi-res page 1 hole ($2000-$3FFF, 8 KB)
-	MaxSize     = 8 * 1024
+	// BaseAddr is the blob's resident base: AUXILIARY RAM $0200. It used to
+	// be main $2000 -- the hi-res page 1 hole -- but that is the MAIN half of
+	// double hi-res page 1, which the board renderer needs, so the book moved
+	// to the aux hole below the DHGR aux half. asm/m8.s's copier does the
+	// move at boot; asm/book.s reads the blob through a Language Card
+	// primitive because RAMRD would switch instruction fetches too.
+	BaseAddr = 0x0200
+	// MaxSize is aux $0200-$1FFF: everything below the DHGR aux half.
+	MaxSize     = 0x2000 - BaseAddr
 	Magic0      = 'B'
 	Magic1      = 'K'
 	HeaderSize  = 8

@@ -115,6 +115,14 @@ func BuildStandalone(root, name string) error {
 	return BuildStandaloneAs(root, name, name)
 }
 
+// SDChain is the ca65 define that turns asm/m8.s's copier into the Standard
+// Delivery CHAIN LOADER: the code that re-enters the surviving boot loader
+// with a fresh page table to read stage 2. Only the disk build may have it —
+// a BRUN from BASIC arrives with none of the loader state it depends on — so
+// it is named here rather than spelled out at each of its call sites, which
+// is how the Makefile and the tests came to disagree in the first place.
+const SDChain = "SDCHAIN"
+
 // BuildStandaloneAs is BuildStandalone with the output name decoupled from
 // the source name, plus optional ca65 -D defines: it assembles
 // asm/<src>.s with asm/<out>.cfg into asm/<out>.bin / asm/<out>.lbl. The

@@ -92,8 +92,11 @@ func buildArtefacts(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	for _, out := range []string{"m8", "m8sd"} {
-		if err := asmbuild.BuildStandaloneAs(layoutRoot, "m8", out); err != nil {
+	for _, v := range []struct {
+		out     string
+		defines []string
+	}{{"m8", nil}, {"m8sd", []string{asmbuild.SDChain}}} {
+		if err := asmbuild.BuildStandaloneAs(layoutRoot, "m8", v.out, v.defines...); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -129,6 +132,7 @@ func TestMainMemoryLayout(t *testing.T) {
 
 	engine := fileLen(t, "asm/engine.bin")
 	book := fileLen(t, "internal/book/bookblob.bin")
+	tileblob := fileLen(t, "internal/tiles/tileblob.bin")
 	m8 := fileLen(t, "asm/m8.bin")
 	bloadBoot := fileLen(t, "asm/m8boot.bin")
 	sdBoot := fileLen(t, "asm/m8sdboot.bin")
@@ -140,11 +144,24 @@ func TestMainMemoryLayout(t *testing.T) {
 		t.Fatal("PIECESQ / MOVESTACK missing from defs.inc")
 	}
 
-	t.Log("STANDARD DELIVERY layout (asm/m8sd.cfg + internal/delivery):")
-	disjoint(t, "SD layout", []region{
-		{"copier (m8sdboot.bin)", CopierOrg, CopierOrg + sdBoot},
+	// STAGE 1 is what the boot sector's own page table delivers. The book is
+	// NOT in it any more: it arrives in stage 2, which is why the payload's
+	// staging room stopped being a margin worth defending.
+	t.Log("STANDARD DELIVERY stage 1 (asm/m8sd.cfg + internal/delivery):")
+	disjoint(t, "SD stage 1", []region{
+		{"copier + chain loader (m8sdboot.bin)", CopierOrg, CopierOrg + sdBoot},
 		{"staged UI payload (m8.bin)", PayloadOrg, PayloadOrg + m8},
-		{"resident book", BookOrg, BookOrg + book},
+		{"engine image", EngineOrg, EngineOrg + engine},
+	})
+	// STAGE 2 lands after the copier has lifted the payload to $E000, so it
+	// reuses the payload's staging area. Both blobs are then copied on -- the
+	// tiles to Language Card bank 1, the book to aux $0200 -- and main
+	// $2000-$3FFF is left free for the DHGR main half.
+	t.Log("STANDARD DELIVERY stage 2 (landing zones in MAIN, then copied on):")
+	disjoint(t, "SD stage 2", []region{
+		{"copier + chain loader (m8sdboot.bin)", CopierOrg, CopierOrg + sdBoot},
+		{"staged tile blob", TilesOrg, TilesOrg + tileblob},
+		{"staged opening book", BookOrg, BookOrg + book},
 		{"engine image", EngineOrg, EngineOrg + engine},
 	})
 
@@ -153,16 +170,31 @@ func TestMainMemoryLayout(t *testing.T) {
 	disjoint(t, "BLOAD layout", []region{
 		{"copier (m8boot.bin)", 0x0800, 0x0800 + bloadBoot},
 		{"staged UI payload (m8.bin)", bloadBase, bloadBase + m8},
-		{"resident book", BookOrg, BookOrg + book},
+		{"staged opening book", BookOrg, BookOrg + book},
 		{"engine image", EngineOrg, EngineOrg + engine},
 	})
 
-	// The book must fit its hole. Nothing else enforces this: the engine
-	// reads BOOK_COUNT out of the blob at run time, so an oversized blob
-	// would simply be written over the engine's first bytes.
+	// The book must fit its landing zone at $2000, and -- the constraint that
+	// actually binds now -- its RESIDENT home in aux $0200, below the DHGR aux
+	// half at $2000. Nothing else enforces either: the engine reads BOOK_COUNT
+	// out of the blob at run time, so an oversized blob is simply written over
+	// whatever follows it.
 	if BookOrg+book > EngineOrg {
 		t.Errorf("book blob is %d B at $%04X: it runs %d B into the engine at $%04X",
 			book, BookOrg, BookOrg+book-EngineOrg, EngineOrg)
+	}
+	if BookAux+book > 0x2000 {
+		t.Errorf("book blob is %d B: at its resident aux base $%04X it runs %d B into "+
+			"the DHGR aux half at $2000", book, BookAux, BookAux+book-0x2000)
+	}
+	t.Logf("resident book: aux $%04X-$%04X, %d B of the %d B below the DHGR aux half "+
+		"(%d B spare)", BookAux, BookAux+book-1, book, 0x2000-BookAux, 0x2000-BookAux-book)
+	// The tile blob's resident home is Language Card bank 1, above the
+	// engine's LCCODE, and it must not run past $DFFF into the unbanked
+	// $E000-$FFFF where the UI lives.
+	if TilesLC+tileblob > 0xE000 {
+		t.Errorf("tile blob is %d B at LC $%04X: it runs %d B past $DFFF into the UI",
+			tileblob, TilesLC, TilesLC+tileblob-0xE000)
 	}
 	// asm/book.inc is generated alongside the blob; if only one is
 	// regenerated the asm probe walks the wrong shape.
@@ -170,8 +202,9 @@ func TestMainMemoryLayout(t *testing.T) {
 		t.Errorf("asm/book.inc says BOOK_BLOB_SIZE = %d but internal/book/bookblob.bin is %d B: "+
 			"re-run `go run ./cmd/genbook`", got, want)
 	}
-	if got := bookinc["BOOK_BASE"]; got != BookOrg {
-		t.Errorf("asm/book.inc BOOK_BASE = $%04X, delivery.BookOrg = $%04X", got, BookOrg)
+	if got := bookinc["BOOK_BASE"]; got != BookAux {
+		t.Errorf("asm/book.inc BOOK_BASE = $%04X, delivery.BookAux = $%04X: the probe and "+
+			"the copier disagree about where the resident book lives", got, BookAux)
 	}
 
 	// The engine image must stop below the harness trap page: $BFF0-$BFFF is
@@ -194,9 +227,12 @@ func TestMainMemoryLayout(t *testing.T) {
 			"asm/m8.s, asm/m8sd.cfg and internal/delivery all name $0800/$0E00)",
 			perPlyLo, perPlyHi)
 	}
-	if got := defs["MOVESTACKTOP"]; got != BookOrg {
-		t.Errorf("MOVESTACKTOP $%04X != the book base $%04X: the generator's overflow "+
-			"trap and the book no longer meet at the same address", got, BookOrg)
+	// MOVESTACKTOP is still $2000, but for a NEW reason: main $2000-$3FFF is
+	// now the DHGR main half rather than the book, and a move stack that ran
+	// into it would paint its overflow onto the board.
+	if got := defs["MOVESTACKTOP"]; got != 0x2000 {
+		t.Errorf("MOVESTACKTOP $%04X != $2000: the generator's overflow trap and the "+
+			"DHGR main half no longer meet at the same address", got)
 	}
 }
 

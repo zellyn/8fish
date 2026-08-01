@@ -66,22 +66,24 @@ asm/uitest.bin: asm/uitest.s asm/ui.s asm/defs.inc asm/uitest.cfg
 asm/engsyms.inc: asm/engine.bin internal/engsyms/engsyms.go cmd/genengsyms/main.go
 	go run ./cmd/genengsyms
 
-M8_SRCS = asm/m8.s asm/ui.s asm/entropy.inc asm/defs.inc asm/book.inc \
-          asm/engsyms.inc asm/m8.cfg
+M8_SRCS = asm/m8.s asm/ui.s asm/dhgr.s asm/entropy.inc asm/defs.inc asm/book.inc \
+          asm/tiledefs.inc asm/tiles.inc asm/engsyms.inc asm/m8.cfg
 
 asm/m8.bin: $(M8_SRCS)
 	cd asm && $(CA65) -g m8.s -o m8.o
 	cd asm && $(LD65) -C m8.cfg m8.o -o m8.bin -Ln m8.lbl
 
-# The STANDARD DELIVERY layout of the same object file: the copier at $0C00
-# and the payload staged at $0D00, so the one contiguous image the boot loader
-# delivers ($0C00 to the end of engine.bin) fits diskii mksd's 44 KB cap. The
-# payload is byte-identical to m8.bin -- nothing in it depends on where it was
-# staged -- and internal/ui's TestDiskLayout asserts that.
+# The STANDARD DELIVERY layout of the same object file: the copier at $0D00
+# and the payload staged at $0E00. -D SDCHAIN adds the CHAIN LOADER to the
+# copier -- the code that re-enters the surviving boot loader with a fresh page
+# table to read stage 2 -- which only the disk build can have, because only it
+# is reached with the loader's sequential read state live. The payload is
+# byte-identical to m8.bin (the conditional is confined to the BOOT segment),
+# and internal/ui's TestDiskLayout asserts that.
 # Its own object file, not m8.o: two links of one source must not share
 # intermediates (see internal/asmbuild's withBuildLock on why that matters).
 asm/m8sdboot.bin: $(M8_SRCS) asm/m8sd.cfg
-	cd asm && $(CA65) -g m8.s -o m8sd.o
+	cd asm && $(CA65) -g -D SDCHAIN m8.s -o m8sd.o
 	cd asm && $(LD65) -C m8sd.cfg m8sd.o -o m8sd.bin -Ln m8sd.lbl
 
 # The bootable disk. `diskii mksd` (bit.ly/a2diskii) writes peterferrie's
@@ -90,7 +92,7 @@ asm/m8sdboot.bin: $(M8_SRCS) asm/m8sd.cfg
 dsk: asm/8fish.dsk
 
 asm/8fish.dsk: asm/m8sdboot.bin asm/m8.bin asm/engine.bin internal/book/bookblob.bin \
-               cmd/mkdsk/main.go internal/delivery/delivery.go
+               internal/tiles/tileblob.bin cmd/mkdsk/main.go internal/delivery/delivery.go
 	@command -v $(DISKII) >/dev/null 2>&1 || { \
 	  echo "$(DISKII) not found on PATH: it builds the Standard Delivery boot disk." >&2; \
 	  echo "  go install github.com/zellyn/diskii@latest" >&2; \
@@ -103,11 +105,13 @@ asm/tables.s: cmd/gentables/main.go cmd/gentables/pesto.go
 # The board tiles are sliced from the hand-drawn DazzleDraw artwork, which
 # is the single source of truth. ONE gentiles run writes both outputs --
 # internal/tiles/tileblob.bin (embedded by package tiles, and committed)
-# and asm/tiles.inc -- so only the blob carries the rule; asm/tiles.inc is
-# a committed generated file exactly like asm/book.inc. The generator
+# and asm/tiledefs.inc + asm/tiles.inc -- so only the blob carries the
+# rule; the .inc files are committed generated files exactly like
+# asm/book.inc. The generator
 # asserts every geometric assumption against the actual pixels, so a
 # re-drawn board fails HERE rather than rendering garbage on the IIe.
-internal/tiles/tileblob.bin: assets/chess-dazzledraw-save.bin cmd/gentiles/main.go internal/tiles/tiles.go
+internal/tiles/tileblob.bin asm/tiledefs.inc asm/tiles.inc &: \
+		assets/chess-dazzledraw-save.bin cmd/gentiles/main.go internal/tiles/tiles.go
 	go run ./cmd/gentiles
 
 asm/perft.bin: asm/perft.s asm/board.s asm/movegen.s asm/defs.inc asm/tables.s asm/perft.cfg

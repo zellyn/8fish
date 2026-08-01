@@ -30,7 +30,36 @@
 
         .include "defs.inc"
         .include "book.inc"
+        .include "tiledefs.inc"
         .include "engsyms.inc"
+
+; ---------------------------------------------------------------------------
+; LANGUAGE CARD BANK 1, above the engine's 65-byte LCCODE at $D000. Until now
+; the whole of $D041-$DFFF was unused; the DHGR board renderer's read-only
+; artwork and its two init-built tables live there, which is why the renderer
+; costs the UI payload only its 347 bytes of code and 96 bytes of index table.
+;
+; Bank 1, not bank 2, ON PURPOSE: the engine's aux primitives are in bank 1 at
+; $D000, the renderer would otherwise have to switch banks around every
+; repaint, and a bank switch that gets left in the wrong state hides LCCODE
+; from the next transposition-table probe. Bank 2 stays entirely free.
+;
+;   $D000-$D040   LCCODE      the engine's aux read primitives (65 B)
+;   $D300-$DA1F   DHTILES     the 24 tiles, 1,824 B, delivered by stage 2
+;   $DA20-$DBE7   DHROWL/H    152 scanline base addresses, built by dhinit
+;   $DBE8-$DC7F   dhblnk      the two synthesised empty-square tiles
+;   $DC80-$DFFF   free        896 B
+; ---------------------------------------------------------------------------
+DHTILES   = $D300
+
+; BOOKSTAGE is where the opening book LANDS -- from stage 2 of the chain load,
+; or from a BLOAD -- before m8bookaux lifts it to its resident home in aux at
+; BOOK_BASE. It is main hi-res page 1, i.e. the DHGR MAIN half, which is
+; exactly the 8 KB the book had to stop occupying.
+BOOKSTAGE = $2000
+DHROWL    = DHTILES + TILE_BLOB_SIZE            ; $DA20
+DHROWH    = DHROWL + 152
+dhblnk    = DHROWH + 152
 
 ; Where the payload is staged before the copier runs. It is a LINKER symbol,
 ; not a constant here, because it is a fact about the DELIVERY LAYOUT and the
@@ -55,13 +84,49 @@
 NLEVELS = 9
 
 ; ---------------------------------------------------------------------------
-; The $0800 copier. This is the only code that ever runs from MAIN.
+; The copier, and (on the disk build) the CHAIN LOADER. This is the only code
+; that ever runs from MAIN.
+;
+; It does four things, in an order forced by what is alive when:
+;
+;   1. lift the UI payload from its staging address to $E000, and install the
+;      engine's aux-bank primitives at $D000. Both must happen FIRST, because
+;      the payload's staging area is where stage 2 lands.
+;   2. (disk only) re-enter the surviving Standard Delivery loader with a fresh
+;      page table to read STAGE 2: the DHGR tile blob and the opening book.
+;   3. copy the tile blob into Language Card bank 1 at DHTILES.
+;   4. copy the opening book from main $2000 to AUX $0200, vacating main
+;      $2000-$3FFF — which is the DHGR main half, and therefore not somewhere
+;      the book can stay.
+;
+; Step 4 is UNCONDITIONAL: the BLOAD/harness path has the book at main $2000
+; too (the loader or the test poked it there), and the engine's probe reads
+; the aux copy in both. Step 2 is `-D SDCHAIN`, i.e. the disk link only,
+; because it depends on boot-loader state that a BRUN from BASIC does not have.
+;
+; ★ CHAIN-LOAD PRECONDITIONS. On entry from the boot loader's terminator the
+; following are live, and steps 1's code is written not to disturb any of them:
+;
+;   Y      the loader's NEXT sector index — the value its `$0801: TAY` produced
+;   $2B    slot<<4 (X is a copy; we reload from $2B rather than preserve it)
+;   $26    $00, the read buffer's low byte
+;   $41    the track the head is on
+;   $0800  $01, the boot ROM's "one sector per call" count
+;
+; ZPTR ($E1) and TTPTR ($F0) are the only zero page this code writes, and both
+; are far above $41, so the copy in step 1 cannot corrupt the loader's state.
+; Nothing here moves the drive head, and the motor is still on.
 ; ---------------------------------------------------------------------------
         .segment "BOOT"
 
         .import __UICODE_SIZE__
 
-boot:   ldx #$FF
+boot:
+.ifdef SDCHAIN
+        sty sdsect              ; the loader's next sector. FIRST: everything
+                                ;  else is free to clobber Y.
+.endif
+        ldx #$FF
         txs
         lda $C08B               ; LC bank 1, read RAM + write RAM — the same
         lda $C08B               ;  double read engine.s's entry uses
@@ -74,15 +139,7 @@ boot:   ldx #$FF
         lda #>$E000
         sta TTPTR+1
         ldx #>(__UICODE_SIZE__ + 255)
-        ldy #0
-btl:    lda (ZPTR),y
-        sta (TTPTR),y
-        iny
-        bne btl
-        inc ZPTR+1
-        inc TTPTR+1
-        dex
-        bne btl
+        jsr copyp
         ; Install the engine's LC-resident aux-bank primitives at $D000. The
         ; engine's own $4000 entry does this, and the UI never uses that
         ; entry — it drives `iterate` directly — so the UI must do it here or
@@ -92,9 +149,104 @@ btlc:   lda ENG_LCCODE_LOAD,y
         sta ENG_LCCODE_RUN,y
         dey
         bpl btlc
+
+.ifdef SDCHAIN
+        ; ---- STAGE 2: re-enter the loader with a fresh page table ----------
+        ; ROM must be readable again: the loader's track step ends in
+        ; `jmp $FCA8` (the monitor's WAIT). We do not need to WRITE the
+        ; Language Card until stage 2 has landed, so read-ROM/write-protect
+        ; is the state to be in — and it is one read, not two.
+        lda $C08A
+        ldx #SD2TABLEN          ; write the table at $084F upward
+sdt:    lda sd2tab-1,x
+        sta $084E,x
+        dex
+        bne sdt
+        lda #$4E                ; re-arm the pointer the loader self-modifies:
+        sta $0806               ;  its INC makes the first read $084F
+        lda #<sd2done           ; and repoint the terminator's JMP at $084C
+        sta $084D
+        lda #>sd2done
+        sta $084E
+        ldx $2B                 ; slot<<4, exactly as the boot ROM left it
+sdsecl: ldy #$00                ; patched at entry: the next sector
+        jmp $0802               ; ...and the load resumes, mid-track.
+sdsect  = sdsecl+1
+
+sd2done:
+        ; ---- the tile blob: main SD2TILES -> Language Card bank 1 ----------
+        lda $C089               ; read ROM, WRITE LC RAM, bank 1 (double read)
+        lda $C089
+        lda #<SD2TILES
+        sta ZPTR
+        lda #>SD2TILES
+        sta ZPTR+1
+        lda #<DHTILES
+        sta TTPTR
+        lda #>DHTILES
+        sta TTPTR+1
+        ldx #SD2TILEN
+        jsr copyp
+        lda $C08B               ; back to LC RAM read + write
+        lda $C08B
+.endif
+
         jmp $E000               ; the payload's first three bytes are a jump
                                 ;  to m8main, so the copier is byte-identical
                                 ;  for every build variant of the UI
+
+; THE BOOK'S MOVE TO AUX IS NOT DONE HERE, and the reason is a real machine.
+; It used to be: `sta RAMWRTON` and copy 29 pages from main $2000 to "aux"
+; $0200. On an Apple ][+ $C005 is not a soft switch at all, so those 29 pages
+; land in MAIN $0200-$1F3F -- straight over the BLOAD copier running at $0800.
+; The copier overwrote itself mid-loop and the machine check that exists to
+; print NEEDS A 128K APPLE IIE never ran; internal/ui's
+; TestRefusesMachinesWithoutAuxRAM caught it as a screen full of garbage.
+;
+; So the copy is m8bookaux, called from m8main AFTER m8machine has PROVED the
+; aux switches are real. Nothing may write 7 KB through RAMWRT before that
+; proof, because on the machines the proof exists to reject, RAMWRT-on writes
+; are ordinary main-memory writes over whatever is there.
+
+; copyp: copy X pages from (ZPTR) to (TTPTR). Clobbers A,X,Y and both
+; pointers; touches no other zero page (see the chain-load preconditions).
+copyp:  ldy #0
+cpl:    lda (ZPTR),y
+        sta (TTPTR),y
+        iny
+        bne cpl
+        inc ZPTR+1
+        inc TTPTR+1
+        dex
+        bne copyp
+        rts
+
+; Where stage 2 lands in MAIN, and how many pages of it there are. Both blobs
+; are staged in main and copied on rather than read straight to their homes,
+; and that is the boot ROM's doing, not caution: its denibblise pass READS THE
+; BUFFER BACK (`lda ($26),y` at $C6D9). A Language Card destination reads back
+; as ROM while ROM is banked in for $FCA8, and an aux destination reads back as
+; main with RAMRD off; either way the second pass would write garbage over the
+; first. See internal/delivery's package doc.
+SD2TILES  = $0E00               ; the UI payload's staging area, now dead
+SD2TILEN  = (TILE_BLOB_SIZE + 255) / 256
+SD2BOOK   = BOOKSTAGE           ; main hi-res page 1: the DHGR main half
+SD2BOOKN  = (BOOK_BLOB_SIZE + 255) / 256
+
+.ifdef SDCHAIN
+; Stage 2's page table, generated from the two blob sizes so that it cannot
+; drift from what internal/delivery writes on the disk (TestStage2PageTable
+; reads these very bytes back out of m8sdboot.bin and compares).
+sd2tab:
+        .repeat SD2TILEN, i
+        .byte >SD2TILES + i
+        .endrepeat
+        .repeat SD2BOOKN, i
+        .byte >SD2BOOK + i
+        .endrepeat
+        .byte $C0
+SD2TABLEN = * - sd2tab
+.endif
 
 ; ---------------------------------------------------------------------------
         .segment "UICODE"
@@ -187,6 +339,7 @@ m8main:
                                 ;  latched before the UI ever polls, and
                                 ;  would arrive as the first character typed
         jsr m8machine           ; refuse to run where the engine cannot
+        jsr m8bookaux           ; ...and only then move the book into aux
         ; CTRL-RESET. On a IIe (unlike a ][+ with a Language Card) a hardware
         ; reset DISABLES the built-in language card — that is exactly why
         ; Apple Pascal could use Ctrl-Reset as a warm start — so $FFFC is
@@ -276,6 +429,46 @@ mengine:
 m8irq:  rti
 
 ; ---------------------------------------------------------------------------
+; m8bookaux: lift the resident opening book from main $2000 to AUX $0200,
+; vacating main $2000-$3FFF -- the DHGR MAIN half -- for the board renderer.
+;
+; The blob got to main $2000 from the disk (stage 2 of the chain load) or from
+; a BLOAD; either way it is there and dead the moment this returns. Stores
+; follow RAMWRT and reads follow RAMRD, so ONE RAMWRT-on window copies main to
+; aux with no switching inside the loop. This code runs from the Language Card
+; at $E000, which neither switch touches.
+;
+; CALLED ONLY AFTER m8machine. See the note in the copier: on a machine whose
+; aux switches are not switches, this loop is a 7 KB write over main $0200.
+;
+; Byte count: BOOK_BLOB_SIZE rounded up to whole pages. The overrun is at most
+; 255 bytes past the blob and lands at aux $1EEF-$1FFF, still below the DHGR
+; aux half at $2000 (asserted by internal/delivery's TestMainMemoryLayout).
+; ---------------------------------------------------------------------------
+m8bookaux:
+        lda #<BOOKSTAGE
+        sta ZPTR
+        lda #>BOOKSTAGE
+        sta ZPTR+1
+        lda #<BOOK_BASE
+        sta TTPTR
+        lda #>BOOK_BASE
+        sta TTPTR+1
+        ldx #(BOOK_BLOB_SIZE + 255) / 256
+        sta RAMWRTON
+        ldy #0
+m8bal:  lda (ZPTR),y
+        sta (TTPTR),y
+        iny
+        bne m8bal
+        inc ZPTR+1
+        inc TTPTR+1
+        dex
+        bne m8bal
+        sta RAMWRTOFF
+        rts
+
+; ---------------------------------------------------------------------------
 ; m8machine: this program needs a 128K Apple IIe. Prove it, or refuse.
 ;
 ; The transposition table lives in AUXILIARY RAM at $0200-$81FF, and the two
@@ -297,29 +490,36 @@ m8irq:  rti
 ; no-op, so the $5A landed in main) and fails the second; a 64K IIe fails
 ; the first, because a floating read is not $5A.
 ;
-; $0300 is CEILMAX0 — engine scratch that uilimits rewrites before every
-; timed search — so the probe costs no storage at all.
+; WHERE IT PROBES, and why it moved. It used to use $0300 (CEILMAX0, engine
+; scratch) on the reasoning that aux $0300 was "inside the transposition
+; table" and would be rewritten anyway. Both halves of that stopped being
+; true: the TT starts at aux $4000 now, and aux $0300 is INSIDE THE RESIDENT
+; OPENING BOOK, which the copier has already put there when m8main runs. The
+; probe wrote $5A and then $00 over one of its bytes; internal/ui's
+; TestDiskBoots caught it as a book that did not read back.
+;
+; $3F00 is scratch in BOTH banks by construction: main $3F00 and aux $3F00 are
+; both inside DHGR page 1, which dhclear paints end to end before anything is
+; displayed, and $3F00 is above the book's stage-2 landing zone in main
+; ($2000-$3CEE) so probing it cannot damage the blob before m8bookaux moves
+; it. That pair of properties is what $0300 turned out not to have.
+DHPROBE     = $3F00
 ; ---------------------------------------------------------------------------
 m8machine:
         sta RAMRDOFF            ; start from MAIN whatever the firmware that
         sta RAMWRTOFF           ;  ran before us left the switches at
         lda #$A5
-        sta $0300               ; MAIN
+        sta DHPROBE             ; MAIN
         sta RAMRDON
         sta RAMWRTON
         lda #$5A
-        sta $0300               ; AUX
-        lda $0300               ; read AUX back before switching away
-        ldy #0                  ; ...and put the slot back: aux $0300 is
-        sty $0300               ;  INSIDE the transposition table ($0200-
-                                ;  $81FF), and internal/ui TestDiskPlays
-                                ;  requires the TT to be untouched until
-                                ;  something actually searches
+        sta DHPROBE             ; AUX
+        lda DHPROBE             ; read AUX back before switching away
         sta RAMRDOFF            ; (the switches ignore the value stored)
         sta RAMWRTOFF
         cmp #$5A
         bne m8nope              ; no aux RAM behind the switches
-        lda $0300
+        lda DHPROBE
         cmp #$A5
         beq m8ok                ; main survived: the switches are real
 m8nope: jsr uicls
@@ -1703,6 +1903,14 @@ uiclrmsg:
 ; name table is a run of length-prefixed strings at the end of the resident
 ; blob; NAMEID indexes it by position, so the walk is the decode.
 uibookname:
+        ; The blob lives in AUX now, so this reads with RAMRD on. That is
+        ; safe HERE and nowhere else in the project: this code runs from the
+        ; Language Card at $E000, which RAMRD does not switch, and its zero
+        ; page follows ALTZP, not RAMRD. Every store below goes to UIBOOKB /
+        ; UITMPB, also in the Language Card, so RAMWRT never enters into it.
+        ; asm/book.s cannot do this -- it is fetched from main $4000 -- which
+        ; is exactly why the probe pays for a $D000 primitive and this does not.
+        sta RAMRDON
         lda BOOK_MAGIC
         cmp #'B'
         bne ubnnone
@@ -1749,10 +1957,12 @@ ubncl:  iny
         cpx #39
         bcc ubncl
 ubnterm:
+        sta RAMRDOFF
         lda #0
         sta UIBOOKB,x
         rts
 ubnnone:
+        sta RAMRDOFF
         lda #0
         sta UIBOOKB
         rts

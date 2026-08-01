@@ -5,7 +5,7 @@
 ; sorted entry array on the 4-byte key, weighted-pick among equal-key
 ; entries, then NAMEID -> current-opening byte.
 
-BOOK_BASE      = $2000   ; resident base address
+BOOK_BASE      = $0200   ; resident base address
 BOOK_MAGIC     = BOOK_BASE+0   ; 2 bytes 'B','K'
 BOOK_COUNT     = BOOK_BASE+2   ; word: entry count (633)
 BOOK_NAMEOFF   = BOOK_BASE+4   ; word: base-relative name-table offset

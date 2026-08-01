@@ -1,94 +1,108 @@
 package delivery
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
 
-// TestBaseTradeoff re-derives the staging-base decision table from the REAL
-// file sizes rather than restating it. Both margins move 256 bytes in opposite
-// directions per page, $0C00 is the lowest base that fits, and $0F00 already
-// overruns the book.
-//
-// The table describes the SIMPLE SINGLE-SHOT layout only. When it runs out,
-// the answer is a different loader (chain-load, or ProRWTS2), not a smaller
-// program — it is our disk and it can do whatever we want. What this test
-// protects is that, for as long as the simple path is the one in use, the base
-// is the best available choice rather than a historical one.
-func TestBaseTradeoff(t *testing.T) {
-	var firstFit, lastRoom int
-	t.Logf("%-6s %8s %9s %15s", "base", "image", "SD spare", "UI growth room")
-	for base := 0x0800; base <= 0x1000; base += 0x100 {
-		pieces, err := LoadAt("../..", base)
-		if err != nil {
-			t.Skipf("SKIP: %v", err)
-		}
-		_, l, err := Image(pieces)
-		if err != nil {
-			// Past the point where the payload runs into the book, the
-			// layout is not merely tight, it is invalid.
-			t.Logf("$%04X  %s", base, err)
-			continue
-		}
-		t.Logf("$%04X  %8d %9d %15d", base, l.ImageBytes, l.SDSpare, l.UIRoom)
-		if l.SDSpare >= 0 && firstFit == 0 {
-			firstFit = base
-		}
-		if l.UIRoom >= 0 {
-			lastRoom = base
-		}
+// TestStageCeilingIsTheRealCeiling. `diskii mksd`'s 45,056-byte limit is not
+// an arbitrary tool policy: it is 176 * 256, one Standard Delivery page table
+// filled to its last usable byte. Assert the two agree, so that MaxImage can
+// never be "fixed" by editing a constant.
+func TestStageCeilingIsTheRealCeiling(t *testing.T) {
+	// $084F..$08FF is 177 bytes; one of them must be the $C0 terminator.
+	if got := SectorBytes - bootTableOff - 1; got != MaxStageSectors {
+		t.Errorf("the page table at $%04X-$08FF holds %d entries plus a terminator, "+
+			"but MaxStageSectors is %d", 0x0800+bootTableOff, got, MaxStageSectors)
 	}
-	if firstFit != Base {
-		t.Errorf("the lowest base that fits `diskii mksd` is $%04X, but Base is $%04X. "+
-			"Base should be the lowest one that fits: every page higher costs the UI "+
-			"256 bytes of room to grow.", firstFit, Base)
-	}
-	if lastRoom < Base {
-		t.Errorf("Base $%04X already overruns the book at $%04X", Base, BookOrg)
+	if MaxImage != MaxStageSectors*SectorBytes {
+		t.Errorf("MaxImage %d != %d sectors * %d B", MaxImage, MaxStageSectors, SectorBytes)
 	}
 }
 
-// TestMarginsCanFail is the gate on the gate. A ledger that cannot go negative
-// would pass forever and warn about nothing, so both failure modes are
-// exercised with synthetic pieces.
-func TestMarginsCanFail(t *testing.T) {
-	// MARGIN 1: an engine that grows past the cap.
-	big := []Piece{
-		{Path: "copier", Org: Base, Data: make([]byte, 57)},
-		{Path: "payload", Org: Base + 256, Data: make([]byte, 4222), Staged: true},
-		{Path: "book", Org: BookOrg, Data: make([]byte, 7407)},
-		{Path: "engine", Org: EngineOrg, Data: make([]byte, MaxImage)},
+// TestOverfullStageSaysSplitIt is the gate on the gate: a stage that outgrows
+// one page table must fail, and must say what to do about it.
+func TestOverfullStageSaysSplitIt(t *testing.T) {
+	s := Stage{Name: "stage 1", Spans: []Span{
+		{Org: 0x0D00, Data: make([]byte, (MaxStageSectors+1)*SectorBytes)},
+	}}
+	err := s.Check()
+	if err == nil {
+		t.Fatalf("a %d-sector stage passed Check", s.Sectors())
 	}
-	_, l, err := Image(big)
+	if !strings.Contains(err.Error(), "re-entered with a fresh table") {
+		t.Errorf("the over-ceiling message does not point at the chain load: %v", err)
+	}
+	// One sector fewer is exactly the ceiling, and must pass.
+	s.Spans[0].Data = s.Spans[0].Data[:MaxStageSectors*SectorBytes]
+	if err := s.Check(); err != nil {
+		t.Errorf("a full-but-legal %d-sector stage failed Check: %v", s.Sectors(), err)
+	}
+}
+
+// TestSpansScatterWithNoWastedSectors is the whole reason the chain load is
+// affordable. The page table is a LIST OF PAGES, so a stage whose pieces have
+// a hole between them costs nothing for the hole: two spans, no gap sectors,
+// and a page table that jumps.
+func TestSpansScatterWithNoWastedSectors(t *testing.T) {
+	spans, err := SpansOf([]Piece{
+		{Path: "low", Org: 0x0D00, Data: make([]byte, 0x300)},
+		{Path: "high", Org: 0x4000, Data: make([]byte, 0x200)},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l.SDSpare >= 0 {
-		t.Errorf("a %d-byte image reports SD spare %d, want negative", l.ImageBytes, l.SDSpare)
+	st := Stage{Name: "t", Spans: spans}
+	if got := st.Sectors(); got != 5 {
+		t.Errorf("two spans of 3 and 2 pages occupy %d sectors, want 5 (a contiguous "+
+			"image would have cost %d)", got, (0x4200-0x0D00)/SectorBytes)
 	}
-	if _, err := Build(t.TempDir(), t.TempDir()+"/x.img", t.TempDir()+"/x.dsk"); err == nil {
-		t.Error("Build with no pieces on disk should fail")
+	want := []byte{0x0D, 0x0E, 0x0F, 0x40, 0x41, tableTerm}
+	if got := st.PageTable(); !bytes.Equal(got, want) {
+		t.Errorf("page table = % 02X, want % 02X", got, want)
 	}
+	if err := st.Check(); err != nil {
+		t.Error(err)
+	}
+}
 
-	// MARGIN 2: a UI payload that grows into the book. With the book present
-	// the layout is outright invalid...
-	fat := []Piece{
-		{Path: "copier", Org: Base, Data: make([]byte, 57)},
-		{Path: "payload", Org: Base + 256, Data: make([]byte, BookOrg-Base-256+1), Staged: true},
-		{Path: "book", Org: BookOrg, Data: make([]byte, 7407)},
-	}
-	if _, _, err := Image(fat); err == nil {
-		t.Error("a payload that runs into the book should not lay out at all")
-	} else if !strings.Contains(err.Error(), "overlaps") {
-		t.Errorf("unexpected error: %v", err)
-	}
-
-	// ...and the ledger reports the same overrun as a negative margin.
-	fat[1].Data = make([]byte, BookOrg-Base-256+100)
-	if _, l, err := Image(fat[:2]); err != nil {
+// TestAbuttingPiecesMerge: the copier and the payload it stages are adjacent,
+// so they are one span and one run of table entries, not two.
+func TestAbuttingPiecesMerge(t *testing.T) {
+	spans, err := SpansOf([]Piece{
+		{Path: "copier", Org: CopierOrg, Data: make([]byte, SectorBytes)},
+		{Path: "payload", Org: PayloadOrg, Data: make([]byte, 300)},
+	})
+	if err != nil {
 		t.Fatal(err)
-	} else if l.UIRoom != -100 {
-		t.Errorf("UI growth room = %d, want -100", l.UIRoom)
+	}
+	if len(spans) != 1 || spans[0].Org != CopierOrg || spans[0].Sectors() != 3 {
+		t.Fatalf("got %d spans (%+v), want one 3-sector span at $%04X",
+			len(spans), spans, CopierOrg)
+	}
+}
+
+// TestOverlapAndAlignmentAreRefused: a piece that lands on another, or off a
+// page boundary, is a delivery that would arrive scrambled.
+func TestOverlapAndAlignmentAreRefused(t *testing.T) {
+	if _, err := SpansOf([]Piece{
+		{Path: "a", Org: 0x1000, Data: make([]byte, 0x200)},
+		{Path: "b", Org: 0x1100, Data: make([]byte, 0x100)},
+	}); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Errorf("overlapping pieces: err = %v", err)
+	}
+	if _, err := SpansOf([]Piece{
+		{Path: "a", Org: 0x1080, Data: make([]byte, 0x100)},
+	}); err == nil || !strings.Contains(err.Error(), "page aligned") {
+		t.Errorf("misaligned piece: err = %v", err)
+	}
+	s := Stage{Name: "t", Spans: []Span{
+		{Org: 0x2000, Data: make([]byte, 0x200)},
+		{Org: 0x2100, Data: make([]byte, 0x100)},
+	}}
+	if err := s.Check(); err == nil || !strings.Contains(err.Error(), "twice") {
+		t.Errorf("a stage delivering one page twice: err = %v", err)
 	}
 }
 
@@ -97,7 +111,7 @@ func TestMarginsCanFail(t *testing.T) {
 // that mapped two image pages to one sector would silently drop half the
 // program; TestDiskRoundTrip would catch it, but only after building a disk.
 func TestSectorOffset(t *testing.T) {
-	const pages = MaxImage / SectorBytes
+	const pages = SectorsPerDisk - 1
 	seen := map[int]int{}
 	for n := range pages {
 		off := SectorOffset(n)
@@ -122,7 +136,7 @@ func TestSectorOffset(t *testing.T) {
 			maxTrack = tr
 		}
 	}
-	t.Logf("%d pages (%d B) occupy tracks 0-%d of %d", pages, MaxImage, maxTrack, Tracks-1)
+	t.Logf("%d pages (%d B) occupy tracks 0-%d of %d", pages, pages*SectorBytes, maxTrack, Tracks-1)
 	if maxTrack >= Tracks {
 		t.Errorf("the image reaches track %d, past the last track %d", maxTrack, Tracks-1)
 	}

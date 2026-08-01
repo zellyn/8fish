@@ -9,11 +9,11 @@ ENG_PCOSTHI        = $42C1   ; FT2_SOFTCLK per-phase cost table, high bytes
 ENG_PCOSTLO        = $42A8   ; FT2_SOFTCLK per-phase cost table, low bytes
 ENG_LCCODE_LOAD    = $BC61   ; where the aux-bank TT primitives sit in the engine image
 ENG_LCCODE_RUN     = $D000   ; where they must be copied to ($D000)
-ENG_LCCODE_SIZE    = $0041   ; how many bytes to copy
+ENG_LCCODE_SIZE    = $0064   ; how many bytes to copy
 ENG_adaptaborthi   = $BB7A   ; FT2_ADAPT hard-abort override (ABORTL = 2*CEILMAX)
 ENG_adaptmaybe     = $BB8D   ; FT2_ADAPT post-iteration policy
 ENG_attacked       = $5BF9   ; square-attacked test (the legality half of move validation)
-ENG_bookprobe      = $79DF   ; resident opening-book probe (C=1 on a hit)
+ENG_bookprobe      = $7A07   ; resident opening-book probe (C=1 on a hit)
 ENG_ccsite         = $42DE   ; the `jsr checkclock` whose operand FT2_SOFTCLK patches
 ENG_checkclocks    = $425F   ; FT2_SOFTCLK accumulating-clock entry point
 ENG_curincheck     = $424D   ; is the side to move in check?

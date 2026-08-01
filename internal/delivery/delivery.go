@@ -17,9 +17,12 @@
 //     pages to be consecutive. A stage can therefore scatter-load DISJOINT
 //     spans with no wasted sectors — `diskii mksd` writes a consecutive table
 //     only because it is handed one contiguous image, and we overwrite it.
-//   - 176 sectors is an absolute ceiling on ONE table. 8fish is 45,837 B =
-//     181 sectors of real payload, so the single-shot layout is finished. Not
-//     by a little: five sectors, against a ceiling that cannot grow.
+//   - 176 sectors is an absolute ceiling on ONE table, and 8fish is past it.
+//     The exact overshoot is not written down here on purpose -- it moves
+//     every time anything grows -- but internal/ui's TestDiskLedger computes
+//     it from the real files on every run and FAILS if it ever goes negative,
+//     because at that point the chain load has stopped being load-bearing and
+//     collapsing back to one stage would be simpler and faster to boot.
 //
 // The way through is the loader's own survival. Our image starts at $0D00, so
 // the boot sector's code at $0800-$08FF is never overwritten and its sequential

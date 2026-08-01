@@ -1,8 +1,12 @@
 // Command mkdsk builds asm/8fish.dsk: a bootable 5.25" Apple II disk carrying
-// the copier, the UI payload, the resident opening book and the engine, loaded
-// as one contiguous image by peterferrie's "Standard Delivery" boot loader.
-// All the work is in internal/delivery, which internal/ui's tests call
-// directly so the margins are gated rather than merely printed here.
+// the copier, the UI payload, the engine, the DHGR artwork and the resident
+// opening book, delivered in TWO STAGES by peterferrie's "Standard Delivery"
+// boot loader -- the second one read by re-entering the loader that is still
+// sitting in $0800-$08FF after the first.
+//
+// All the work is in internal/delivery, whose package doc is the account of
+// how that works and why it has to; internal/ui's tests call it directly, so
+// the ledger is gated rather than merely printed here.
 package main
 
 import (

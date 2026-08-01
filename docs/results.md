@@ -23,8 +23,8 @@ figure 6.15 s for 176 sectors of a single-shot image. The breakdown:
 | | cycles | s |
 |---|---:|---:|
 | stage 1 (146 sectors) | 5,478,812 | 5.37 |
-| stage 2 + both copies + dhclear/dhinit + first paint | 1,676,538 | 1.64 |
-| **total** | **7,155,350** | **7.01** |
+| stage 2 + both copies + dhclear/dhinit + first paint | 1,677,631 | 1.64 |
+| **total** | **7,156,443** | **7.01** |
 
 +0.86 s against the old disk, for 8 more sectors, 9,231 B of new payload, two
 block copies (9,231 B), a 16,384-byte screen clear and a whole-board repaint.

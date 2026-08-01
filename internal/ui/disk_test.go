@@ -5,7 +5,8 @@ package ui_test
 //
 // The disk is now delivered in TWO STAGES. One Standard Delivery page table
 // names 176 sectors and no more -- that is the table's size, not a policy --
-// and 8fish is 181 sectors, so the single-shot layout is finished. The boot
+// and 8fish is past it (TestDiskLedger computes by how much on every run, from
+// the real files). So the single-shot layout is finished. The boot
 // sector's loader survives the load, though (our image starts at $0D00 and the
 // loader lives in $0800-$08FF), so the copier writes a fresh page table into
 // page $08 and re-enters it at $0802 for stage 2. See internal/delivery.

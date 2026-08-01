@@ -1340,9 +1340,14 @@ someone modelled the switches, and the code was already right.
 What is STILL unverifiable here, and where a first real-hardware boot should
 look if the board comes up wrong:
 
+**The "video output itself" row is GONE, retired on 2026-08-01 — see §15.**
+goapple2's `videoscan` now models double hi-res, 80-column text and MIXED at
+dot resolution, and `internal/ui/videoscan_test.go` renders the shipping
+disk's screen through it. What remains unverifiable is listed below, and it
+is now about the SHAPE of the emulation rather than its absence.
+
 | unverifiable | why | symptom on hardware |
 |---|---|---|
-| **Video output itself** | goapple2 renders nothing; it is a memory + switch model. Our pixels are checked against `internal/tiles`' decoder | the byte layout is right (the artwork came out of DazzleDraw and round-trips), but nothing here has driven a real 14M shift register |
 | **AN3 as a soft switch vs. IOUDIS** | `$C07E/$C07F` (IOUDIS) and the AN3 status read are not modelled | on a IIc or an enhanced IIe with IOUDIS off, `$C05E` may be an annunciator rather than DHIRES: single-resolution hi-res showing only the main half — a board with every other byte-column missing |
 | **The unenhanced IIe's DHGR** | not modelled, and not a switch we set | the original IIe needs the "double hi-res" jumper/revision; on a Rev A board there is no DHGR at all |
 | **Ctrl-Reset and the language card** | as §12 already records | unchanged by this work |
@@ -1538,15 +1543,16 @@ Boot time: **7.10 s** of emulated IIe time from `$C600` to the first keyboard
 poll, against 7.01 s before. The 0.09 s is the name table's seven extra
 sectors and its copy.
 
-### 14.6 What a real IIe can still surprise us with — the mixed-mode additions
+### 14.6 What a real IIe can still surprise us with — the mixed-mode additions — SUPERSEDED 2026-08-01
 
-§13.5's table stands unchanged, and mixed mode adds exactly one row to it,
-because goapple2 models MIXED as state and not as a scanner:
+**Both rows this section added were retired the day after it was written.**
+They are kept here because the reasoning is the record of what was missing;
+§15 is what replaced them.
 
-| unverifiable | why | symptom on hardware |
+| ~~unverifiable~~ RETIRED | why it was on the list | what covers it now |
 |---|---|---|
-| **Where the graphics/text split actually falls** | goapple2 has no video scanner: `Mixed` is a modelled bit, and no test here has ever rendered scanline 160 | if the split is not at 160 the board's bottom border is eaten, or a row of text is; the board itself is drawn 4-155 with a 4-line margin either side, so there is slack for an off-by-a-few but not for an off-by-a-lot |
-| **80-column text pixels** | the same reason as DHGR pixels in §13.5: the byte layout is checked against the model, but nothing here has driven the 14M shift register in 80-column TEXT mode | inverse video, or the aux/main column interleave, coming out wrong — the title bar is the loudest place it would show |
+| ~~**Where the graphics/text split actually falls**~~ | goapple2 had no video scanner for this: `Mixed` was a modelled bit, and no test here had rendered scanline 160 | `TestDiskScannerMixedSplit` finds the boundary in the PIXELS of the booted disk and requires 160 |
+| ~~**80-column text pixels**~~ | the byte layout was checked against the model, but nothing had driven the 14M shift register in 80-column TEXT mode | `TestDiskScannerWindowIsReadable` reads all four rows back out of the dots; `TestDiskScannerWindowVideoSense` checks all 320 cells and the inverse title bar |
 
 ### 14.7 ★ HARDWARE-VERIFIED: DHGR is displayed 7 dots to the LEFT
 
@@ -1565,11 +1571,12 @@ would be expensive out of proportion to the gain: 7 dots is HALF a 14-dot
 cell, so it changes which BANK each byte belongs to. That is a re-slice of
 the tile blob, not an offset.
 
-**What it does NOT affect: any gate in this repo.** The shift is in the
+**What it does NOT affect: any BYTE gate in this repo.** The shift is in the
 display pipeline, not in memory. `internal/tiles` decodes aux-then-main per
 column pair and the parity tests compare BYTES, so a whole-screen offset is
 invisible to them by construction. (An interleave ERROR would be caught —
-see the paragraph below — but that is a different failure.)
+see the paragraph below — but that is a different failure.) It *is* a gate
+now, though: `TestDiskScannerSevenDotShift` measures it. See §15.
 
 **Why it is recorded here anyway.** It is the first hardware-verified datum
 this project has about the video pipeline, and it is evidence that
@@ -1578,10 +1585,165 @@ OpenEmulator's model is a usable reference for the rows above: if goapple2's
 graphics/text split falls" and "80-column text pixels" would stop being
 prose caveats and become gates. That is the same move that retired the
 80STORE caveat — the oracle already existed (a2audit), only the emulator
-side was missing.
+side was missing. **That is what §15 did, the same day.**
 
 The aux/main interleave itself (aux byte = even column) is NOT on this list:
 `Window()` de-interleaves it the same way the scanner does, and
 `TestDiskBoots` asserts real strings — "8FISH 1.0", "WHITE TO MOVE", "YOUR
 MOVE?" — read back out of both banks. Getting the interleave backwards
 produces every other character, which those assertions catch.
+
+## 15. THE SCREEN IS RENDERED NOW (2026-08-01)
+
+§13.5 said "goapple2 renders nothing; it is a memory + switch model", and
+§14.6 added two more rows to the unverifiable table for the same reason.
+§14.7 then noticed the way out: OpenEmulator's IIe video model is a usable
+reference, and teaching `videoscan` from it would turn those caveats into
+gates — "the same move that retired the 80STORE caveat: the oracle already
+existed, only the emulator side was missing".
+
+That is what this section is. `videoscan` scans an Apple IIe now, and this
+repo renders the shipping disk's screen through it.
+
+### 15.1 What goapple2 gained
+
+`videoscan` had 40-column text, lo-res and hi-res out of one memory bank.
+It now has, ported from OpenEmulator's `AppleIIEVideo` — read for its
+behaviour and rewritten, with no code copied:
+
+- **Double hi-res** and **80-column text**: a cell is TWO bytes, aux then
+  main, seven dots each, no doubling and no half-dot delay. `AuxRamReader`
+  is the aux bank as the SCANNER sees it — the scanner has its own address
+  bus and bank select, so RAMRD/RAMWRT/80STORE/ALTZP are irrelevant to it.
+  `iie.Memory` gained `RamRead`/`AuxRamRead` and plugs straight in.
+- **MIXED**, as a scanner rather than a bit. The split was already implicit
+  in `videoscan`'s vertical counter (`lastFour` is `(v>>5)&5 == 5`, i.e.
+  scanlines 160-191); nothing had ever driven it.
+- **`PlotData.DotX`**: where a cell's leftmost dot lands on the 560-dot
+  line. This is where the seven-dot shift lives — see §15.3.
+- **`Frame` / `RenderFrame`**: a 567x192 dot bitmap and a helper that runs
+  one complete field (65 x 262 cycles) through the real scanner. Same
+  address arithmetic, same waveform, same split an interactive renderer
+  gets; not a second model.
+- **80STORE** now takes the displayed page away from PAGE2, in both the
+  per-cycle scanner and the closed-form floating-bus address.
+
+Two bugs fell out of the port: `videoscan`'s per-cell "has this changed?"
+cache was a PACKAGE-LEVEL variable that two Scanners silently shared, and
+the closed-form floating-bus address ignored 80STORE. Both fixed there.
+
+`go test ./videoscan` had also been failing to BUILD since before this
+work — three `%s` verbs applied to a `byte`/`rune` in `convert.go`, which
+`go vet`'s printf check runs as part of `go test`. No test in that package
+could run. Fixed, in its own commit. (goapple2's `a2` package still does
+not build, for unrelated `gonuts/flag` reasons. Untouched.)
+
+**Not modelled, and it says so:** double LO-RES. `RenderFrame` returns
+`ErrDoubleLores` rather than drawing something plausible and wrong.
+
+### 15.2 What this repo gained: `internal/ui/videoscan_test.go`
+
+Five gates, all against the SHIPPING disk booted from `$C600`:
+
+| test | what it asserts |
+|---|---|
+| `TestDiskScannerMixedSplit` | finds the graphics/text boundary in the PIXELS — the last scanline whose dots match `internal/tiles`' decode of DHGR page 1 — and requires 160 |
+| `TestDiskScannerSevenDotShift` | slides the decoded board across the rendered dots over ±14 offsets; exactly one fits, and it is **-7** |
+| `TestDiskScannerBoardExtent` | scanlines 0-3 and 156-159 blank, 4-155 not, leftmost lit dot at x=105 |
+| `TestDiskScannerWindowIsReadable` | reads all four 80-column rows back OUT OF THE DOTS and compares with `Window().Text` |
+| `TestDiskScannerWindowVideoSense` | all 320 window cells match their glyphs at the shifted 80-column pitch; row 20 is ≥40 inverse cells, row 23 has exactly one — the cursor |
+
+The measurement, from the passing run:
+
+```
+the board occupies scanlines 4-155 and x=105..439
+row 23, read out of the rendered dots: "YOUR MOVE?    ...    L-LEVEL S-SIDES Q-QUIT ?-HELP"
+inverse cells per row: 20=40 21=0 22=0 23=1   (row 23's is the CURSOR, column 11)
+```
+
+Two things showed up that no byte gate could have. The **cursor** is a real
+inverse block on the raster, 56 of 56 dots lit, sitting one column past the
+prompt — that is now asserted, because it is how a player finds where they
+are typing. And the title bar is inverse for exactly its first **40**
+columns, not all 80: the right half of row 20 is normal video.
+
+### 15.3 ★ What the seven-dot shift IS, mechanically
+
+§14.7 recorded the shift as an observation. This is the mechanism, and it is
+the interesting part: **a correct implementation shifts left because the AUX
+byte is clocked out half a cell EARLY.**
+
+In a 40-column mode, the byte fetched for memory cycle *c* fills the whole
+14-dot cell at x = 14*c*. In a double-resolution mode the same cycle fetches
+TWO bytes and shifts out fourteen dots at 14M — but the aux byte goes first,
+and it is not delayed to the cell boundary. So cell *c* runs
+
+```
+   x = 14c-7 .. 14c-1     the AUX byte's seven dots
+   x = 14c   .. 14c+6     the MAIN byte's seven dots
+```
+
+and the whole picture sits seven dots left of where the same bytes would
+appear in 40 columns. In OpenEmulator this is literally one term: the
+80-column line painters start at `x*14 - CELL_WIDTH/2`, the 40-column ones
+at `x*14`. In `videoscan` it is `PlotData.DotX`.
+
+**It is a MOVE, not a crop.** The first modelling of this dropped the dots
+at negative x and the 80-column readback test immediately spelled the
+screen's first character as a space — which is wrong, and the test caught
+it. On real hardware those seven dots land in the overscan the monitor
+shows either side of the 560-dot active area; nothing is lost, and that is
+precisely why the effect reads as "the screen is shifted" rather than "the
+screen lost a character". `videoscan.Frame`'s coordinate space therefore
+starts at `MinX = -7`.
+
+§14.7's arithmetic is confirmed as a measurement: the board's bytes describe
+x=112..447, and its lit dots run x=105..439, so the margins are **105 left
+and 120 right** instead of 112 and 112. (§14.7 predicted 105/119. The extra
+dot on the right is the artwork, not the hardware: the h-file's very last
+dot column is background in all eight squares, so the rightmost LIT dot is
+440-1. The left edge is exact, because the drawn border occupies the
+board's first columns.) We are still not compensating, for §14.7's reason —
+seven dots is half a cell, so compensating changes which BANK each byte
+belongs to, and that is a re-slice of the tile blob.
+
+### 15.4 What is STILL not verified, precisely
+
+This is emulation agreeing with emulation. Being exact about what that is
+worth:
+
+| still unverified | why |
+|---|---|
+| **The glyph SHAPES** | `TestDiskScannerWindowVideoSense` compares the rendered dots against `chargen`'s glyphs — the same generator the renderer used. What it gates is the GEOMETRY (interleave, pitch, shift) and the video sense, not the shapes. `chargen`'s shapes come from goapple2's own character-ROM dump, which is a separate check but not a hardware one |
+| **NTSC colour** | `videoscan` produces monochrome dots. Every assertion here is about WHERE dots are, never what colour a IIe makes of them. The board's light-square dither is phase-locked in the artwork (`internal/tiles`), and nothing tests what it looks like on a colour monitor |
+| **Double LO-RES** | not modelled at all, by either side. 8fish never selects it |
+| **The overscan itself** | `Frame` keeps x = -7..559 because that is what the scanner writes. How much of it a given monitor actually shows is a property of the monitor |
+| **Everything in §13.5's surviving table** | IOUDIS vs AN3, the unenhanced IIe's DHGR, Ctrl-Reset, drive timing. A video scanner says nothing about any of them |
+
+And the honest framing: `videoscan` is now a second model of IIe video,
+cross-checked against OpenEmulator's, which is itself cross-checked against
+zellyn's physical IIe for the seven-dot shift. Two models agreeing is worth
+a great deal more than one model with a comment beside it. It is still less
+than a machine.
+
+### 15.5 The mutation checks
+
+Each mutation was made in `videoscan` and the gates re-run:
+
+- **Drop the `-7` from `DotX`.** goapple2: seven tests fail. Here: all five
+  fail — `"the board's memory fits the rendered dots at offsets [0]; want
+  exactly one, -7"`, `"the board's leftmost lit dot is at x=112, want 105"`.
+- **Move the MIXED split to 176** (`lastFour = v >= 0x1B0`).
+  `TestDiskScannerMixedSplit`: *"the DHGR page is displayed on scanlines
+  0-175; want 0-159"*. The window tests fail too, because rows 20-21 stop
+  being displayed at all.
+- **Swap the aux and main halves of a cell.** `TestDiskScannerWindowIsReadable`
+  reads row 20 as `"8 IFHS1 0.    ELEV L 4    OY URA EHWTI EHWTI EOTM VO E"`.
+  All five fail.
+
+One near-miss worth recording. An earlier, HALF mutation — moving the split
+in the data path only, leaving the address path alone — did NOT fail
+`TestDiskScannerMixedSplit`, because the scanner then fetched text-page
+bytes and drew them as hi-res, which matches no row of the DHGR page. The
+window tests caught it. A single gate would have been enough to feel safe
+and would not have been; the pair is the coverage.

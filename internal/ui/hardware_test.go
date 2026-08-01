@@ -381,7 +381,7 @@ func TestRefusesMachinesWithoutAuxRAM(t *testing.T) {
 			// keyboard poll. Either way a few hundred thousand cycles is
 			// more than enough (a cold boot paints in ~24,000).
 			halted := false
-			for i := 0; i < 300_000 && !halted; i++ {
+			for i := 0; i < 3_000_000 && !halted; i++ {
 				if err := c.Step(); err != nil {
 					t.Fatalf("cpu: %v", err)
 				}

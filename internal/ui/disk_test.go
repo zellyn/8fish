@@ -1,36 +1,44 @@
 package ui_test
 
-// disk_test.go gates the SHIPPING ARTEFACT: asm/8fish.dsk. Three static
-// gates on how the disk is built, and one that boots it.
+// disk_test.go gates the SHIPPING ARTEFACT: asm/8fish.dsk. Static gates on how
+// the disk is built, and the ones that boot it.
 //
-// The margins matter more here than anywhere else in the project, because
-// there are only ~744 bytes of total slack and they are split between two
-// budgets that grow from opposite ends:
+// The disk is now delivered in TWO STAGES. One Standard Delivery page table
+// names 176 sectors and no more -- that is the table's size, not a policy --
+// and 8fish is past it (TestDiskLedger computes by how much on every run, from
+// the real files). So the single-shot layout is finished. The boot
+// sector's loader survives the load, though (our image starts at $0D00 and the
+// loader lives in $0800-$08FF), so the copier writes a fresh page table into
+// page $08 and re-enters it at $0802 for stage 2. See internal/delivery.
 //
-//	SD spare        the engine spends it (the image ends at engine.bin's
-//	                last byte, and diskii mksd refuses over 45,056 B)
-//	UI growth room  the UI spends it (the staged payload must end below
-//	                the resident opening book at $2000)
-//
-// Raising the staging base trades one for the other 256 bytes at a time, and
-// there is almost nowhere left to go: the base is $0D00 (raised from $0C00 on
-// 2026-07-30 to pay for the engine's pre-make evasion filter) and one more
-// page would already overrun the book. So both numbers are asserted, both are
-// printed on every run along with the whole base/margin table recomputed from
-// the real files, and the day either goes negative this test says which one
-// and by how much.
+// What that changed about the margins: the old "SD spare" and "UI growth room"
+// were both properties of ONE contiguous span, and neither survives. Stage 1
+// scatter-loads two disjoint spans, so its gap costs nothing; the payload
+// stages into $0E00-$1FFF with the book no longer in the way; and the ceiling
+// that binds is per stage. What is asserted here now is that each stage fits
+// its own table, that the two together fit the disk, and -- the gate that
+// matters -- that the disk BOOTS and PLAYS.
 
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/zellyn/chess6502/internal/book"
+	"github.com/zellyn/chess6502/internal/chesstest"
 	"github.com/zellyn/chess6502/internal/delivery"
 	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/chess6502/internal/tiles"
+
 	"github.com/zellyn/chess6502/internal/ui"
 )
 
@@ -68,119 +76,247 @@ func TestDiskLayout(t *testing.T) {
 		t.Errorf("m8sd.bin (%d B) differs from m8.bin (%d B): the payload must not "+
 			"depend on where it was staged", len(staged), len(shipped))
 	}
+	// The two COPIERS are no longer the same program: -D SDCHAIN gives the
+	// disk one the chain loader, which the BLOAD one cannot have (a BRUN from
+	// BASIC arrives with none of the boot loader's read state). What must
+	// still hold is that the difference is confined to the BOOT segment --
+	// the payload above is byte-identical, which is what the first assertion
+	// just proved -- and that the disk copier is a SUPERSET: the BLOAD
+	// copier's work is still all in there, in the same order.
 	bootBload, bootDisk := read("m8boot.bin"), read("m8sdboot.bin")
-	if len(bootBload) != len(bootDisk) {
-		t.Fatalf("copiers differ in length: m8boot.bin %d B, m8sdboot.bin %d B",
-			len(bootBload), len(bootDisk))
+	if len(bootDisk) <= len(bootBload) {
+		t.Errorf("m8sdboot.bin (%d B) is not larger than m8boot.bin (%d B): the chain "+
+			"loader is missing -- was -D SDCHAIN dropped?", len(bootDisk), len(bootBload))
 	}
-	var diffs []int
-	for i := range bootBload {
-		if bootBload[i] != bootDisk[i] {
-			diffs = append(diffs, i)
+	if len(bootDisk) > delivery.SectorBytes {
+		t.Errorf("the copier is %d B, %d B past the one page asm/m8sd.cfg gives it (and "+
+			"past $%04X, where stage 2's own landing zone starts)",
+			len(bootDisk), len(bootDisk)-delivery.SectorBytes, delivery.TilesOrg)
+	}
+	t.Logf("copiers: m8boot.bin %d B (BLOAD), m8sdboot.bin %d B (disk, +%d B of chain loader)",
+		len(bootBload), len(bootDisk), len(bootDisk)-len(bootBload))
+	// The one byte that still has to be right in both: the page the payload
+	// is staged at, which the .cfg supplies as a linker symbol.
+	for _, c := range []struct {
+		name string
+		bin  []byte
+		page byte
+	}{
+		{"m8boot.bin", bootBload, byte(readCfgPayloadPage(t, "m8.cfg"))},
+		{"m8sdboot.bin", bootDisk, byte(delivery.PayloadOrg >> 8)},
+	} {
+		if !bytes.Contains(c.bin[:24], []byte{0xA9, c.page}) {
+			t.Errorf("%s does not load the payload page $%02X in its first 24 bytes",
+				c.name, c.page)
 		}
-	}
-	// The copier is position independent (every branch is relative and the
-	// only absolute reference is `jmp $E000`), so moving it from $0800 to
-	// $0C00 changes nothing; moving the payload from $0900 to $0D00 changes
-	// exactly the high byte of the source pointer.
-	t.Logf("copiers: %d B each, differing at %v (payload page $%02X vs $%02X)",
-		len(bootBload), diffs, bootBload[diffs[0]], bootDisk[diffs[0]])
-	if len(diffs) != 1 {
-		t.Errorf("m8boot.bin and m8sdboot.bin differ at %d offsets, want exactly 1 "+
-			"(the payload's page): %v", len(diffs), diffs)
-	}
-	if got, want := bootDisk[diffs[0]], byte(delivery.PayloadOrg>>8); got != want {
-		t.Errorf("m8sdboot.bin stages the payload from page $%02X, want $%02X",
-			got, want)
 	}
 }
 
-// TestDiskLedger is the margin ledger for the SIMPLE SINGLE-SHOT layout.
+// readCfgPayloadPage pulls the UIPAYLOAD linker symbol's page out of a .cfg.
+func readCfgPayloadPage(t *testing.T, cfg string) int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "asm", cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`UIPAYLOAD:\s*type\s*=\s*export,\s*value\s*=\s*\$([0-9A-Fa-f]+)`).
+		FindSubmatch(b)
+	if m == nil {
+		t.Fatalf("no UIPAYLOAD symbol in asm/%s", cfg)
+	}
+	v, err := strconv.ParseInt(string(m[1]), 16, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int(v) >> 8
+}
+
+// TestDiskLedger is the delivery ledger for the two-stage layout: what each
+// stage costs against the 176 sectors one page table can name, what the pair
+// costs against the 560 sectors on the disk, and where every piece lands.
 //
-// It is a TRIPWIRE, not a wall. It is our disk: nothing stops us chain-loading
-// (one loaded thing loading the next) or moving to ProRWTS2, and either
-// removes the contiguous-span squeeze entirely. What this test says when a
-// margin goes negative is "the one-shot Standard Delivery path no longer fits
-// -- pick a different mechanism", NOT "8fish cannot grow". It exists so that
-// choice is made deliberately on the day it arrives, instead of a disk quietly
-// coming out wrong.
+// It is a TRIPWIRE, not a wall. When a stage overflows its table the answer is
+// another stage -- the loader can be re-entered as many times as we like -- or
+// ProRWTS2, which would also give 8fish a disk it can WRITE (a saved game).
+// What this test exists to do is make that choice a deliberate one on the day
+// it arrives, instead of a disk quietly coming out wrong.
 func TestDiskLedger(t *testing.T) {
-	pieces, err := delivery.Load(root)
+	stage1, stage2, err := delivery.LoadStages(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	img, l, err := delivery.Image(pieces)
-	if err != nil {
-		t.Fatal(err)
-	}
+	l := delivery.LedgerOf(stage1, stage2)
 
-	t.Logf("Standard Delivery image, base $%04X:", l.Base)
-	for _, p := range pieces {
-		t.Logf("  $%04X-$%04X  %6d B  %s", p.Org, p.Org+len(p.Data)-1, len(p.Data), p.Path)
-	}
-	t.Logf("  ------------------------------------------------")
-	t.Logf("  image        $%04X-$%04X  %6d B in %d sectors", l.Base, l.End-1, l.ImageBytes, l.Sectors)
-	t.Logf("  MARGIN 1  SD spare:       %5d B of %d  (the ENGINE spends this)",
-		l.SDSpare, delivery.MaxImage)
-	t.Logf("  MARGIN 2  UI growth room: %5d B  (staged payload ends $%04X, book at $%04X)",
-		l.UIRoom, l.PayloadEnd-1, delivery.BookOrg)
-
-	// The base/margin trade-off table, recomputed from the REAL file sizes on
-	// every run. delivery.go carries the same table as a comment for readers,
-	// and a comment that has to be maintained by hand is a comment that goes
-	// stale (it already did once, quoting sizes two releases old). This is the
-	// copy to trust when the decision "raise the base by a page?" comes round
-	// again, which the margins guarantee it will.
-	t.Logf("  base/margin trade-off, from the files on disk right now:")
-	t.Logf("    %-6s %8s %8s %s", "base", "image", "spare", "UI room")
-	for base := 0x0800; base <= 0x1000; base += delivery.SectorBytes {
-		ps, err := delivery.LoadAt(root, base)
+	report := func(name string, st delivery.Stage, pieces []delivery.Piece) {
+		loaded, err := delivery.Load(root, pieces)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, bl, err := delivery.Image(ps)
-		if err != nil {
-			// Overlap (the payload has grown into the book): report the base
-			// as unusable rather than failing the whole ledger.
-			t.Logf("    $%04X  %8s %8s %s", base, "-", "-", err)
-			continue
+		t.Logf("%s:", name)
+		for _, p := range loaded {
+			dest := ""
+			if p.RunsAt != 0 {
+				dest = fmt.Sprintf("  -> $%04X", p.RunsAt)
+			}
+			t.Logf("    $%04X-$%04X  %6d B  %s%s",
+				p.Org, p.Org+len(p.Data)-1, len(p.Data), p.Path, dest)
 		}
-		mark := ""
-		if base == delivery.Base {
-			mark = "  <- chosen"
+		for _, sp := range st.Spans {
+			t.Logf("      span $%04X-$%04X = %d sectors (pages $%02X-$%02X)",
+				sp.Org, sp.Org+len(sp.Data)-1, sp.Sectors(),
+				sp.Org>>8, (sp.Org>>8)+sp.Sectors()-1)
 		}
-		t.Logf("    $%04X  %8d %8d %7d%s", base, bl.ImageBytes, bl.SDSpare, bl.UIRoom, mark)
+		t.Logf("    %d of %d sectors one page table can name (%d spare)",
+			st.Sectors(), delivery.MaxStageSectors, delivery.MaxStageSectors-st.Sectors())
+	}
+	report("STAGE 1  (the boot sector's table, patched to scatter-load)",
+		stage1, delivery.Stage1Pieces())
+	report("STAGE 2  (the copier's table, loader re-entered at $0802)",
+		stage2, delivery.Stage2Pieces())
+	t.Logf("  disk: %d of %d sectors used, %d free", l.TotalSectors,
+		delivery.SectorsPerDisk, l.DiskSpare)
+
+	// What a SINGLE-SHOT delivery would have needed, so the reason for the
+	// chain load stays a measured number rather than a memory.
+	oneShot := 1 + stage1.Sectors() + stage2.Sectors() - 1
+	t.Logf("  a single-shot layout would need %d sectors in ONE table of %d: over by %d",
+		oneShot, delivery.MaxStageSectors, oneShot-delivery.MaxStageSectors)
+	if oneShot <= delivery.MaxStageSectors {
+		t.Errorf("everything now fits in one page table (%d sectors of %d). The chain "+
+			"load is no longer load-bearing; collapsing back to a single stage would "+
+			"be simpler and faster to boot.", oneShot, delivery.MaxStageSectors)
 	}
 
-	if len(img) != l.ImageBytes {
-		t.Errorf("image is %d B but the ledger says %d", len(img), l.ImageBytes)
+	if err := stage1.Check(); err != nil {
+		t.Errorf("stage 1: %v", err)
 	}
-	if l.SDSpare < 0 {
-		t.Errorf("MARGIN 1: the image is %d B, %d B over `diskii mksd`'s %d B limit, so "+
-			"8fish has outgrown the SIMPLE SINGLE-SHOT Standard Delivery layout.\n"+
-			"This is a decision point, not a dead end. Raising internal/delivery.Base by "+
-			"one page buys 256 B here at the cost of 256 B of MARGIN 2 (%d B left); when "+
-			"that runs out, the answer is a different LOADER, not a smaller program -- "+
-			"chain-load in two stages, or move to ProRWTS2 (which also lifts the "+
-			"contiguous-span constraint and gives the UI its full LC budget back).",
-			l.ImageBytes, -l.SDSpare, delivery.MaxImage, l.UIRoom)
+	if err := stage2.Check(); err != nil {
+		t.Errorf("stage 2: %v", err)
 	}
-	if l.UIRoom < 0 {
-		t.Errorf("MARGIN 2: the staged UI payload ends at $%04X, %d B INTO the resident "+
-			"opening book at $%04X. In THIS layout the loader would deliver the payload "+
-			"over the book's first %d bytes and the engine would probe garbage. The fix "+
-			"is a delivery mechanism that does not have to stage the payload below the "+
-			"book -- see MARGIN 1's note -- not a smaller UI.",
-			l.PayloadEnd, -l.UIRoom, delivery.BookOrg, -l.UIRoom)
+	if l.TotalSectors > delivery.SectorsPerDisk {
+		t.Errorf("the two stages need %d sectors, %d more than the disk holds",
+			l.TotalSectors, l.TotalSectors-delivery.SectorsPerDisk)
 	}
-	// The book blob on disk must be the one the Go side ships, or the UI's
-	// book probe and internal/book disagree about what the engine knows.
-	for _, p := range pieces {
-		if p.Org == delivery.BookOrg && !bytes.Equal(p.Data, book.DefaultBlob()) {
-			t.Errorf("the book on the disk is not internal/book's embedded blob "+
-				"(%d B on disk, %d B embedded)", len(p.Data), len(book.DefaultBlob()))
+	// The staged payload's cap is the ENGINE, not the book. It overlaps stage
+	// 2's landing zone for the book at $2000 and that is fine: the copier
+	// lifts the payload to $E000 BEFORE it re-enters the loader, so the two
+	// use $2000-$21FF at different times. The old layout could not do this,
+	// and 164 bytes of staging room under a resident book was the wall the UI
+	// kept hitting.
+	if l.PayloadRoom < 0 {
+		t.Errorf("the staged UI payload ends at $%04X, %d B into the engine at $%04X",
+			l.PayloadEnd, -l.PayloadRoom, delivery.EngineOrg)
+	}
+	t.Logf("  staged payload $%04X-$%04X, %d B below the engine; it overlaps stage 2's "+
+		"book landing zone at $%04X by %d B, which is safe because the copier lifts it "+
+		"to $E000 first", l.PayloadOrg, l.PayloadEnd-1, l.PayloadRoom,
+		delivery.BookOrg, max(0, l.PayloadEnd-delivery.BookOrg))
+
+	// The blobs on the disk must be the ones the Go side ships, or the UI's
+	// book probe and internal/book disagree about what the engine knows, and
+	// internal/tiles' render model is a model of different artwork.
+	s2, err := delivery.Load(root, delivery.Stage2Pieces())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range s2 {
+		var want []byte
+		switch p.Org {
+		case delivery.BookOrg:
+			want = book.DefaultBlob()
+		case delivery.TilesOrg:
+			want = tiles.DefaultBlob()
+		default:
+			continue
+		}
+		if !bytes.Equal(p.Data, want) {
+			t.Errorf("the blob delivered to $%04X is not the one Go ships (%d B on disk, "+
+				"%d B embedded)", p.Org, len(p.Data), len(want))
 		}
 	}
+}
+
+// TestBootSectorPageTable reads the SHIPPED boot sector back and asserts the
+// two facts the whole delivery rests on: the loader really is the page-table
+// loader internal/delivery models, and the table it carries is stage 1's real
+// span list -- the scatter, not mksd's consecutive default.
+func TestBootSectorPageTable(t *testing.T) {
+	dsk := dskPath(t)
+	raw, err := os.ReadFile(dsk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot := raw[:delivery.SectorBytes]
+
+	// $0805 is `LDA $084E`, pre-incremented at $0802, so the first entry the
+	// loader reads is $084F. If this instruction ever moves, every page in
+	// the table is off by one and the disk delivers garbage.
+	if boot[0x05] != 0xAD || boot[0x06] != 0x4E || boot[0x07] != 0x08 {
+		t.Fatalf("boot sector $0805 is %02X %02X %02X, not `LDA $084E`: this is not the "+
+			"Standard Delivery loader internal/delivery patches",
+			boot[0x05], boot[0x06], boot[0x07])
+	}
+	if boot[0x02] != 0xEE || boot[0x03] != 0x06 || boot[0x04] != 0x08 {
+		t.Fatalf("boot sector $0802 is %02X %02X %02X, not `INC $0806`",
+			boot[0x02], boot[0x03], boot[0x04])
+	}
+	if boot[0x00] != 0x01 {
+		t.Errorf("boot sector $0800 is $%02X, not $01: the boot ROM reads that many "+
+			"sectors per call, and the loader depends on it being exactly one",
+			boot[0x00])
+	}
+
+	stage1, _, err := delivery.LoadStages(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := stage1.PageTable()
+	got := boot[0x4F : 0x4F+len(want)]
+	if !bytes.Equal(got, want) {
+		t.Errorf("boot sector page table = % 02X\n                     want = % 02X", got, want)
+	}
+	t.Logf("stage 1 page table: %d entries + terminator, %d spans", len(want)-1, len(stage1.Spans))
+	if start := int(boot[0x4D]) | int(boot[0x4E])<<8; start != delivery.CopierOrg {
+		t.Errorf("the terminator jumps to $%04X, not the copier at $%04X",
+			start, delivery.CopierOrg)
+	}
+}
+
+// TestStage2PageTable: the table the COPIER writes into page $08 for stage 2
+// must name exactly the pages internal/delivery put on the disk. The two are
+// derived independently -- ca65 builds the copier's from the blob sizes in
+// asm/book.inc and asm/tiledefs.inc, Go builds the disk's from the blob files
+// -- so this is a real cross-check and not a tautology.
+func TestStage2PageTable(t *testing.T) {
+	boot, err := os.ReadFile(filepath.Join(root, "asm", "m8sdboot.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	syms, err := ui.ParseLbl(filepath.Join(root, "asm", "m8sd.lbl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd2tab, ok := syms["sd2tab"]
+	if !ok {
+		t.Fatal("m8sd.lbl has no sd2tab: the chain loader was built without -D SDCHAIN")
+	}
+	_, stage2, err := delivery.LoadStages(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := stage2.PageTable()
+	base := int(sd2tab) - delivery.CopierOrg
+	if base < 0 || base+len(want) > len(boot) {
+		t.Fatalf("sd2tab is at $%04X, outside the %d-byte copier", sd2tab, len(boot))
+	}
+	got := boot[base : base+len(want)]
+	if !bytes.Equal(got, want) {
+		t.Errorf("the copier's stage 2 page table = % 02X\n"+
+			"          the disk's stage 2 layout = % 02X", got, want)
+	}
+	t.Logf("stage 2 page table (%d entries + terminator) agrees between asm and Go",
+		len(want)-1)
 }
 
 // TestDiskRoundTrip reads the built .dsk back and asserts the delivered bytes
@@ -188,11 +324,7 @@ func TestDiskLedger(t *testing.T) {
 // interleave mistake without booting anything.
 func TestDiskRoundTrip(t *testing.T) {
 	dsk := dskPath(t)
-	pieces, err := delivery.Load(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	img, l, err := delivery.Image(pieces)
+	stage1, stage2, err := delivery.LoadStages(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,31 +332,37 @@ func TestDiskRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(raw) != delivery.Tracks*delivery.SectorsPerTrk*delivery.SectorBytes {
+	if len(raw) != delivery.SectorsPerDisk*delivery.SectorBytes {
 		t.Fatalf("%s is %d bytes, want %d", dsk, len(raw),
-			delivery.Tracks*delivery.SectorsPerTrk*delivery.SectorBytes)
+			delivery.SectorsPerDisk*delivery.SectorBytes)
 	}
-	back, err := delivery.Extract(raw, len(img))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(back, img) {
-		for i := range img {
-			if img[i] != back[i] {
-				t.Fatalf("disk differs from image at offset %d ($%04X): image $%02X, disk $%02X "+
-					"(image page %d, .dsk offset %d)",
-					i, delivery.Base+i, img[i], back[i], i/256, delivery.SectorOffset(i/256))
+	first := 0
+	for _, st := range []delivery.Stage{stage1, stage2} {
+		want := st.Bytes()
+		back, err := delivery.ExtractPages(raw, first, st.Sectors())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(back, want) {
+			for i := range want {
+				if want[i] != back[i] {
+					t.Fatalf("%s differs from the disk at byte %d (image page %d, "+
+						".dsk offset %d): want $%02X, got $%02X", st.Name, i,
+						first+i/256, delivery.SectorOffset(first+i/256), want[i], back[i])
+				}
 			}
 		}
-	}
-	t.Logf("round trip: %d sectors, %d bytes, identical", l.Sectors, len(img))
-
-	// And each piece is where its load address says it is.
-	for _, p := range pieces {
-		got := back[p.Org-delivery.Base : p.Org-delivery.Base+len(p.Data)]
-		if !bytes.Equal(got, p.Data) {
-			t.Errorf("%s does not read back at $%04X", p.Path, p.Org)
+		// And each span reads back at the page the table names for it.
+		off := 0
+		for _, sp := range st.Spans {
+			if !bytes.Equal(back[off:off+len(sp.Data)], sp.Data) {
+				t.Errorf("%s: the span for $%04X does not read back", st.Name, sp.Org)
+			}
+			off += len(sp.Data)
 		}
+		t.Logf("round trip: %s, %d sectors from image page %d, identical",
+			st.Name, st.Sectors(), first)
+		first += st.Sectors()
 	}
 }
 
@@ -287,26 +425,26 @@ func TestDiskBoots(t *testing.T) {
 			delivery.CopierOrg, m.Cycles, m.CPU.PC())
 	}
 	loadCycles := m.Cycles
-	pieces, err := delivery.Load(root)
+	stage1, stage2, err := delivery.LoadStages(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	img, l, err := delivery.Image(pieces)
-	if err != nil {
-		t.Fatal(err)
-	}
-	delivered := m.Mem.Main[delivery.Base : delivery.Base+len(img)]
-	if !bytes.Equal(delivered, img) {
-		for i := range img {
-			if img[i] != delivered[i] {
-				t.Fatalf("the loader delivered the wrong byte at $%04X: want $%02X, got $%02X",
-					delivery.Base+i, img[i], delivered[i])
+	for _, sp := range stage1.Spans {
+		delivered := m.Mem.Main[sp.Org : sp.Org+len(sp.Data)]
+		if !bytes.Equal(delivered, sp.Data) {
+			for i := range sp.Data {
+				if sp.Data[i] != delivered[i] {
+					t.Fatalf("stage 1 delivered the wrong byte at $%04X: want $%02X, got $%02X",
+						sp.Org+i, sp.Data[i], delivered[i])
+				}
 			}
 		}
+		t.Logf("STAGE 1 span $%04X-$%04X (%d sectors) delivered byte-identically",
+			sp.Org, sp.Org+len(sp.Data)-1, sp.Sectors())
 	}
-	t.Logf("LOADED: %d B ($%04X-$%04X, %d sectors) delivered from disk in %d cycles (%.2f s), "+
-		"byte-identical to the image", l.ImageBytes, l.Base, l.End-1, l.Sectors,
-		loadCycles, float64(loadCycles)/1_020_484)
+	l := delivery.LedgerOf(stage1, stage2)
+	t.Logf("STAGE 1: %d sectors in %d cycles (%.2f s)",
+		l.Stage1Sectors, loadCycles, float64(loadCycles)/1_020_484)
 
 	// ---- 2. the UI comes up and blocks for a key ---------------------------
 	ok, err = m.RunToKeyboard(200_000_000)
@@ -317,6 +455,41 @@ func TestDiskBoots(t *testing.T) {
 		t.Fatalf("the UI never blocked for a keystroke (PC $%04X after %d cycles)",
 			m.CPU.PC(), m.Cycles)
 	}
+	t.Logf("BOOT COMPLETE: %d cycles (%.2f s) from $C600 to the first keyboard poll",
+		m.Cycles, float64(m.Cycles)/1_020_484)
+
+	// ---- 2a. STAGE 2 arrived, and was put where it belongs -----------------
+	// The chain load is invisible from the screen, so assert its two products
+	// directly: the artwork in Language Card bank 1 (m.Mem.Main[$D000-$DFFF]
+	// IS bank 1 in goapple2's model) and the opening book in AUX $0200.
+	blob := tiles.DefaultBlob()
+	if got := m.Mem.Main[delivery.TilesLC : delivery.TilesLC+len(blob)]; !bytes.Equal(got, blob) {
+		for i := range blob {
+			if blob[i] != got[i] {
+				t.Fatalf("the tile blob is wrong at LC $%04X (offset %d of %d): want $%02X, "+
+					"got $%02X -- stage 2 did not land, or the copier put it somewhere else",
+					delivery.TilesLC+i, i, len(blob), blob[i], got[i])
+			}
+		}
+	}
+	t.Logf("STAGE 2: %d B of artwork resident at LC bank 1 $%04X-$%04X",
+		len(blob), delivery.TilesLC, delivery.TilesLC+len(blob)-1)
+	bk := book.DefaultBlob()
+	if got := m.Mem.Aux[delivery.BookAux : delivery.BookAux+len(bk)]; !bytes.Equal(got, bk) {
+		for i := range bk {
+			if bk[i] != got[i] {
+				t.Fatalf("the opening book is wrong at AUX $%04X (offset %d of %d): want "+
+					"$%02X, got $%02X", delivery.BookAux+i, i, len(bk), bk[i], got[i])
+			}
+		}
+	}
+	t.Logf("STAGE 2: %d B of opening book resident at AUX $%04X-$%04X",
+		len(bk), delivery.BookAux, delivery.BookAux+len(bk)-1)
+	// And main $2000-$3FFF -- the DHGR main half -- is nobody's home now.
+	// Whatever the loader left there is dead; what matters is that nothing
+	// RESIDENT is there, which the two assertions above establish by having
+	// found both blobs elsewhere.
+
 	if pc := m.CPU.PC(); pc < 0xE000 {
 		t.Errorf("the UI is blocked at $%04X, not in Language Card RAM ($E000-$FFEF)", pc)
 	}
@@ -324,26 +497,43 @@ func TestDiskBoots(t *testing.T) {
 		t.Error("ALTCHARSET is off: every black piece on a dark square would be " +
 			"flashing punctuation on a real IIe (see docs/results.md 2026-07-28)")
 	}
-	if m.Mem.Col80 {
-		t.Error("80COL is on: this 40-column screen would show one column in two")
+	// ---- 2b. the display is DOUBLE HI-RES, and every switch it needs is on --
+	// The disk boots to the BOARD, not to the text screen. goapple2's IIe
+	// model implements 80COL and AN3 now (and DHires() = Col80 && !An3), so
+	// this is an assertion rather than the comment it would have had to be.
+	if !m.Mem.DHires() {
+		t.Errorf("double hi-res is NOT selected: 80COL=%v AN3=%v. DHGR needs 80COL on "+
+			"($C00D) AND AN3 driven low ($C05E); with either wrong the board comes out "+
+			"as 280-dot hi-res reading only the main half", m.Mem.Col80, m.Mem.An3)
 	}
-	if !m.Mem.Text || m.Mem.Mixed || m.Mem.Page2 {
-		t.Errorf("display state wrong: TEXT=%v MIXED=%v PAGE2=%v", m.Mem.Text, m.Mem.Mixed, m.Mem.Page2)
+	if m.Mem.Text || m.Mem.Mixed || m.Mem.Page2 || !m.Mem.Hires {
+		t.Errorf("display state wrong for the board: TEXT=%v MIXED=%v PAGE2=%v HIRES=%v, "+
+			"want false/false/false/true", m.Mem.Text, m.Mem.Mixed, m.Mem.Page2, m.Mem.Hires)
 	}
-	// Nothing may stray outside the modelled subset. $C000/$C001 used to be
-	// an allowed exception here because the model did not implement 80STORE;
-	// it does now, so there is no exception left.
+	// ★ 80STORE. This USED to be untestable: goapple2's IIe model implemented
+	// neither 80STORE state and counted both switch addresses in Unhandled,
+	// so `sta CLR80STORE` in m8main was documented as a hardware-only
+	// precaution nothing here could check. The model implements it now --
+	// including the precedence that makes it dangerous, 80STORE OVERRIDING
+	// RAMRD/RAMWRT for $0400-$07FF and (with HIRES) $2000-$3FFF -- so assert
+	// the state directly instead of inferring it from an unhandled-access
+	// count. That precedence is exactly what would send the DHGR renderer's
+	// aux half into main.
+	//
+	// The switches were left HOSTILE at power-on (see the top of this test:
+	// 80STORE + PAGE2 on, the state the 80-column firmware leaves behind), so
+	// this asserts that m8main actually turned the switch off rather than that
+	// it merely inherited a benign reset state. Deleting the store from m8.s
+	// fails here -- and only here: `sta TXTPAGE1` keeps the SCREEN correct, so
+	// an end-state screen comparison would still pass.
+	if m.Mem.Store80 {
+		t.Error("80STORE is ON: $0400-$07FF and hi-res page 1 would follow PAGE2 and " +
+			"IGNORE RAMWRT, so the DHGR renderer's aux half would land in MAIN. " +
+			"m8main's `sta CLR80STORE` is load-bearing, not defence in depth")
+	}
+	// Everything else straying outside the modelled subset is still a failure.
 	for addr, n := range m.Unhandled() {
 		t.Errorf("the boot touched $%04X (%d times), which the IIe model does not implement", addr, n)
-	}
-	// The switches were left hostile at power-on (see the top of this test);
-	// m8main has to have turned 80STORE back off, or the engine's AUX
-	// transposition table traffic at $0400-$07FF and the UI's text page are
-	// the same memory.
-	if m.Mem.Store80 {
-		t.Error("80STORE is still ON: m8main never did its `sta CLR80STORE`, so on a IIe " +
-			"booted from the 80-column firmware the screen and the engine's aux " +
-			"scratch at $0400-$07FF would be the same bytes")
 	}
 
 	// ---- 3. the screen is the gated screen ---------------------------------
@@ -473,7 +663,11 @@ func TestDiskPlays(t *testing.T) {
 	// project's emulator work boots.
 	auxTouched := func() int {
 		n := 0
-		for _, b := range m.Mem.Aux[0x0200:0x8200] {
+		// The transposition table is aux $4000-$BFFF (all 4096 entries; it
+		// moved off $0200 when the DHGR aux half claimed $2000-$3FFF). Aux
+		// $0200-$1EEE below it is the resident opening book, which the copier
+		// filled at boot, so counting from $0200 would count the book.
+		for _, b := range m.Mem.Aux[0x4000:0xC000] {
 			if b != 0 {
 				n++
 			}
@@ -622,4 +816,211 @@ func TestDiskQuitReboots(t *testing.T) {
 			t.Errorf("UIHCNT = %d after the reboot, want a fresh game", n)
 		}
 	})
+}
+
+// TestDiskBoardParity is the delivery's whole point, stated as a parity gate
+// rather than as a screenshot: BOOT THE SHIPPING DISK, and require that the
+// 16,384 bytes of double hi-res page 1 the booted machine holds are
+// byte-identical to internal/tiles' independent Go model of the same paint.
+//
+// It is a stronger claim than TestDHGRRenderParity, which runs the renderer
+// out of a purpose-built harness image with the artwork linked into main RAM
+// at a convenient address. Everything this one asserts had to survive the
+// real path: 1,824 bytes of artwork read off a real nibblised disk by the
+// real boot ROM in a SECOND loader entry, copied into Language Card bank 1,
+// indexed there by a renderer running from $E000, and painted through RAMWRT
+// into aux with 80STORE off. A board that only renders in a harness variant is
+// not delivered; this is the assertion that says it is.
+func TestDiskBoardParity(t *testing.T) {
+	dsk := dskPath(t)
+	m, err := ui.NewDiskMachine(dsk, ui.RomDir())
+	if err != nil {
+		t.Skipf("SKIP: no Apple II machine available: %v", err)
+	}
+	ok, err := m.RunToKeyboard(600_000_000)
+	if err != nil {
+		t.Fatalf("booting: %v", err)
+	}
+	if !ok {
+		t.Fatalf("the disk never reached the keyboard poll (PC $%04X)", m.CPU.PC())
+	}
+
+	screen := make([]byte, 0, tiles.A2FCSize)
+	screen = append(screen, m.Mem.Aux[0x2000:0x4000]...)
+	screen = append(screen, m.Mem.Main[0x2000:0x4000]...)
+
+	pos, err := chesstest.ParseFEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b64 [64]byte
+	for r := range 8 {
+		for f := range 8 {
+			b64[r*8+f] = pos.Board[(7-r)*16+f] & 0x0F
+		}
+	}
+	want, err := tiles.Render(tiles.DefaultBlob(), &b64, dhOriginCol, dhOriginY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(screen, want) {
+		n, first := 0, -1
+		for i := range want {
+			if screen[i] != want[i] {
+				if first < 0 {
+					first = i
+				}
+				n++
+			}
+		}
+		bank, addr := "aux", 0x2000+first
+		if first >= tiles.BankSize {
+			bank, addr = "main", 0x2000+first-tiles.BankSize
+		}
+		t.Fatalf("the BOOTED DISK's DHGR screen differs from the Go model in %d of %d "+
+			"bytes; first at %s $%04X: got $%02X, want $%02X", n, len(want), bank, addr,
+			screen[first], want[first])
+	}
+	t.Logf("the shipping disk's DHGR page 1 is byte-identical to internal/tiles' model, "+
+		"all %d bytes, from a cold $C600 boot", len(want))
+
+	// And write it out, doubled vertically so the 560x192 board is not a
+	// letterbox, so a human can look at what the disk actually painted.
+	s, err := tiles.Decode(screen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := image.NewGray(image.Rect(0, 0, tiles.ScreenW, 2*tiles.ScreenH))
+	for y := range tiles.ScreenH {
+		for x := range tiles.ScreenW {
+			if s.At(x, y) {
+				img.SetGray(x, 2*y, color.Gray{0xEE})
+				img.SetGray(x, 2*y+1, color.Gray{0xEE})
+			}
+		}
+	}
+	out := filepath.Join(os.TempDir(), "8fish-disk-board.png")
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("screenshot of the BOOTED DISK written to", out)
+}
+
+// TestDiskEscapeSwapsScreens: ESC swaps between the board and the 40-column
+// text screen, and both survive the swap. The text screen is the one every
+// other gate in this package reads, so what this really asserts is that
+// putting a board on the disk did not cost the screen that was already there.
+func TestDiskEscapeSwapsScreens(t *testing.T) {
+	dsk := dskPath(t)
+	m, err := ui.NewDiskMachine(dsk, ui.RomDir())
+	if err != nil {
+		t.Skipf("SKIP: no Apple II machine available: %v", err)
+	}
+	if ok, err := m.RunToKeyboard(600_000_000); err != nil || !ok {
+		t.Fatalf("booting: ok=%v err=%v", ok, err)
+	}
+	if !m.Mem.DHires() || m.Mem.Text {
+		t.Fatalf("the disk did not boot to the board: DHires=%v TEXT=%v",
+			m.Mem.DHires(), m.Mem.Text)
+	}
+	before := m.Screen().String()
+
+	const keyBudget2 = 400_000_000
+	if err := m.Key(0x1B, keyBudget2); err != nil { // ESC
+		t.Fatalf("ESC: %v", err)
+	}
+	if !m.Mem.Text || m.Mem.Col80 || !m.Mem.AltCharset {
+		t.Errorf("after ESC the display is not the 40-column text screen: TEXT=%v "+
+			"80COL=%v ALTCHARSET=%v", m.Mem.Text, m.Mem.Col80, m.Mem.AltCharset)
+	}
+	if got := m.Screen().String(); got != before {
+		t.Errorf("ESC changed the text screen's contents:\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+	if err := m.Key(0x1B, keyBudget2); err != nil { // ESC back
+		t.Fatalf("ESC back: %v", err)
+	}
+	if !m.Mem.DHires() || m.Mem.Text || m.Mem.Store80 {
+		t.Errorf("ESC did not come back to the board: DHires=%v TEXT=%v 80STORE=%v",
+			m.Mem.DHires(), m.Mem.Text, m.Mem.Store80)
+	}
+	// And the board is still painted -- the swap back repaints it, so a
+	// renderer that only worked once would show here.
+	blank := true
+	for _, b := range m.Mem.Aux[0x2000:0x4000] {
+		if b != 0 {
+			blank = false
+			break
+		}
+	}
+	if blank {
+		t.Error("the aux half of DHGR page 1 is entirely zero after swapping back: " +
+			"the board was not repainted")
+	}
+	t.Log("ESC swaps board <-> 40-column text screen, both intact")
+}
+
+// TestBoardNeedsTheChainLoad gates the ONE deliberate difference between the
+// two links' behaviour, from both sides.
+//
+// The renderer blits from Language Card bank 1, and only the chain loader can
+// put the artwork there -- a BRUN of m8boot.bin has no boot loader left to
+// re-enter. So the payload's UIDHGRDEF byte is $00 in both m8.bin and
+// m8sd.bin (which TestDiskLayout requires: the payloads must stay
+// byte-identical), and the chain loader patches it to $01 in RAM after the
+// copy. A build that got this backwards would paint 1,824 bytes of whatever
+// was in LC bank 1 as a chessboard.
+//
+// Asserting it on the ARTEFACTS rather than only on the booted machine is the
+// point: the emulated BLOAD path in internal/ui/m8.go pokes the blob in for
+// fidelity, so a booted-machine test alone could not tell the two apart.
+func TestBoardNeedsTheChainLoad(t *testing.T) {
+	lbl, err := ui.ParseLbl(filepath.Join(root, "asm", "m8.lbl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, ok := lbl["UIDHGRDEF"]
+	if !ok {
+		t.Fatal("asm/m8.lbl has no UIDHGRDEF: the board's default was renamed")
+	}
+	off := int(def) - 0xE000
+	for _, name := range []string{"m8.bin", "m8sd.bin"} {
+		b, err := os.ReadFile(filepath.Join(root, "asm", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if off < 0 || off >= len(b) {
+			t.Fatalf("UIDHGRDEF at $%04X is outside %s", def, name)
+		}
+		if b[off] != 0 {
+			t.Errorf("%s has UIDHGRDEF = $%02X at $%04X, want $00: the payload must not "+
+				"default to the board, because only the chain loader can make the "+
+				"artwork resident", name, b[off], def)
+		}
+	}
+
+	// And the chain loader really does patch it. `lda #$01 / sta UIDHGRDEF`
+	// must be in the disk copier and NOT in the BLOAD one.
+	want := []byte{0xA9, 0x01, 0x8D, byte(def), byte(def >> 8)}
+	disk, err := os.ReadFile(filepath.Join(root, "asm", "m8sdboot.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bload, err := os.ReadFile(filepath.Join(root, "asm", "m8boot.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(disk, want) {
+		t.Errorf("m8sdboot.bin never stores $01 to UIDHGRDEF ($%04X): the disk would "+
+			"boot to the 40-column screen with the artwork sitting unused in LC", def)
+	}
+	if bytes.Contains(bload, want) {
+		t.Errorf("m8boot.bin stores $01 to UIDHGRDEF ($%04X), but a BRUN has no chain "+
+			"loader and therefore no artwork: it would paint garbage as a board", def)
+	}
+	t.Logf("UIDHGRDEF $%04X = $00 in both payloads; only m8sdboot.bin patches it", def)
 }

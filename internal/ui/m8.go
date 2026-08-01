@@ -37,6 +37,7 @@ import (
 
 	"github.com/zellyn/chess6502/harness"
 	"github.com/zellyn/chess6502/internal/chesstest"
+	"github.com/zellyn/chess6502/internal/tiles"
 )
 
 // Fixed addresses of the boot contract (see asm/m8.cfg and asm/m8.s).
@@ -45,6 +46,10 @@ const (
 	PayloadOrg = 0x0900 // where m8.bin is BLOADed before the copier runs
 	EngineOrg  = 0x4000
 	LCOrg      = 0xE000 // where the payload runs (its first bytes are JMP m8main)
+	// TilesLC is where the DHGR artwork is resident: Language Card bank 1,
+	// above the engine's LCCODE at $D000. Keep equal to delivery.TilesLC and
+	// asm/m8.s's DHTILES.
+	TilesLC = 0xD300
 )
 
 // Machine is a booted 8fish UI plus the state a driving test needs.
@@ -240,8 +245,19 @@ func load(root, bootName, payloadName string, book []byte, realKbd bool) (*Machi
 	copy(m.Mem.Main[BootOrg:], boot)
 	copy(m.Mem.Main[PayloadOrg:], payload)
 	if book != nil {
+		// The book LANDS at main $2000 -- from a BLOAD here, from stage 2 of
+		// the chain load on the disk -- and m8bookaux lifts it to its
+		// resident home in aux $0200 once m8machine has proved the aux
+		// switches are real. Poking it where the disk puts it, rather than
+		// where it ends up, keeps this path a rehearsal of the real one.
 		copy(m.Mem.Main[0x2000:], book)
 	}
+	// The DHGR artwork, where the disk's copier leaves it: Language Card
+	// bank 1, which in goapple2's model is Main[$D000-$DFFF]. Without this
+	// the BLOAD path would paint the board out of whatever happened to be
+	// there, which is a difference between this rehearsal and the disk for
+	// no reason -- the blob is embedded and costs nothing to install.
+	copy(m.Mem.Main[TilesLC:], tiles.DefaultBlob())
 	return &Machine{M: m, Defs: defs, Lbl: lbl, StepLimit: DefaultStepLimit, RealKbd: realKbd}, nil
 }
 

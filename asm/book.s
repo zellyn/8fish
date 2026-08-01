@@ -1,8 +1,25 @@
 ; Resident opening-book probe (docs/book.md). A read-only addition to the
 ; move-selection path: at the root, BEFORE any search, compute HASH0-3 for
-; the current position, binary-search the resident blob at $2000, and — on
-; a key hit — weighted-pick among the equal-key moves and play it directly,
-; with NO node search. The selection function is byte-for-byte identical to
+; the current position, binary-search the resident blob in AUXILIARY RAM at
+; $0200, and — on a key hit — weighted-pick among the equal-key moves and
+; play it directly, with NO node search.
+;
+; WHY AUX. The blob used to live at main $2000-$3FFF, which is the MAIN half
+; of double hi-res page 1. The board renderer needs those 8 KB, so the book
+; moved to aux $0200-$1FFF (7,407 B into 7,680, the whole aux hole below the
+; DHGR aux half). The copier in asm/m8.s does the move at boot.
+;
+; WHAT THAT COSTS. This code runs from the engine image at main $4000, so it
+; cannot simply turn RAMRD on: RAMRD switches every read of $0200-$BFFF
+; INCLUDING INSTRUCTION FETCHES, and aux $4000-$BFFF is the transposition
+; table. So the blob is read through bkfetch/bkhdr, two primitives in the same
+; Language Card page ($D000) the transposition table's ttfetch already runs
+; from, which copy one 9-byte entry (or the 8-byte header) into MAIN and leave
+; the arithmetic below reading plain main memory. That keeps every comparison,
+; every carry and every fallback byte-identical to what it was at $2000 — the
+; probe's Go parity is a proof about the SELECTION, and the selection did not
+; change. Cost: one jsr and 9 byte copies per entry examined, roughly 100
+; entries per probe, once per move. The selection function is byte-for-byte identical to
 ; internal/book's Go Book.Probe(key, r) given the same 32-bit r (proven by
 ; internal/chesstest's asm==Go parity test).
 ;
@@ -10,8 +27,8 @@
 ; end of the CODE segment and reached only via its own entry point
 ; (bookentry), which the harness/bridge invokes solely when a book is
 ; loaded. The normal search entry ($4000) is not modified, so every
-; existing test (which never loads a book, so $2000 has no 'BK' magic) runs
-; the byte-identical search path — TestMicroAB grand totals are unchanged.
+; existing test (which never loads a book, so aux BOOK_BASE has no 'BK'
+; magic) runs the byte-identical search path — TestMicroAB grand totals are unchanged.
 ; On real hardware the resident engine's own move loop chains the two:
 ;   jsr evalinit / jsr bookprobe / bcs playbook / <normal search>.
 ;
@@ -34,19 +51,66 @@ BK_IDX    = PSP0        ; $D2-$D3  run-scan entry index
 BK_TOTAL  = PSP1        ; $D4-$D5  summed run weight (divisor)
 BK_REM    = EVTMP       ; $D7-$D8  r mod total = weighted pick / running rem
 BK_RUNLEN = MULCNT      ; $DA      equal-key run length (selection guard)
-ENTPTR    = CURPTR      ; $24-$25  ZP pointer to the current entry
+ENTPTR    = CURPTR      ; $24-$25  ZP pointer to the current entry, in AUX
+BK_RUN    = RUNPTR      ; $3E-$3F  ZP pointer to the run's first entry, in AUX
+
+; The two MAIN-RAM landing pads the aux primitives copy into. They sit in the
+; free tail of page 3 ($030D-$03EF, documented in defs.inc), so they cost no
+; zero page and nothing the engine or the UI uses. BKENT is read with absolute
+; indexing (BKENT,y), which is both smaller and faster than the (ENTPTR),y it
+; replaces -- the pointer arithmetic all happens in aux space now.
+; They are placed ABOVE the Disk II boot ROM's own page-3 scratch: that ROM
+; builds its denibble table at $0356-$03D5 (the top is $02D6+$FF, from its own
+; `eor $02D6,y`) and uses $0300-$0355 as the 2-of-6 buffer on EVERY sector it
+; reads -- and asm/m8.s re-enters it to chain-load stage 2. They are also below
+; $03F2-$03F4, the Autostart reset vector and power-up byte that m8main writes.
+; The margin above the ROM is ONE BYTE, which is why it is a gate
+; (internal/delivery TestPage3Layout, which reads the ceiling out of the ROM
+; image) and not a comment. defs.inc's blanket claim that "nothing is defined
+; between UNDOPD's tail ($02B7) and PIECESQ ($0800)" is about the ENGINE's own
+; allocations; it was never true of the boot ROM or the text page.
+        .export BKENT, BKHDR    ; internal/delivery's TestPage3Layout reads
+                                ;  these out of asm/engine.lbl and checks them
+                                ;  against the Disk II ROM's own page-3 ceiling
+BKENT     = $03D6       ; 9 bytes ($03D6-$03DE): one entry, copied from aux
+BKHDR     = $03DF       ; 8 bytes ($03DF-$03E6): the blob header, from aux
+BOOK_HDR_SIZE = BOOK_ENTRIES - BOOK_BASE
 
 ; --------------------------------------------------------------------------
 ; bookentry: harness/bridge entry for a standalone probe pass. Computes the
 ; root hash exactly as the search entry does (jsr evalinit), probes the
 ; book, and reports the outcome in BOOKHIT (1 = book move in BESTFROM/TO/
 ; FLAGS with CUROPENING = its NAMEID; 0 = no book / out of book -> caller
-; runs the normal search). No language-card install: evalinit and the probe
-; never touch the aux-bank TT primitives.
+; runs the normal search).
+;
+; It DOES install the language-card code now, exactly as engine.s's $4000
+; entry does. It used to say it did not need to, and that was true while the
+; blob was in main; the probe reads aux through bkfetch today, so an entry
+; that skipped the install would jsr into whatever $D000 happened to hold.
 ; --------------------------------------------------------------------------
 bookentry:
         ldx #$FF
         txs
+        lda $C08B               ; LC bank 1, read RAM + write RAM
+        lda $C08B
+        lda #<__LCCODE_LOAD__
+        sta ZPTR
+        lda #>__LCCODE_LOAD__
+        sta ZPTR+1
+        lda #<__LCCODE_RUN__
+        sta TTPTR
+        lda #>__LCCODE_RUN__
+        sta TTPTR+1
+        ldx #>(__LCCODE_SIZE__ + 255)
+        ldy #0
+bklc:   lda (ZPTR),y
+        sta (TTPTR),y
+        iny
+        bne bklc
+        inc ZPTR+1
+        inc TTPTR+1
+        dex
+        bne bklc
         jsr evalinit            ; root HASH0-3 (byte-identical to search entry)
         jsr bookprobe           ; C=1 -> hit
         lda #0
@@ -63,10 +127,11 @@ bookentry:
 ; borrowed scratch above; preserves HASH0-3.
 ; --------------------------------------------------------------------------
 bookprobe:
-        lda BOOK_MAGIC          ; 'B','K' present? absent => no book
+        jsr bkhdr               ; BKHDR = the blob's 8-byte header, from aux
+        lda BKHDR+0             ; 'B','K' present? absent => no book
         cmp #'B'
         bne bpmiss1
-        lda BOOK_MAGIC+1
+        lda BKHDR+1
         cmp #'K'
         bne bpmiss1
 
@@ -74,9 +139,9 @@ bookprobe:
         lda #0
         sta BK_LO
         sta BK_LO+1
-        lda BOOK_COUNT
+        lda BKHDR+2             ; BOOK_COUNT
         sta BK_HI
-        lda BOOK_COUNT+1
+        lda BKHDR+3
         sta BK_HI+1
         jmp bsloop
 bpmiss1:                        ; near miss return (reached by the magic and
@@ -116,9 +181,9 @@ bshi:
         jmp bsloop
 bsdone:
         lda BK_LO               ; lo == lower_bound; lo >= count => miss
-        cmp BOOK_COUNT
+        cmp BKHDR+2
         lda BK_LO+1
-        sbc BOOK_COUNT+1
+        sbc BKHDR+3
         bcs bpmiss1
         lda BK_LO               ; ENTPTR = &entry[lo]
         sta BK_MID
@@ -129,10 +194,10 @@ bsdone:
         bne bpmiss1             ; not equal => miss
 
         ; hit: sum the weights of the contiguous equal-key run [lo, hi)
-        lda ENTPTR              ; RUNPTR = run start (kept for the pick pass)
-        sta RUNPTR
+        lda ENTPTR              ; BK_RUN = run start (kept for the pick pass)
+        sta BK_RUN
         lda ENTPTR+1
-        sta RUNPTR+1
+        sta BK_RUN+1
         lda BK_LO
         sta BK_IDX
         lda BK_LO+1
@@ -143,28 +208,28 @@ bsdone:
         sta BK_RUNLEN
 sumloop:
         lda BK_IDX              ; idx < count?
-        cmp BOOK_COUNT
+        cmp BKHDR+2
         lda BK_IDX+1
-        sbc BOOK_COUNT+1
+        sbc BKHDR+3
         bcs sumdone
         jsr keyeq               ; key still == target?
         bne sumdone
-        ldy #BOOK_E_WEIGHT      ; total += weight
-        clc
+        clc                     ; total += weight
         lda BK_TOTAL
-        adc (ENTPTR),y
+        adc BKENT+BOOK_E_WEIGHT
         sta BK_TOTAL
         lda BK_TOTAL+1
         adc #0
         sta BK_TOTAL+1
         inc BK_RUNLEN
-        clc                     ; ENTPTR += stride
+        clc                     ; ENTPTR += stride, and refill BKENT from it
         lda ENTPTR
         adc #BOOK_STRIDE
         sta ENTPTR
         lda ENTPTR+1
         adc #0
         sta ENTPTR+1
+        jsr bkfetch
         inc BK_IDX              ; idx++
         bne sumloop
         inc BK_IDX+1
@@ -175,10 +240,16 @@ sumdone:
         ; weighted pick: walk the run from RUNPTR subtracting weights, exactly
         ; like Go's Probe. pick < total is guaranteed, so a move is always
         ; selected; the runlen guard reproduces Go's "return last" fallback.
+        ; The run walk re-reads the run from its start, so ENTPTR goes back
+        ; to BK_RUN and BKENT is refilled from there.
+        lda BK_RUN
+        sta ENTPTR
+        lda BK_RUN+1
+        sta ENTPTR+1
+        jsr bkfetch
 selloop:
-        ldy #BOOK_E_WEIGHT
         lda BK_REM              ; pick < weight?  (16-bit pick vs byte weight)
-        cmp (RUNPTR),y
+        cmp BKENT+BOOK_E_WEIGHT
         lda BK_REM+1
         sbc #0
         bcc selfound            ; pick < weight: take this entry
@@ -186,38 +257,36 @@ selloop:
         beq selfound
         sec                     ; pick -= weight
         lda BK_REM
-        sbc (RUNPTR),y
+        sbc BKENT+BOOK_E_WEIGHT
         sta BK_REM
         lda BK_REM+1
         sbc #0
         sta BK_REM+1
-        clc                     ; RUNPTR += stride
-        lda RUNPTR
+        clc                     ; ENTPTR += stride, and refill BKENT
+        lda ENTPTR
         adc #BOOK_STRIDE
-        sta RUNPTR
-        lda RUNPTR+1
+        sta ENTPTR
+        lda ENTPTR+1
         adc #0
-        sta RUNPTR+1
+        sta ENTPTR+1
+        jsr bkfetch
         jmp selloop
 selfound:
-        ldy #BOOK_E_FROM        ; play the move directly (engine encoding)
-        lda (RUNPTR),y
+        lda BKENT+BOOK_E_FROM   ; play the move directly (engine encoding)
         sta BESTFROM
-        ldy #BOOK_E_TO
-        lda (RUNPTR),y
+        lda BKENT+BOOK_E_TO
         sta BESTTO
-        ldy #BOOK_E_FLAGS
-        lda (RUNPTR),y
+        lda BKENT+BOOK_E_FLAGS
         sta BESTFLAGS
-        ldy #BOOK_E_NAMEID
-        lda (RUNPTR),y
+        lda BKENT+BOOK_E_NAMEID
         sta CUROPENING          ; "which opening am I in"
         sec                     ; C=1: hit
         rts
 
 ; --------------------------------------------------------------------------
-; midptr: ENTPTR = BOOK_ENTRIES + BK_MID*9  (mid in 0..count-1; mid*9 < 2800,
-; +$2008 stays inside the blob). Clobbers A. Preserves BK_MID.
+; midptr: ENTPTR = BOOK_ENTRIES + BK_MID*9 (an AUX address; mid in
+; 0..count-1, so mid*9 < 5,697 and +$0208 stays inside the blob), then copy
+; that entry into BKENT. Clobbers A,Y. Preserves BK_MID.
 ; --------------------------------------------------------------------------
 midptr:
         lda BK_MID
@@ -244,46 +313,43 @@ midptr:
         lda ENTPTR+1
         adc #>BOOK_ENTRIES
         sta ENTPTR+1
-        rts
+        jmp bkfetch             ; BKENT = the entry, copied out of aux
+                                ;  (a tail call: bkfetch's rts returns to
+                                ;   midptr's caller)
 
 ; --------------------------------------------------------------------------
-; keycmp: unsigned 32-bit compare entries[ENTPTR].Key vs HASH0-3 (both LE).
-; Returns C=1 if entryKey >= target, C=0 if entryKey < target. Clobbers A,Y.
+; keycmp: unsigned 32-bit compare the FETCHED entry's Key vs HASH0-3 (both LE).
+; Returns C=1 if entryKey >= target, C=0 if entryKey < target. Clobbers A.
+; The caller must have fetched the entry into BKENT (midptr and the two walk
+; loops all do).
 ; --------------------------------------------------------------------------
 keycmp:
         sec
-        ldy #(BOOK_E_KEY+0)
-        lda (ENTPTR),y
+        lda BKENT+BOOK_E_KEY+0
         sbc HASH0
-        ldy #(BOOK_E_KEY+1)
-        lda (ENTPTR),y
+        lda BKENT+BOOK_E_KEY+1
         sbc HASH1
-        ldy #(BOOK_E_KEY+2)
-        lda (ENTPTR),y
+        lda BKENT+BOOK_E_KEY+2
         sbc HASH2
-        ldy #(BOOK_E_KEY+3)
-        lda (ENTPTR),y
+        lda BKENT+BOOK_E_KEY+3
         sbc HASH3
         rts
 
 ; --------------------------------------------------------------------------
-; keyeq: Z=1 iff entries[ENTPTR].Key == HASH0-3. Clobbers A,Y.
+; keyeq: Z=1 iff the FETCHED entry's Key == HASH0-3. Clobbers A. Same
+; precondition as keycmp: BKENT holds the entry ENTPTR points at.
 ; --------------------------------------------------------------------------
 keyeq:
-        ldy #(BOOK_E_KEY+0)
-        lda (ENTPTR),y
+        lda BKENT+BOOK_E_KEY+0
         cmp HASH0
         bne keyeqx
-        ldy #(BOOK_E_KEY+1)
-        lda (ENTPTR),y
+        lda BKENT+BOOK_E_KEY+1
         cmp HASH1
         bne keyeqx
-        ldy #(BOOK_E_KEY+2)
-        lda (ENTPTR),y
+        lda BKENT+BOOK_E_KEY+2
         cmp HASH2
         bne keyeqx
-        ldy #(BOOK_E_KEY+3)
-        lda (ENTPTR),y
+        lda BKENT+BOOK_E_KEY+3
         cmp HASH3               ; Z set iff all four bytes equal
 keyeqx:
         rts
@@ -323,3 +389,43 @@ bmnext:
         dex
         bne bmloop
         rts
+
+; --------------------------------------------------------------------------
+; The two aux primitives. They live in the Language Card ($D000) for the same
+; reason ttfetch does: RAMRD switches instruction fetches too, so the only
+; code that may hold it on is code that is not fetched from $0200-$BFFF.
+;
+; Zero page follows ALTZP, not RAMRD, so (ENTPTR),y still reads its pointer
+; out of MAIN zero page while the DATA byte comes from aux. Stores follow
+; RAMWRT, which the caller must leave OFF -- with it on, the copy would land
+; in aux and the probe would compare against main garbage. Every caller does
+; (dhboard, m8bookaux and m8machine each restore it), and ttfetch has exactly
+; the same precondition; it is written down here because it is a precondition
+; and not an accident. That is the whole trick, and it is the one D4 records
+; for the transposition table.
+; --------------------------------------------------------------------------
+        .segment "LCCODE"
+
+; bkfetch: BKENT = the 9-byte book entry at aux (ENTPTR). Clobbers A,Y.
+bkfetch:
+        sta $C003               ; RAMRD on
+        ldy #BOOK_STRIDE-1
+bkf1:   lda (ENTPTR),y
+        sta BKENT,y
+        dey
+        bpl bkf1
+        sta $C002               ; RAMRD off
+        rts
+
+; bkhdr: BKHDR = the blob's 8-byte header at aux BOOK_BASE. Clobbers A,Y.
+bkhdr:
+        sta $C003               ; RAMRD on
+        ldy #BOOK_HDR_SIZE-1
+bkh1:   lda BOOK_BASE,y
+        sta BKHDR,y
+        dey
+        bpl bkh1
+        sta $C002               ; RAMRD off
+        rts
+
+        .segment "CODE"

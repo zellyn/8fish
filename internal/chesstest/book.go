@@ -7,21 +7,23 @@ import (
 	"github.com/zellyn/chess6502/harness"
 )
 
-// BookBase is the resident opening book's fixed load address ($2000), the
-// verified-free hi-res page-1 hole. Mirrors internal/book.BaseAddr and the
-// asm BOOK_BASE in asm/book.inc.
-const BookBase = 0x2000
+// BookBase is the resident opening book's fixed load address: AUXILIARY RAM
+// $0200. Mirrors internal/book.BaseAddr and the asm BOOK_BASE in
+// asm/book.inc. It was main $2000 until the DHGR board renderer claimed
+// $2000-$3FFF in both banks.
+const BookBase = 0x0200
 
 // LoadBook installs the resident opening-book blob into the emulated
-// machine's MAIN memory at BookBase ($2000). The asm probe detects the book
-// by the 'B','K' magic at $2000, so an unloaded machine (every existing
+// machine's AUXILIARY memory at BookBase ($0200). The asm probe detects the
+// book by the 'B','K' magic there, so an unloaded machine (every existing
 // test) is a pure no-book no-op.
 //
-// On real hardware this is the loader's one-time disk read of the ~3.9 KB
-// blob (e.g. 8 consecutive 512-byte sectors) into $2000-$3FFF; the blob
-// stays resident and is never re-read. Here we poke the identical bytes.
+// On real hardware the disk delivers the blob to main $2000 in the boot
+// loader's SECOND stage and asm/m8.s's copier moves it to aux $0200 before
+// anything runs; here we poke the identical bytes straight into aux, which is
+// the state the probe actually sees.
 func LoadBook(m *harness.Machine, blob []byte) {
-	copy(m.Mem.Main[BookBase:], blob)
+	copy(m.Mem.Aux[BookBase:], blob)
 }
 
 // BookProbeResult is the outcome of one on-device (asm) book probe.

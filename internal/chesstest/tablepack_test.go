@@ -128,7 +128,15 @@ func TestTablePacking(t *testing.T) {
 	}
 
 	// Ceiling guard: the image must stay below the harness trap page.
-	top := addr("__LCCODE_LOAD__") + 0x41
+	//
+	// The size comes from the LINKER (`__LCCODE_SIZE__`), not from a copy of
+	// it. It used to be a hardcoded 0x41, which was right until 2026-07-31 --
+	// when the book's move to aux added bkfetch/bkhdr to LCCODE and grew it to
+	// 0x64. The guard could not FAIL at 826 bytes of slack, so it went on
+	// printing a headroom figure 35 bytes too generous while measuring a top
+	// the image no longer had. A constant that mirrors a built artefact is a
+	// gate with an expiry date on it.
+	top := addr("__LCCODE_LOAD__") + addr("__LCCODE_SIZE__")
 	if top > 0xBFF0 {
 		t.Errorf("image top $%04X is past the $BFF0 trap ceiling", top)
 	}

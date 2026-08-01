@@ -41,9 +41,10 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	// The Standard Delivery layout of the same source: the copier and the
-	// staged payload moved to $0C00/$0D00 so the contiguous disk image fits
-	// (internal/delivery). It emits asm/m8sdboot.bin, which cmd/mkdsk ships.
-	if err := asmbuild.BuildStandaloneAs(root, "m8", "m8sd"); err != nil {
+	// staged payload at $0D00/$0E00, plus the CHAIN LOADER that re-enters the
+	// boot loader for stage 2 (internal/delivery). It emits asm/m8sdboot.bin,
+	// which cmd/mkdsk ships.
+	if err := asmbuild.BuildStandaloneAs(root, "m8", "m8sd", asmbuild.SDChain); err != nil {
 		panic(err)
 	}
 	os.Exit(m.Run())
@@ -205,6 +206,8 @@ func TestUIByteBudget(t *testing.T) {
 		{"uipaint", "painting: title, status, prompt, messages, opening name"},
 		{"uithinkln", "think line + signed centipawn formatting"},
 		{"STSQ", "tables and strings (start position, levels, KTAB, all text)"},
+		{"dhclear", "asm/dhgr.s: the double-hi-res board renderer"},
+		{"TILEIDX", "generated tile dispatch tables (cmd/gentiles)"},
 	}
 	type row struct {
 		addr int

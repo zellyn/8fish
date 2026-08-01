@@ -124,15 +124,33 @@ memory model (no video, no cards) implementing:
   inverse video can be checked as pixels rather than as bytes. Finding it
   paid for itself immediately: see docs/results.md 2026-07-28
 
-Still deliberately unimplemented (the engine keeps 80STORE off, which on
-real hardware makes RAMRD/RAMWRT govern all of `$0200-$BFFF`):
-80STORE/PAGE2/HIRES display-coupled **banking** — one extra compare on the
-hottest path in the emulator for a switch no caller throws, so it stays
-loud in `Unhandled` — plus aux-bank/80-column video, INTCXROM/SLOTC3ROM
-Cxxx ROM mapping, mouse/paddles/speaker, key auto-repeat, and the 32
-MouseText glyph shapes. The list lives in `iie`'s package doc. Stage 2
-adds them, validated by the rest of a2audit, and wires the model into the
-interactive goapple2 machine.
+**Stage 2 (landed in the sibling checkout by 2026-07-31), and it changes what
+this project can PROVE:**
+
+- **80STORE** display-coupled banking, with the precedence that makes it
+  matter: 80STORE OVERRIDES RAMRD/RAMWRT for `$0400-$07FF` and, with HIRES
+  on, for `$2000-$3FFF`. `Store80` is exposed.
+- **AN3** (`$C05E`/`$C05F`) and `DHires()` = 80COL on && AN3 low.
+- the `$C100-$CFFF` internal ROM switching.
+
+This is not housekeeping — it retired a whole category of "we cannot test
+this" in 8fish. `asm/m8.s`'s `sta CLR80STORE` was documented for months as a
+hardware-only precaution nothing could check, and the double-hi-res board
+renderer reaches aux through RAMWRT, so 80STORE left on would silently put the
+board's aux half in main. `internal/ui`'s `TestDiskBoots` now asserts
+`Store80 == false` on the BOOTED DISK, and `TestDiskEscapeSwapsScreens`
+asserts `DHires()` on the board and 80COL off on the text screen.
+
+The moral is the ALTCHARSET one again, from the other side: that bug was found
+only because someone modelled the switch. Model the switch and you find out —
+this time, that the code was already right.
+
+Still deliberately unimplemented: aux-bank/80-column VIDEO RENDERING (the
+memory is there; the renderer is not, so an 80-column screen can be checked as
+bytes but not as pixels), annunciators 0-2, IOUDIS (`$C07E/$C07F`) and its
+DHIRES status read, mouse/paddles/speaker/cassette, slot I/O at `$C090-$C0FF`,
+key auto-repeat, and the 32 MouseText glyph shapes. The list lives in `iie`'s
+package doc, and everything on it still goes to `Unhandled`.
 
 ### Validation against a2audit
 
@@ -146,8 +164,11 @@ result flags:
 
 - `TestA2AuditLangcard`: **passing** — the data-driven Language Card
   suite, verified against real hardware, including WRTCOUNT quirks.
-- `TestA2AuditAuxmem`: skipped pending stage 2 (exercises 80STORE/PAGE2/
-  HIRES aliasing and Cxxx ROM in its later stages).
+- `TestA2AuditAuxmem`: **passing** — the twenty combinations of RAMRD x
+  RAMWRT x 80STORE x PAGE2 x HIRES, each seeding both banks at thirteen
+  addresses spanning zero page, main memory, the text page and the hi-res
+  page, all checked against hardware-verified expectations. This is the
+  evidence behind every 80STORE claim in `docs/ui-design.md` §13.5.
 
 A subtlety this loop already caught: calling audit code on a cold machine
 hangs in a BRK loop, because monitor output vectors through CSW (`$36/$37`)

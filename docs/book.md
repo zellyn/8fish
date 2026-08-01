@@ -242,8 +242,20 @@ addition — no format change.
 **Real-hardware equivalent:** at startup the loader reads the ~3.9 KB blob
 from disk **once** into `$2000-$3FFF` (e.g. 8 consecutive 512-byte
 sectors, ~4 KB) and never touches it again. It is independent of the
-transposition table, which lives in the aux bank. `asm/book.inc` gives the
-resident base and field offsets the loader and probe share.
+transposition table, which also lives in the aux bank, above it at `$4000`.
+`asm/book.inc` gives the resident base and field offsets the loader and probe
+share.
+
+**Where it lives, and how it is read (2026-07-31).** The blob is delivered to
+main `$2000` by stage 2 of the disk's chain load and lifted to AUX `$0200` by
+`m8bookaux` before anything runs. `bookprobe` is fetched from main `$4000`, so
+it cannot turn RAMRD on — that would switch instruction fetches too, and aux
+`$4000-$BFFF` is the transposition table. It reads the blob through `bkhdr` and
+`bkfetch`, two primitives in the same Language Card page as `ttfetch`, which
+copy the 8-byte header and one 9-byte entry into main `$03DF`/`$03D6`. Every
+comparison below that is unchanged, which is why `TestBookProbeParityASMvsGo`
+needed no new cases: the proof is about the SELECTION, and the selection did
+not move.
 
 ## Resident asm probe (implemented)
 
@@ -313,12 +325,22 @@ confirms the pick frequencies equal the weights; `TestBookProbeOutOfBook`
 confirms misses match. `TestBookFollowThenSearchDriver` and ucibridge's
 `TestBridgeBookFollowThenSearch` play a full opening on-device.
 
-### Coexistence note (move stack) — settled 2026-07-28
+### Coexistence note (move stack) — settled 2026-07-28, DISSOLVED 2026-07-31
+
+**The overlap this note is about no longer exists.** `BOOK_BASE` is AUX `$0200`
+as of 2026-07-31 (main `$2000-$3FFF` is the double-hi-res MAIN half; see
+`docs/ui-design.md` §13), so a move-stack overrun past `MOVESTACKTOP = $2000`
+can no longer reach the book at all — it now runs into the BOARD, where the
+symptom is visible garbage on the next repaint rather than a silently wrong
+opening move. `MOVESTACKTOP` stays `$2000` and
+`chesstest.TestMoveStackWatermark` stays exactly as it was; only what is on the
+other side of the line changed. The reasoning below is kept because it is the
+record of how the overlap was priced.
 
 `MOVESTACKTOP` is `$2000` and the generator's batched emission may write up
-to ~124 bytes past it (`$2000-$207F`) before its flush traps. `BOOK_BASE` is
+to ~124 bytes past it (`$2000-$207F`) before its flush traps. `BOOK_BASE` was
 also `$2000`, so those 128 bytes — the header plus the ~13 lowest-keyed
-entries — are the book's exposure. `defs.inc` used to claim the same 128
+entries — were the book's exposure. `defs.inc` used to claim the same 128
 bytes were reserved guard slack that "must stay unallocated"; that claim was
 false the day the book landed and has been removed. Three facts settle it:
 

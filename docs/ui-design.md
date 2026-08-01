@@ -1,5 +1,9 @@
 # 8fish on-device user interface — design
 
+Status: **SHIPPING, WITH THE DOUBLE-HI-RES BOARD** (2026-07-31). See **§13**,
+which is the current state of the delivery and corrects §3.1.1's page-table
+arithmetic; §12 remains the 2026-07-28 text-UI record.
+
 Status: **BUILT AND PLAYABLE** (2026-07-28). `asm/m8.s` implements this design;
 `internal/ui` boots the real image in the emulator, types on its keyboard and
 plays whole games against it, refereed ply by ply by `internal/refchess`. See
@@ -246,7 +250,11 @@ What the implementation added to the analysis:
   it is still 0.6% of a 30 s move, so repaint-everything holds and partial
   repaints stay designed out. There is easy headroom in an unrolled inner loop
   if it is ever wanted.
-- **`sta CLR80STORE` is now LOAD-BEARING, not defence in depth.** This renderer
+- **`sta CLR80STORE` is now LOAD-BEARING, not defence in depth.** (The
+  "no test in this repo can catch this" half of the note below is **out of
+  date as of 2026-07-31**: goapple2's IIe model implements 80STORE, AN3 and
+  `DHires()` now, and `internal/ui` asserts all three on the booted disk.
+  See §13.5.) This renderer
   reaches the aux half through RAMWRT (the discipline D4 already uses for the
   TT), not through 80STORE/PAGE2. With 80STORE *on*, `$2000-$3FFF` follows
   PAGE2 and ignores RAMWRT, so the aux half would silently land in main. The
@@ -263,6 +271,12 @@ tiles — the same discipline as the engine's search gates.
 
 **What blocks shipping it is DELIVERY, and the wall is not the one we expected.**
 Two independent walls, both arithmetic:
+
+> **SUPERSEDED BY §13 (2026-07-31): both walls are gone, and one of the two
+> numbers below is wrong.** The page table is `$084F-$08FF` = **176** sectors,
+> not 177: the `LDA $084E` at `$0805` is pre-incremented at `$0802`. And the
+> table is a LIST OF PAGES, so stage 1 scatter-loads disjoint spans for free.
+> The board ships; read §13 rather than re-deriving any of this.
 
 1. *No room in main RAM at load time.* Standard Delivery loads one contiguous
    span into main. At load time the free main holes are 164 B (above the staged
@@ -1157,3 +1171,194 @@ jumping through the same vector. And `TestDiskQuitReboots` can only complete
 the round trip with the Apple ][+ Autostart ROM: a real IIe ROM's cold start
 calls into the `$C100-$CFFF` internal firmware, which this emulator
 deliberately does not model.
+
+---
+
+## 13. The board SHIPS (2026-07-31)
+
+`asm/8fish.dsk` boots to the hand-drawn double-hi-res board. Not to a harness
+variant of it: `internal/ui`'s `TestDiskBoardParity` starts a IIe at `$C600`,
+lets the Disk II boot ROM read a real nibblised disk, and asserts that all
+**16,384 bytes** of DHGR page 1 in the resulting machine are byte-identical to
+`internal/tiles`' independent Go model. ESC swaps to the 40-column text screen,
+which is unchanged and still carries every gate it did before.
+
+### 13.1 The loader's ceiling, corrected — and then made irrelevant
+
+§3.1.1 said Standard Delivery's page table was `$084E-$08FF`, 177 sectors,
+45,312 B. **It is `$084F-$08FF`, 176 sectors, 45,056 B.** The `LDA $084E` at
+`$0805` is PRE-incremented by the `INC $0806` at `$0802`, so the first entry
+the loader ever reads is `$084F`. One byte, and it turns out to explain a
+number nobody had explained: `diskii mksd`'s "44 KB cap" is not a tool policy,
+it is exactly 176 × 256. The two agree because they are the same fact.
+
+The verdict is unchanged and slightly worse. 8fish is 183 sectors of real
+payload; the single-shot layout is over by **seven** sectors, not one.
+
+But the same disassembly carries two things that make the ceiling stop
+mattering, and only one of them was in the plan:
+
+- **The loader survives.** Our image starts at `$0D00`, so `$0800-$08FF` is
+  never overwritten and the loader's sequential read state is intact when it
+  jumps to the copier — `$26` = 0, `$41` = track, `$2B` = slot<<4, Y = last
+  sector + 1 (the ROM's `JMP $0801` lands on a `TAY`, so Y is the loop's
+  input), `$0800` = `$01`. The copier writes a fresh page table into page
+  `$08`, resets `$0806` to `$4E`, repoints the terminator's `JMP` at
+  `$084D/$084E`, restores X and Y and jumps to `$0802`. The read continues from
+  the next sector on the disk. No sector reader, no nibble code, nothing that
+  could ever write to a disk.
+
+- **The table is a LIST OF PAGES, not a base address**, so a stage can
+  scatter-load DISJOINT spans at no cost. `diskii mksd` writes a consecutive
+  table only because it is handed one contiguous image; `internal/delivery`
+  overwrites it. Stage 1's `$2000-$3FFF` hole used to be 32 wasted sectors and
+  is now zero. This was not in the plan and it is worth more than the chain
+  load on its own: **every future "it doesn't fit" is now a layout question,
+  not a delivery question.**
+
+### 13.2 The shipping shape
+
+```
+STAGE 1   146 / 176 sectors      (the boot sector's own table, patched)
+  $0D00   m8sdboot.bin      171 B   copier + chain loader        1 sector
+  $0E00   m8.bin          5,064 B   UI payload -> $E000         20 sectors
+  $4000   engine.bin     31,941 B   the engine                 125 sectors
+
+STAGE 2    37 / 176 sectors      (the copier's table, loader re-entered at $0802)
+  $0E00   tileblob.bin    1,824 B   artwork -> LC bank 1 $D300   8 sectors
+  $2000   bookblob.bin    7,407 B   book -> AUX $0200           29 sectors
+
+disk      184 / 560 sectors, 376 free
+boot      7.01 s   ($C600 to the first keyboard poll, measured)
+```
+
+**Stage 2 lands in MAIN and is copied on. That is the boot ROM's doing, not
+caution.** Its denibblise pass READS THE BUFFER BACK (`lda ($26),y` at
+`$C6D9`). A Language Card destination reads back as ROM — ROM has to be banked
+in, because the loader's track step ends in `jmp $FCA8` — and an aux
+destination reads back as main with RAMRD off. Either way the second pass
+denibblises garbage over the first. Reading straight into LC or aux is not a
+tuning opportunity; it is broken, and it would have been broken *intermittently*
+(only when a track step fell inside the stage). Staging through main costs one
+8-page and one 29-page copy, about 90 ms of a 7-second boot.
+
+Two margins from §12 are simply gone. "SD spare" and "UI growth room" were
+properties of one contiguous span. The payload now stages into `$0E00-$21FF`,
+which OVERLAPS stage 2's landing zone for the book — safely, because the copier
+lifts the payload to `$E000` before it re-enters the loader. Its real cap is its
+own `$E000-$F6FF` Language Card budget, which the link config enforces as a link
+error. 1,064 B of that budget are still free.
+
+### 13.3 Where everything lives now
+
+```
+MAIN  $2000-$3FFF   DOUBLE HI-RES PAGE 1, main half   (was the resident book)
+AUX   $0200-$1EEE   the resident opening book, 7,407 B of 7,680 (273 B spare)
+AUX   $2000-$3FFF   double hi-res page 1, aux half
+AUX   $4000-$BFFF   the transposition table, all 4096 entries
+LC 1  $D000-$D040   LCCODE: the engine's aux primitives (now 3 of them)
+LC 1  $D300-$DA1F   the artwork, 1,824 B
+LC 1  $DA20-$DC7F   scanline bases + the two synthesised blank tiles (456 B)
+LC 2  $D000-$DFFF   FREE, 4,096 B, still untouched
+```
+
+**The book moved because main `$2000-$3FFF` is the DHGR main half**, and that
+is the only reason. `asm/book.s` now reads the blob through two primitives in
+the same `$D000` page `ttfetch` already lives in: it is fetched from main
+`$4000`, so it cannot simply turn RAMRD on — RAMRD switches instruction fetches
+too, and aux `$4000-$BFFF` is the transposition table. `bkfetch` copies one
+9-byte entry into main `$03D6`, and every comparison, carry and fallback below
+it is byte-identical to what it was at `$2000`. `TestBookProbeParityASMvsGo`
+holds unchanged, which is the point: the probe's Go parity is a proof about the
+SELECTION, and the selection did not move.
+
+`asm/m8.s`'s `uibookname` *can* just turn RAMRD on, because it runs from the
+Language Card, which RAMRD does not switch. The asymmetry between those two
+routines is the whole discipline in one page.
+
+### 13.4 ★ MIXED MODE DOES NOT FIT, and here is the arithmetic
+
+The board ships FULL SCREEN with ESC swapping to the 40-column text screen —
+Sargon III's arrangement — and not as §3.1's mixed mode with a four-line text
+window. That is a forced move, and the force is in aux RAM, not on the screen:
+
+- Double hi-res requires 80COL on. With 80COL on, the mixed-mode text window is
+  **80-column** text, whose even columns come from **AUX** `$0400-$07FF`.
+- Rows 20-23 are aux `$0650-$0677`, `$06D0-$06F7`, `$0750-$0777`, `$07D0-$07F7`:
+  **160 bytes, in four pieces, in the MIDDLE** of the 7,680-byte aux hole.
+- The book is 7,407 B. The two largest chunks either side of the window are
+  1,104 B (`$0200-$064F`) and 6,152 B (`$07F8-$1FFF`) = **7,256 B, 151 B short.**
+  Adding one 88-byte screen hole gets 7,344; it takes FOUR chunks to reach
+  7,407, and a four-piece book is not a book.
+
+**The way through, worked out but not built.** Move the book's 1,702-byte NAME
+TABLE out of the blob and into the Language Card. The probe never touches it —
+`bookprobe` reads offsets 0..5,704 and stops; only `uibookname` walks the names,
+and it already runs from LC. That leaves 5,705 B of header + entries, which fits
+aux `$0800-$1FFF` (6,144 B) with 439 B to spare and leaves the whole of aux
+`$0200-$07FF` free for the text window. It is a **blob-format** change
+(`cmd/genbook`, `internal/book`, the probe parity gate), not a renderer change,
+and it also wants an 80-column text writer the project does not have yet.
+
+Cost of the current arrangement: while the board is up, the player types blind.
+Mitigation, and it is cheap: the 40-column screen is repainted EVERY time
+regardless (23,826 cycles against the board's 192,667 — both re-measured on
+the shipping build), so ESC is instant and the screen behind it is always
+already correct.
+
+### 13.5 ★ What a real IIe can still surprise us with — a MUCH shorter list
+
+§3.1.1 said "goapple2 models neither 80STORE nor AN3, so no test in this repo
+can catch getting those switches wrong." **That is no longer true, and it is
+the single most important thing in this section.** The sibling checkout's
+`iie` package now models:
+
+- **80STORE**, including the precedence that makes it dangerous — 80STORE
+  OVERRIDES RAMRD/RAMWRT for `$0400-$07FF` and, with HIRES, for `$2000-$3FFF` —
+  validated against a2audit over all sixteen switch combinations.
+- **AN3** (`$C05E`/`$C05F`) and `DHires()` = 80COL on && AN3 low.
+
+So `sta CLR80STORE` is now ASSERTED rather than commented: `TestDiskBoots`
+requires `Store80 == false` on the booted disk, and `TestDiskEscapeSwapsScreens`
+requires `DHires()` true on the board and 80COL off on the text screen. The
+project's own lesson — "the ALTCHARSET omission was found only when someone
+modelled the switch" — has now paid out a second time, in the other direction:
+someone modelled the switches, and the code was already right.
+
+What is STILL unverifiable here, and where a first real-hardware boot should
+look if the board comes up wrong:
+
+| unverifiable | why | symptom on hardware |
+|---|---|---|
+| **Video output itself** | goapple2 renders nothing; it is a memory + switch model. Our pixels are checked against `internal/tiles`' decoder | the byte layout is right (the artwork came out of DazzleDraw and round-trips), but nothing here has driven a real 14M shift register |
+| **AN3 as a soft switch vs. IOUDIS** | `$C07E/$C07F` (IOUDIS) and the AN3 status read are not modelled | on a IIc or an enhanced IIe with IOUDIS off, `$C05E` may be an annunciator rather than DHIRES: single-resolution hi-res showing only the main half — a board with every other byte-column missing |
+| **The unenhanced IIe's DHGR** | not modelled, and not a switch we set | the original IIe needs the "double hi-res" jumper/revision; on a Rev A board there is no DHGR at all |
+| **Ctrl-Reset and the language card** | as §12 already records | unchanged by this work |
+| **Drive timing** | the emulated Disk II has no seek-time or rotational-latency model beyond the nibble stream | boot time is 7.01 s of EMULATED time; a real drive's head settling is not in that number |
+
+The chain load itself is NOT on this list, and deliberately so. It is the same
+boot ROM, reading the same nibbles, through the same `$C65C` entry the first
+stage used; everything it depends on ($26, $2B, $41, Y, `$0800`) is asserted by
+`TestDiskBoots` in the delivered machine, and `TestStage2PageTable` cross-checks
+the table ca65 built from the blob sizes against the one Go wrote on the disk.
+
+### 13.6 Two bugs the gates caught, both worth keeping
+
+**The aux-capability probe was writing the book.** `m8machine` proves the aux
+switches are real by writing `$A5` to main `$0300` and `$5A` to aux `$0300`, and
+it justified the collateral damage with "aux `$0300` is inside the transposition
+table, which is rewritten anyway". That was true until the table moved to
+`$4000`; aux `$0300` is now inside the RESIDENT OPENING BOOK. It probes `$3F00`
+now — DHGR page 1 in both banks, above the book's staging zone in main, scratch
+*by construction* rather than by argument. Same shape as the D8 lesson: a
+precaution that survives the reason for it becomes a bug with an alibi.
+
+**The book's move to aux crashed an Apple ][+.** The copy started life in the
+copier. On a ][+, `$C005` is not a soft switch, so 29 pages landed in MAIN
+`$0200-$1F3F` — straight over the BLOAD copier running at `$0800`. The copier
+overwrote itself mid-loop, and the machine check that exists to print NEEDS A
+128K APPLE IIE never ran. It is `m8bookaux` now, called from `m8main` AFTER
+`m8machine` has PROVED the switches are real. The rule this generalises to:
+**nothing may write through RAMWRT in bulk before the machine check, because on
+exactly the machines the check exists to reject, a RAMWRT-on write is an
+ordinary write to main.**

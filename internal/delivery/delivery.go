@@ -1,62 +1,79 @@
-// Package delivery builds the bootable 8fish disk: it lays the four payload
-// pieces out as ONE contiguous memory image and hands that image to
-// peterferrie's "Standard Delivery" boot loader via `diskii mksd`.
+// Package delivery builds the bootable 8fish disk: it lays the payload out as
+// SPANS grouped into STAGES and hands them to peterferrie's "Standard
+// Delivery" boot loader via `diskii mksd`.
 //
-// WHY ONE IMAGE. Standard Delivery is a boot sector plus a fast loader: it
-// reads a single contiguous span of sectors into a single contiguous span of
-// memory and jumps to it. There is no file system, no DOS, and no way to say
-// "this piece here, that piece there" — so the gaps between the pieces are
-// part of the image and are paid for in disk sectors.
+// WHY STAGES AND SPANS. Standard Delivery is a boot sector plus a fast loader.
+// Its loader is a PAGE TABLE at $084F-$08FF in the boot sector: one destination
+// page per sector read, in disk order, $C0 terminating, self-modified through
+// the low byte of the `LDA $084E` at $0805 (which is pre-incremented, so the
+// FIRST entry read is $084F, not $084E). That table is 177 bytes; one is the
+// terminator, so
 //
-//	$0D00  m8sdboot.bin                57 B  the run-once copier
-//	$0E00  m8.bin                   4,441 B  the UI payload (staged; the
-//	                                         copier moves it to $E000)
-//	$2000  internal/book/bookblob.bin 7,407 B the resident opening book
-//	$4000  engine.bin              31,906 B  the engine
+//	ONE PAGE TABLE = 176 SECTORS = 45,056 BYTES. EVER.
 //
-// WHY NOT $0800. `diskii mksd` refuses an image over MaxImage (45,056)
-// bytes. The span runs from the staging base to the end of engine.bin, so the
-// base is the only free variable, and at the BLOAD layout's $0800 the image
-// does not fit. Raising the base shrinks the image byte for byte but eats the
-// staging area the UI payload has to fit in (it must end below the book at
-// $2000). At the file sizes of 2026-07-30 (engine 31,906 B, UI 4,441 B):
+// Two consequences, and they point in opposite directions:
 //
-//	base    image    spare   UI growth room
-//	$0800  46,242   -1,186        1,447
-//	$0C00  45,218     -162          423
-//	$0D00  44,962       94          167     <- chosen
-//	$0E00      -        -             -     payload overlaps the book
+//   - The table is a LIST OF PAGES, not a base address. Nothing requires the
+//     pages to be consecutive. A stage can therefore scatter-load DISJOINT
+//     spans with no wasted sectors — `diskii mksd` writes a consecutive table
+//     only because it is handed one contiguous image, and we overwrite it.
+//   - 176 sectors is an absolute ceiling on ONE table, and 8fish is past it.
+//     The exact overshoot is not written down here on purpose -- it moves
+//     every time anything grows -- but internal/ui's TestDiskLedger computes
+//     it from the real files on every run and FAILS if it ever goes negative,
+//     because at that point the chain load has stopped being load-bearing and
+//     collapsing back to one stage would be simpler and faster to boot.
 //
-// The chosen base is the LOWEST that fits, i.e. the one that leaves the UI
-// the most room to grow. Both margins are small and both are consumed by
-// ordinary growth (the engine eats the spare, the UI eats the growth room),
-// so TestDiskLedger asserts both rather than trusting this comment — and
-// recomputing the table is one call to LoadAt/Image per candidate base, which
-// beats arguing from a comment that has already gone stale once.
+// The way through is the loader's own survival. Our image starts at $0D00, so
+// the boot sector's code at $0800-$08FF is never overwritten and its sequential
+// read state is intact when it jumps to the copier:
 //
-// NEITHER MARGIN IS A WALL. It is our disk. The 44 KB cap and the contiguous
-// span are properties of the SIMPLEST Standard Delivery layout — one shot,
-// one span — not of the medium. When the margins run out the answer is a
-// different LOADER, not a smaller program:
+//	$26 = $00        read buffer low            (set once at $C659)
+//	$41              current track              (checked against every address
+//	                                             field the ROM reads)
+//	$2B = slot<<4    and X = $2B on entry
+//	Y = last sector + 1                          (the ROM's `JMP $0801` lands on
+//	                                              a TAY, so Y is the loop input)
+//	$0800 = $01      the ROM's "one sector per call" count
 //
-//   - chain-load: the first thing loaded loads the next. Cheap in principle,
-//     but by the time it is robust it is most of a sector reader, at which
-//     point taking a good one beats writing one.
-//   - ProRWTS2 (peterferrie): reads AND WRITES ProDOS files. It is the
-//     intended successor, because Standard Delivery is READ-ONLY and a saved
-//     game needs a writer — and hand-rolling a Disk II WRITER (6-and-2 nibble
-//     encoding plus write-splice timing) is the last thing this project
-//     should write itself: getting it wrong corrupts disks instead of failing.
-//     It would also remove the contiguous-span squeeze, handing the UI back
-//     its full 5,888-byte LC budget.
+// So the copier can write a FRESH page table into page $08, reset the
+// self-modified pointer at $0806 to $4E, repoint the terminator's `JMP` at
+// $084D/$084E, restore X and Y, and `JMP $0802`. The read continues from the
+// next sector on the disk. No hand-rolled sector reader, no nibble code,
+// nothing that could ever write to a disk. asm/m8.s does exactly that.
 //
-// So the ledger is a TRIPWIRE that says "the simple path no longer fits,
-// choose a mechanism", not a budget that has to be defended.
+// THE SHIPPING LAYOUT
 //
-// The staging address is not hardcoded in asm/m8.s; it is a linker symbol
-// defined by asm/m8sd.cfg, so this layout and the BLOAD layout are built from
-// the same source and the copier is the only thing that differs (by two
-// bytes: the payload address).
+//	STAGE 1 (the boot sector's own table, patched by this package)
+//	  $0D00  asm/m8sdboot.bin    the run-once copier + the chain loader
+//	  $0E00  asm/m8.bin          the UI payload (staged; lifted to $E000)
+//	  $4000  asm/engine.bin      the engine
+//
+//	STAGE 2 (table written by the copier, re-entering the loader at $0802)
+//	  $0E00  tileblob.bin        the DHGR artwork, then copied to LC bank 1
+//	  $2000  bookblob.bin        the opening book, then copied to AUX $0200
+//
+// Stage 2 lands in MAIN and is copied on, rather than being read straight into
+// the Language Card or into aux. That is not caution, it is the boot ROM: its
+// denibblise pass READS THE BUFFER BACK (`lda ($26),y` at $C6D9). Reading back
+// a Language Card destination while ROM is banked in for $FCA8 (WAIT, which
+// the loader's track step calls) returns ROM; reading back an aux destination
+// with RAMRD off returns main. Either way the second pass would denibblise
+// garbage over the first. Staging through main costs one 8-page copy and one
+// 29-page copy — about 90 ms, against a 6-second boot — and it is immune to
+// where the stage happens to fall on the disk.
+//
+// WHY $0E00 IS FREE FOR STAGE 2. It is where stage 1 staged the UI payload,
+// and the copier lifts that to $E000 BEFORE re-entering the loader. $2000 is
+// free for the same reason the book can leave it: nothing has run yet.
+//
+// WHAT IS NO LONGER A CONSTRAINT. The old layout's two margins — "SD spare"
+// (the image must fit 45,056 B) and "UI growth room" (the staged payload must
+// end below the book at $2000) — were both properties of the single-shot,
+// single-span arrangement. With the book delivered in stage 2 the payload has
+// the whole $0E00-$3FFF window to stage into, capped by its own $E000-$F6FF
+// Language Card budget long before it runs out of staging room; and with two
+// tables the 176-sector ceiling applies per stage, not to the program.
 package delivery
 
 import (
@@ -71,34 +88,38 @@ import (
 // The delivery layout. Addresses are load addresses in main RAM.
 const (
 	// Base is the first byte of the delivered image, and the address
-	// `diskii mksd --address` is given. It must be page-aligned.
-	//
-	// RAISED $0C00 -> $0D00 on 2026-07-30, spending MARGIN 2 to buy back
-	// MARGIN 1 exactly as the table above and TestDiskLedger's failure
-	// message prescribe. The engine's pre-make evasion filter (asm/search.s
-	// sdevade, -5.3% of all search cycles) added 130 bytes of CODE, and
-	// because the TABLES segment is page-aligned those 130 bytes cost the
-	// IMAGE a full 256-byte page: SD spare went 94 B -> -162 B and the disk
-	// stopped building. No placement fitted -- even moving the whole filter
-	// into the page-tail-free TABLES segment costs 130 image bytes against
-	// 94 bytes of spare -- so this is the deliberate decision the ledger
-	// exists to force, taken with the numbers in hand. After the move: SD
-	// spare 94 B again, UI growth room 423 -> 167 B. TestDiskLedger logs the
-	// whole table from the REAL file sizes, so read it there, not here.
+	// `diskii mksd --address` is given. It must be page-aligned. It is also
+	// where execution starts.
 	Base = 0x0D00
 	// CopierOrg is where m8sdboot.bin lands (and where execution starts).
 	CopierOrg = Base
 	// PayloadOrg is where m8.bin is staged before the copier lifts it to
 	// $E000. asm/m8sd.cfg defines the same value as the UIPAYLOAD symbol.
 	PayloadOrg = Base + SectorBytes
-	// BookOrg is the resident opening book's home, and therefore the hard
-	// ceiling on the staged payload.
+	// TilesOrg is where stage 2 lands the DHGR tile blob, before the copier
+	// copies it into Language Card bank 1. It deliberately REUSES the
+	// payload's staging area, which is dead by then.
+	TilesOrg = 0x0E00
+	// BookOrg is where stage 2 lands the opening book, before the copier
+	// copies it to AUX $0200. It is main hi-res page 1, which the DHGR
+	// renderer needs and which is therefore not the book's home any more.
 	BookOrg = 0x2000
+	// BookAux is the book's RESIDENT home: auxiliary RAM $0200. The blob is
+	// 7,407 B and aux $0200-$1FFF is 7,680 B, so it fits below the DHGR aux
+	// half at $2000 with 273 B to spare. Keep equal to asm/book.inc's
+	// BOOK_BASE and internal/book.BaseAddr.
+	BookAux = 0x0200
 	// EngineOrg is where engine.bin runs.
 	EngineOrg = 0x4000
+	// TilesLC is where the copier installs the tile blob: Language Card
+	// bank 1, above the engine's 65-byte LCCODE at $D000. Keep equal to
+	// asm/m8.s's DHTILES.
+	TilesLC = 0xD300
 
-	// MaxImage is the largest image `diskii mksd` accepts (44 KB).
-	MaxImage = 45056
+	// MaxImage is the largest image `diskii mksd` accepts, and it is not an
+	// arbitrary tool limit: it is 176 * 256, the boot sector's page table
+	// filled to the last byte.
+	MaxImage = MaxStageSectors * SectorBytes
 )
 
 // Disk geometry of a 5.25" .dsk: 35 tracks of 16 sectors of 256 bytes.
@@ -106,140 +127,274 @@ const (
 	Tracks         = 35
 	SectorsPerTrk  = 16
 	SectorBytes    = 256
-	sectorsPerDisk = Tracks * SectorsPerTrk
+	SectorsPerDisk = Tracks * SectorsPerTrk
+
+	// MaxStageSectors is how many sectors ONE page table can name: the table
+	// runs $084F-$08FF (177 bytes) and the last usable byte must be the $C0
+	// terminator. Asserted against the real boot sector by
+	// internal/ui's TestBootSectorPageTable.
+	MaxStageSectors = 176
+
+	// bootTableOff is the offset of the page table's FIRST entry inside the
+	// boot sector ($084F - $0800). bootJmpOff is the offset of the operand of
+	// the `JMP` the terminator branches to ($084D - $0800).
+	bootTableOff = 0x4F
+	bootJmpOff   = 0x4D
+	// tableTerm is the page table's terminator byte.
+	tableTerm = 0xC0
 )
 
-// A Piece is one file placed into the image at a fixed address.
+// A Piece is one file placed into a stage at a fixed address.
 type Piece struct {
 	Path string // relative to the repo root
 	Org  int    // load address
 	Data []byte // filled in by Load
-	// Staged marks the UI payload: the one piece that is not delivered to
-	// the address it runs at, and therefore the one whose growth is capped
-	// by the book at BookOrg rather than by the image size.
-	Staged bool
+	// RunsAt is where the piece ends up if that is NOT where it is delivered:
+	// the UI payload is lifted to $E000, the tile blob to Language Card
+	// bank 1, the book to aux $0200. Zero means "runs where it loads", which
+	// is true only of the copier and the engine.
+	//
+	// Three of the five pieces are staged, and that is the whole shape of
+	// this delivery: the loader can only write MAIN, so anything that lives
+	// anywhere else arrives somewhere it does not stay.
+	RunsAt int
 }
 
-// Pieces returns the delivery layout, in ascending address order.
-func Pieces() []Piece { return PiecesAt(Base) }
+// A Span is one contiguous, page-aligned run of the delivered image. Spans are
+// what the page table actually names; pieces that abut merge into one.
+type Span struct {
+	Org  int
+	Data []byte // length is a multiple of SectorBytes
+}
 
-// PiecesAt is Pieces with the staging base as a parameter, so the base can be
-// re-chosen (and the trade-off it makes re-derived from the real file sizes)
-// rather than argued about. The copier goes at base and the payload one page
-// above it; the book and the engine do not move.
-func PiecesAt(base int) []Piece {
+// Sectors is how many disk sectors the span occupies.
+func (s Span) Sectors() int { return len(s.Data) / SectorBytes }
+
+// A Stage is one page table's worth of spans: everything one entry into the
+// loader delivers.
+type Stage struct {
+	Name  string
+	Spans []Span
+}
+
+// Sectors is how many disk sectors the stage occupies.
+func (s Stage) Sectors() int {
+	n := 0
+	for _, sp := range s.Spans {
+		n += sp.Sectors()
+	}
+	return n
+}
+
+// Bytes is the stage's sector data, in disk order.
+func (s Stage) Bytes() []byte {
+	var b []byte
+	for _, sp := range s.Spans {
+		b = append(b, sp.Data...)
+	}
+	return b
+}
+
+// PageTable is the loader's table for this stage: one destination page per
+// sector, in disk order, terminated by $C0.
+func (s Stage) PageTable() []byte {
+	var t []byte
+	for _, sp := range s.Spans {
+		for i := range sp.Sectors() {
+			t = append(t, byte(sp.Org>>8)+byte(i))
+		}
+	}
+	return append(t, tableTerm)
+}
+
+// Check reports whether the stage is deliverable: page-aligned spans, no
+// overlapping destinations, and within the one-table sector ceiling.
+func (s Stage) Check() error {
+	seen := map[byte]string{}
+	for _, sp := range s.Spans {
+		if sp.Org%SectorBytes != 0 {
+			return fmt.Errorf("delivery: %s span at $%04X is not page aligned", s.Name, sp.Org)
+		}
+		if sp.Org+len(sp.Data) > 0xC000 {
+			return fmt.Errorf("delivery: %s span $%04X+%d runs into the $C000 I/O page",
+				s.Name, sp.Org, len(sp.Data))
+		}
+		for i := range sp.Sectors() {
+			p := byte(sp.Org>>8) + byte(i)
+			if prev, dup := seen[p]; dup {
+				return fmt.Errorf("delivery: %s delivers page $%02X twice (%s and $%04X)",
+					s.Name, p, prev, sp.Org)
+			}
+			seen[p] = fmt.Sprintf("$%04X", sp.Org)
+		}
+	}
+	if n := s.Sectors(); n > MaxStageSectors {
+		return fmt.Errorf("delivery: %s needs %d sectors, %d more than ONE Standard Delivery "+
+			"page table can name (%d). Split it: the loader survives the load and can be "+
+			"re-entered with a fresh table (see this package's doc)",
+			s.Name, n, n-MaxStageSectors, MaxStageSectors)
+	}
+	return nil
+}
+
+// Stage1Pieces returns the pieces the BOOT SECTOR's own page table delivers.
+func Stage1Pieces() []Piece {
 	return []Piece{
-		{Path: filepath.Join("asm", "m8sdboot.bin"), Org: base},
-		{Path: filepath.Join("asm", "m8.bin"), Org: base + SectorBytes, Staged: true},
-		{Path: filepath.Join("internal", "book", "bookblob.bin"), Org: BookOrg},
+		{Path: filepath.Join("asm", "m8sdboot.bin"), Org: CopierOrg},
+		{Path: filepath.Join("asm", "m8.bin"), Org: PayloadOrg, RunsAt: 0xE000},
 		{Path: filepath.Join("asm", "engine.bin"), Org: EngineOrg},
 	}
 }
 
-// Ledger is the margin accounting for one built image. Both margins are
-// asserted by internal/ui's TestDiskLedger; neither has much slack.
+// Stage2Pieces returns the pieces the COPIER's page table delivers, after it
+// has re-entered the surviving loader.
+func Stage2Pieces() []Piece {
+	return []Piece{
+		{Path: filepath.Join("internal", "tiles", "tileblob.bin"), Org: TilesOrg, RunsAt: TilesLC},
+		{Path: filepath.Join("internal", "book", "bookblob.bin"), Org: BookOrg, RunsAt: BookAux},
+	}
+}
+
+// Pieces returns every piece of the delivery, stage 1 then stage 2.
+func Pieces() []Piece { return append(Stage1Pieces(), Stage2Pieces()...) }
+
+// Load reads the pieces of one stage from the repo rooted at root.
+func Load(root string, pieces []Piece) ([]Piece, error) {
+	out := append([]Piece(nil), pieces...)
+	for i := range out {
+		b, err := os.ReadFile(filepath.Join(root, out[i].Path))
+		if err != nil {
+			return nil, fmt.Errorf("delivery: %w (run `make dsk`)", err)
+		}
+		out[i].Data = b
+	}
+	return out, nil
+}
+
+// SpansOf turns loaded pieces into page-aligned spans, merging pieces that
+// abut and zero-padding each span to a whole number of sectors. Pieces must be
+// in ascending address order and must not overlap.
+func SpansOf(pieces []Piece) ([]Span, error) {
+	var spans []Span
+	for _, p := range pieces {
+		if p.Org%SectorBytes != 0 {
+			return nil, fmt.Errorf("delivery: %s loads at $%04X, which is not page aligned",
+				p.Path, p.Org)
+		}
+		if n := len(spans); n > 0 {
+			last := &spans[n-1]
+			end := last.Org + len(last.Data)
+			if p.Org < end {
+				return nil, fmt.Errorf("delivery: %s at $%04X overlaps the piece before it, "+
+					"which ends at $%04X", p.Path, p.Org, end)
+			}
+			if p.Org == end {
+				last.Data = append(last.Data, p.Data...)
+				continue
+			}
+		}
+		spans = append(spans, Span{Org: p.Org, Data: append([]byte(nil), p.Data...)})
+	}
+	for i := range spans {
+		if n := len(spans[i].Data) % SectorBytes; n != 0 {
+			spans[i].Data = append(spans[i].Data, make([]byte, SectorBytes-n)...)
+		}
+	}
+	return spans, nil
+}
+
+// LoadStages reads every piece and groups it into the two shipping stages.
+func LoadStages(root string) (stage1, stage2 Stage, err error) {
+	build := func(name string, ps []Piece) (Stage, error) {
+		loaded, err := Load(root, ps)
+		if err != nil {
+			return Stage{}, err
+		}
+		spans, err := SpansOf(loaded)
+		if err != nil {
+			return Stage{}, err
+		}
+		s := Stage{Name: name, Spans: spans}
+		return s, s.Check()
+	}
+	if stage1, err = build("stage 1", Stage1Pieces()); err != nil {
+		return
+	}
+	stage2, err = build("stage 2", Stage2Pieces())
+	return
+}
+
+// Ledger is the delivery accounting for one built disk. internal/ui's
+// TestDiskLedger asserts it and prints it in full.
 type Ledger struct {
-	Base       int // first address in the image
-	End        int // one past the last address in the image
-	ImageBytes int // End - Base
-	// SDSpare is how many bytes the image could still grow before
-	// `diskii mksd` rejects it. Engine growth spends this.
-	SDSpare int
-	// PayloadOrg and PayloadEnd bracket the staged UI payload.
-	PayloadOrg int
-	PayloadEnd int
-	// UIRoom is how many bytes the UI payload could still grow before it
-	// would be staged on top of the resident opening book at $2000. UI
-	// growth spends this.
-	UIRoom int
-	// Sectors is how many 256-byte sectors the image occupies on disk
-	// (excluding the boot sector).
-	Sectors int
+	Stage1Sectors int
+	Stage2Sectors int
+	// Stage1Spare is how many more sectors stage 1's page table could name.
+	Stage1Spare int
+	Stage2Spare int
+	// TotalSectors counts the boot sector too, i.e. everything the disk uses.
+	TotalSectors int
+	// DiskSpare is how many of the disk's 560 sectors are still empty.
+	DiskSpare int
+	// PayloadOrg / PayloadEnd bracket the staged UI payload; PayloadRoom is
+	// how far it could still grow before it collided with the ENGINE at
+	// EngineOrg, which is stage 1's next span.
+	//
+	// It is NOT measured against $2000 any more, and that is the single
+	// biggest thing the chain load bought. The old layout staged the payload
+	// under a book that was already resident at $2000, so 164 bytes of
+	// staging room was the wall the UI kept running into. The book is
+	// delivered in stage 2 now, AFTER the copier has lifted the payload to
+	// $E000, so the two share $2000-$21FF quite happily -- at different
+	// times. The cap that actually binds is the UI's own Language Card
+	// budget ($E000-$F6FF, 5,888 B), which the link config enforces as a
+	// link error.
+	PayloadOrg  int
+	PayloadEnd  int
+	PayloadRoom int
 }
 
 func (l Ledger) String() string {
 	return fmt.Sprintf(
-		"image $%04X-$%04X = %d B of %d (SD spare %d B, %d sectors); "+
-			"staged payload $%04X-$%04X, book at $%04X (UI growth room %d B)",
-		l.Base, l.End-1, l.ImageBytes, MaxImage, l.SDSpare, l.Sectors,
-		l.PayloadOrg, l.PayloadEnd-1, BookOrg, l.UIRoom)
+		"stage 1 %d/%d sectors, stage 2 %d/%d sectors, %d of %d disk sectors used "+
+			"(staged payload $%04X-$%04X, %d B below the engine)",
+		l.Stage1Sectors, MaxStageSectors, l.Stage2Sectors, MaxStageSectors,
+		l.TotalSectors, SectorsPerDisk, l.PayloadOrg, l.PayloadEnd-1, l.PayloadRoom)
 }
 
-// Load reads the four pieces of the shipping layout from the repo rooted at
-// root. LoadAt does the same for an arbitrary staging base.
-func Load(root string) ([]Piece, error) { return LoadAt(root, Base) }
-
-// LoadAt reads the four pieces of the layout based at base.
-func LoadAt(root string, base int) ([]Piece, error) {
-	ps := PiecesAt(base)
-	for i := range ps {
-		b, err := os.ReadFile(filepath.Join(root, ps[i].Path))
-		if err != nil {
-			return nil, fmt.Errorf("delivery: %w (run `make dsk`)", err)
-		}
-		ps[i].Data = b
-	}
-	return ps, nil
-}
-
-// Image lays the pieces out as one contiguous image based at the first
-// piece's address, zero filling the gaps, and returns it with its margin
-// ledger. It fails if a piece overlaps its successor or falls outside the
-// image; it does NOT fail on an over-cap image or an overrun payload, so that
-// a caller (the ledger test) can report both numbers rather than the first one
-// that broke.
-func Image(pieces []Piece) ([]byte, Ledger, error) {
-	if len(pieces) == 0 {
-		return nil, Ledger{}, errors.New("delivery: no pieces")
-	}
-	base := pieces[0].Org
-	end := 0
-	for i, p := range pieces {
-		if p.Org < base {
-			return nil, Ledger{}, fmt.Errorf("delivery: %s at $%04X is below the image base $%04X",
-				p.Path, p.Org, base)
-		}
-		if p.Org+len(p.Data) > 0x10000 {
-			return nil, Ledger{}, fmt.Errorf("delivery: %s (%d B at $%04X) runs past $FFFF",
-				p.Path, len(p.Data), p.Org)
-		}
-		if i > 0 && p.Org < end {
-			return nil, Ledger{}, fmt.Errorf("delivery: %s at $%04X overlaps the piece before it, which ends at $%04X",
-				p.Path, p.Org, end)
-		}
-		if e := p.Org + len(p.Data); e > end {
-			end = e
-		}
-	}
-	img := make([]byte, end-base)
-	for _, p := range pieces {
-		copy(img[p.Org-base:], p.Data)
-	}
-
+// LedgerOf computes the ledger for a pair of stages.
+func LedgerOf(stage1, stage2 Stage) Ledger {
 	l := Ledger{
-		Base:       base,
-		End:        end,
-		ImageBytes: len(img),
-		SDSpare:    MaxImage - len(img),
-		Sectors:    (len(img) + SectorBytes - 1) / SectorBytes,
+		Stage1Sectors: stage1.Sectors(),
+		Stage2Sectors: stage2.Sectors(),
 	}
-	for _, p := range pieces {
-		if p.Staged {
-			l.PayloadOrg = p.Org
-			l.PayloadEnd = p.Org + len(p.Data)
-			l.UIRoom = BookOrg - l.PayloadEnd
+	l.Stage1Spare = MaxStageSectors - l.Stage1Sectors
+	l.Stage2Spare = MaxStageSectors - l.Stage2Sectors
+	l.TotalSectors = 1 + l.Stage1Sectors + l.Stage2Sectors
+	l.DiskSpare = SectorsPerDisk - l.TotalSectors
+	// The copier is a page-aligned 256-byte slot, so unless it exactly fills
+	// it the payload is its own span; when it does fill it, SpansOf merges the
+	// two. Handle both, and take the END from whichever span CONTAINS
+	// PayloadOrg rather than from a span whose base happens to match.
+	for _, sp := range stage1.Spans {
+		if sp.Org <= PayloadOrg && PayloadOrg < sp.Org+len(sp.Data) {
+			l.PayloadOrg = PayloadOrg
+			l.PayloadEnd = sp.Org + len(sp.Data)
+			l.PayloadRoom = EngineOrg - l.PayloadEnd
 		}
 	}
-	return img, l, nil
+	return l
 }
 
 // SectorOffset returns the byte offset in a DOS-order .dsk of the sector
-// holding image page n (n = 0 is the page at Base).
+// holding image page n (n = 0 is the first payload page, i.e. the sector right
+// after the boot sector).
 //
-// Standard Delivery reserves track 0 sector 0 for the boot sector and then
-// fills the disk in a fixed interleave, one track at a time: within a track
-// the order is sector 0, then 14, 13, ... 1, then 15. Numbering the payload
-// sectors k = n+1 (so k skips the boot sector) makes that a closed form.
+// The loader reads PHYSICAL sectors 0, 2, 4, ... 14, 1, 3, ... 15 — a 2:1
+// interleave, because the ROM's `INC $3D` plus the loop's own `INY` advance
+// the sector number by two. Through the DOS 3.3 soft skew that `diskii mksd`
+// writes, that comes out as DOS-order sector 0, then 14, 13, ... 1, then 15,
+// one track at a time.
 //
 // This is a property of the loader on the disk, not a guess: TestDiskRoundTrip
 // checks every page of the real image against it, and TestDiskBoots checks the
@@ -259,22 +414,21 @@ func SectorOffset(n int) int {
 	return (track*SectorsPerTrk + sector) * SectorBytes
 }
 
-// Extract reads the delivered image back out of a .dsk: the inverse of what
-// `diskii mksd` wrote, sector by sector, for size bytes starting at Base.
-func Extract(dsk []byte, size int) ([]byte, error) {
-	if len(dsk) != sectorsPerDisk*SectorBytes {
-		return nil, fmt.Errorf("delivery: bad .dsk size %d, want %d", len(dsk), sectorsPerDisk*SectorBytes)
+// ExtractPages reads count image pages back out of a .dsk, starting at image
+// page first: the inverse of what the loader reads, sector by sector.
+func ExtractPages(dsk []byte, first, count int) ([]byte, error) {
+	if len(dsk) != SectorsPerDisk*SectorBytes {
+		return nil, fmt.Errorf("delivery: bad .dsk size %d, want %d", len(dsk), SectorsPerDisk*SectorBytes)
 	}
-	pages := (size + SectorBytes - 1) / SectorBytes
-	out := make([]byte, 0, pages*SectorBytes)
-	for n := range pages {
+	out := make([]byte, 0, count*SectorBytes)
+	for n := first; n < first+count; n++ {
 		off := SectorOffset(n)
 		if off+SectorBytes > len(dsk) {
 			return nil, fmt.Errorf("delivery: image page %d maps past the end of the disk", n)
 		}
 		out = append(out, dsk[off:off+SectorBytes]...)
 	}
-	return out[:size], nil
+	return out, nil
 }
 
 // ErrNoDiskii reports that the `diskii` tool is not on PATH.
@@ -283,33 +437,24 @@ var ErrNoDiskii = errors.New(
 		"    go install github.com/zellyn/diskii@latest\n" +
 		"(and make sure $(go env GOPATH)/bin is on PATH)")
 
-// Build assembles the image, writes it to imgPath, and runs `diskii mksd` to
-// produce dskPath. It returns the ledger it built.
+// Build assembles both stages, writes stage 1's sector image to imgPath, runs
+// `diskii mksd` to make the bootable disk, patches the boot sector's page
+// table to stage 1's actual span list, and writes stage 2's sectors after it.
+// It returns the ledger it built.
 func Build(root, imgPath, dskPath string) (Ledger, error) {
-	pieces, err := Load(root)
+	stage1, stage2, err := LoadStages(root)
 	if err != nil {
 		return Ledger{}, err
 	}
-	img, l, err := Image(pieces)
-	if err != nil {
-		return Ledger{}, err
-	}
-	if l.SDSpare < 0 {
-		return l, fmt.Errorf("delivery: image is %d B, %d B over `diskii mksd`'s %d B limit -- "+
-			"8fish has outgrown the simple single-shot Standard Delivery layout. Raising the "+
-			"base above $%04X buys 256 B per page from the %d B of UI staging room; past that, "+
-			"chain-load or move to ProRWTS2 (see this package's doc)",
-			l.ImageBytes, -l.SDSpare, MaxImage, Base, l.UIRoom)
-	}
-	if l.UIRoom < 0 {
-		return l, fmt.Errorf("delivery: the staged UI payload ends at $%04X, %d B INTO the resident "+
-			"opening book at $%04X: in this layout the copier would load the book's first %d bytes "+
-			"over itself. A loader that does not stage below the book fixes it (see this package's doc)",
-			l.PayloadEnd, -l.UIRoom, BookOrg, -l.UIRoom)
+	l := LedgerOf(stage1, stage2)
+	if l.TotalSectors > SectorsPerDisk {
+		return l, fmt.Errorf("delivery: the two stages need %d sectors, %d more than a "+
+			"35-track disk holds", l.TotalSectors, l.TotalSectors-SectorsPerDisk)
 	}
 	if _, err := exec.LookPath("diskii"); err != nil {
 		return l, ErrNoDiskii
 	}
+	img := stage1.Bytes()
 	if err := os.WriteFile(imgPath, img, 0o644); err != nil {
 		return l, err
 	}
@@ -323,18 +468,83 @@ func Build(root, imgPath, dskPath string) (Ledger, error) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return l, fmt.Errorf("delivery: %s: %w\n%s", cmd, err, bytes.TrimSpace(out))
 	}
-	// Round-trip immediately: a disk that does not read back as the image
-	// we handed it is not a disk we should ship.
 	dsk, err := os.ReadFile(dskPath)
 	if err != nil {
 		return l, err
 	}
-	back, err := Extract(dsk, len(img))
+	if len(dsk) != SectorsPerDisk*SectorBytes {
+		return l, fmt.Errorf("delivery: %s is %d B, want %d", dskPath, len(dsk),
+			SectorsPerDisk*SectorBytes)
+	}
+	// PATCH THE PAGE TABLE. mksd writes a consecutive table because we handed
+	// it one flat image; the real stage 1 is two disjoint spans (the copier +
+	// payload at $0D00, the engine at $4000), and the table is a list of
+	// pages, so scatter-loading them costs nothing but these bytes.
+	if err := patchPageTable(dsk, stage1, CopierOrg); err != nil {
+		return l, err
+	}
+	// STAGE 2's sectors follow stage 1's on the disk, in the same interleave;
+	// the copier's own page table names their destinations.
+	s2 := stage2.Bytes()
+	for i := range stage2.Sectors() {
+		off := SectorOffset(l.Stage1Sectors + i)
+		copy(dsk[off:off+SectorBytes], s2[i*SectorBytes:(i+1)*SectorBytes])
+	}
+	if err := os.WriteFile(dskPath, dsk, 0o644); err != nil {
+		return l, err
+	}
+	// Round-trip immediately, FROM THE FILE. Reading back out of the same
+	// in-memory slice we just wrote would only prove SectorOffset is
+	// injective, which TestSectorOffset already does; re-reading the file
+	// proves the disk on disk is the disk we meant. The boot sector is
+	// included, because the page table this function just patched is the one
+	// thing on the disk that nothing else writes.
+	written, err := os.ReadFile(dskPath)
 	if err != nil {
 		return l, err
 	}
-	if !bytes.Equal(back, img) {
-		return l, fmt.Errorf("delivery: %s does not read back as the image written to %s", dskPath, imgPath)
+	if !bytes.Equal(written[:SectorBytes], dsk[:SectorBytes]) {
+		return l, fmt.Errorf("delivery: %s's boot sector does not read back as the "+
+			"patched one", dskPath)
+	}
+	if got := written[bootTableOff : bootTableOff+len(stage1.PageTable())]; !bytes.Equal(got, stage1.PageTable()) {
+		return l, fmt.Errorf("delivery: %s's page table is not stage 1's span list", dskPath)
+	}
+	first := 0
+	for _, st := range []Stage{stage1, stage2} {
+		want := st.Bytes()
+		back, err := ExtractPages(written, first, st.Sectors())
+		if err != nil {
+			return l, err
+		}
+		if !bytes.Equal(back, want) {
+			return l, fmt.Errorf("delivery: %s does not read back as %s", dskPath, st.Name)
+		}
+		first += st.Sectors()
 	}
 	return l, nil
+}
+
+// patchPageTable rewrites the boot sector's page table (and the start address
+// its terminator jumps to) from a stage's real span list.
+func patchPageTable(dsk []byte, s Stage, start int) error {
+	tab := s.PageTable()
+	if bootTableOff+len(tab) > SectorBytes {
+		return fmt.Errorf("delivery: %s needs a %d-byte page table, %d B more than the "+
+			"boot sector's $%04X-$08FF holds", s.Name, len(tab),
+			bootTableOff+len(tab)-SectorBytes, 0x0800+bootTableOff)
+	}
+	boot := dsk[0:SectorBytes]
+	if boot[bootJmpOff-1] != 0x4C {
+		return fmt.Errorf("delivery: boot sector $%04X is $%02X, not a JMP ($4C): this is not "+
+			"the Standard Delivery loader this package knows how to patch",
+			0x0800+bootJmpOff-1, boot[bootJmpOff-1])
+	}
+	boot[bootJmpOff] = byte(start)
+	boot[bootJmpOff+1] = byte(start >> 8)
+	for i := bootTableOff; i < SectorBytes; i++ {
+		boot[i] = 0
+	}
+	copy(boot[bootTableOff:], tab)
+	return nil
 }

@@ -96,11 +96,14 @@ UISEEN    = M8VARS+$1F  ; repetition count of the current position
 UIHFULL   = M8VARS+$AA  ; nonzero: the 256-ply history arrays filled up and
                         ;  plies are no longer being RECORDED (the game goes
                         ;  on; see uiapply and cmd_take)
+UIDHGR    = M8VARS+$AB  ; nonzero: the DOUBLE HI-RES board is the screen being
+                        ;  shown (ESC toggles; the 40-column text screen is
+                        ;  painted either way, so the swap is instantaneous)
 UIBUF     = M8VARS+$20  ; input line (UIBUFMAX bytes)
 UITHINK   = M8VARS+$30  ; think line: depth / score / best move
 UIMSGB    = M8VARS+$50  ; message row (40 B + terminator)
 UIBOOKB   = M8VARS+$80  ; opening-name row (40 B + terminator)
-                        ; UIHFULL is $F7AA; $F7AB-$F7FF free
+                        ; UIHFULL is $F7AA, UIDHGR $F7AB; $F7AC-$F7FF free
 
 ; The game history is three PARALLEL 256-byte arrays so a ply index fits in
 ; X with no multiply: 256 plies = 128 full moves (Sargon III's own move list

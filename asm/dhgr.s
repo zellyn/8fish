@@ -74,6 +74,41 @@ DHM0      = PSP1
 DHM1      = PSP1+1
 
 ; --------------------------------------------------------------------------
+; dhclear: blank DHGR page 1 in BOTH banks -- 16,384 bytes, once, before the
+; screen is ever shown.
+;
+; It is not decoration. dhboard paints only the 8x8 board (byte columns 8-31,
+; scanlines 4-155); the border around it is never written again. And on the
+; shipping disk what the loader left in main $2000-$3FFF is the DEAD OPENING
+; BOOK, which as pixels is 8 KB of noise around the artwork.
+;
+; $00 is not a choice of colour, either: internal/tiles' Go model renders onto
+; a zeroed screen, so black is the value TestDHGRRenderParity asserts for every
+; byte outside the board.
+;
+; Cost: 16,384 stores, ~115,000 cycles, paid once at init.
+; --------------------------------------------------------------------------
+dhclear:
+        sta DHRAMWRTON          ; aux half first...
+        jsr dhcl1
+        sta DHRAMWRTOFF         ; ...then fall through for the main half, whose
+                                ;  rts returns to dhclear's caller
+dhcl1:  lda #0
+        sta DHPTR
+        lda #$20
+        sta DHPTR+1
+        ldx #$20                ; $2000-$3FFF is 32 pages
+        ldy #0
+        tya                     ; A = 0
+dhcl2:  sta (DHPTR),y
+        iny
+        bne dhcl2
+        inc DHPTR+1
+        dex
+        bne dhcl2
+        rts
+
+; --------------------------------------------------------------------------
 ; dhinit: build the init-time tables — 152 board scanline base addresses, 26
 ; tile pointers, and the two synthesised blank tiles. Call once, after the
 ; tile blob is resident. Clobbers A,X,Y.

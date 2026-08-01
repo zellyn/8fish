@@ -151,12 +151,25 @@ against `NOSQ` simply fails, so the node falls through with no TT move —
 the cutoff is captured purely via the score/bound fields, consistent
 with the list-match design above.
 
-## D7: Reserve hires page 1 ($2000-$3FFF) for a future board display — accepted
+## D7: Reserve hires page 1 ($2000-$3FFF) for a future board display — accepted, and COLLECTED (2026-07-31)
 
 The engine and its tables stay out of `$2000-$3FFF` so a simple hires board
 (nothing fancy) can arrive later without a memory-map upheaval. Engine code
 loads at `$4000` upward; `$0800-$1FFF` holds low tables/move stack. If we
 end up desperate for main RAM, this is the first decision to revisit.
+
+**Paid off 2026-07-31, and for more than "nothing fancy":** `$2000-$3FFF` is
+now the MAIN half of double hi-res page 1, carrying the owner's hand-drawn
+board at the full 560-dot resolution. The reservation held for three years of
+memory pressure and the board arrived with no upheaval at all — the engine
+image did not move by a byte.
+
+What DID have to move was the thing that had quietly settled into the reserved
+hole in the meantime: the resident opening book, which had `BOOK_BASE = $2000`.
+It is at AUX `$0200-$1EEE` now. That is the lesson worth recording — a reserved
+region with nothing in it attracts a tenant, and the tenant does not know it is
+a tenant. `internal/delivery`'s `TestMainMemoryLayout` asserts the DHGR halves
+and the book's aux home separately so the next tenant is a test failure.
 
 ## D8: Harness I/O via store-traps at $BFF0 (COUT) / $BFFF (exit); engine I/O behind a vector table — accepted (amended)
 

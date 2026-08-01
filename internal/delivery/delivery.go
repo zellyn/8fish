@@ -329,9 +329,18 @@ type Ledger struct {
 	// DiskSpare is how many of the disk's 560 sectors are still empty.
 	DiskSpare int
 	// PayloadOrg / PayloadEnd bracket the staged UI payload; PayloadRoom is
-	// how far it could still grow before it collided with stage 2's landing
-	// zone for the book at BookOrg. (Its real cap is the $E000-$F6FF Language
-	// Card budget, which is smaller; this is the delivery-side headroom.)
+	// how far it could still grow before it collided with the ENGINE at
+	// EngineOrg, which is stage 1's next span.
+	//
+	// It is NOT measured against $2000 any more, and that is the single
+	// biggest thing the chain load bought. The old layout staged the payload
+	// under a book that was already resident at $2000, so 164 bytes of
+	// staging room was the wall the UI kept running into. The book is
+	// delivered in stage 2 now, AFTER the copier has lifted the payload to
+	// $E000, so the two share $2000-$21FF quite happily -- at different
+	// times. The cap that actually binds is the UI's own Language Card
+	// budget ($E000-$F6FF, 5,888 B), which the link config enforces as a
+	// link error.
 	PayloadOrg  int
 	PayloadEnd  int
 	PayloadRoom int
@@ -340,7 +349,7 @@ type Ledger struct {
 func (l Ledger) String() string {
 	return fmt.Sprintf(
 		"stage 1 %d/%d sectors, stage 2 %d/%d sectors, %d of %d disk sectors used "+
-			"(staged payload $%04X-$%04X, %d B of delivery headroom)",
+			"(staged payload $%04X-$%04X, %d B below the engine)",
 		l.Stage1Sectors, MaxStageSectors, l.Stage2Sectors, MaxStageSectors,
 		l.TotalSectors, SectorsPerDisk, l.PayloadOrg, l.PayloadEnd-1, l.PayloadRoom)
 }
@@ -359,7 +368,7 @@ func LedgerOf(stage1, stage2 Stage) Ledger {
 		if sp.Org == PayloadOrg || (sp.Org == CopierOrg && len(sp.Data) > SectorBytes) {
 			l.PayloadOrg = PayloadOrg
 			l.PayloadEnd = sp.Org + len(sp.Data)
-			l.PayloadRoom = BookOrg - l.PayloadEnd
+			l.PayloadRoom = EngineOrg - l.PayloadEnd
 		}
 	}
 	return l

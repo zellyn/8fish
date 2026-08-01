@@ -280,6 +280,11 @@ SETALTCHAR  = $C00F     ; w: ALTERNATE character set
 TXTSET      = $C051     ; text, not graphics
 MIXCLR      = $C052     ; full screen, no four-line text window
 TXTPAGE1    = $C054     ; display page 1 (and, under 80STORE, map it to MAIN)
+SET80COLON  = $C00D     ; w: 80-column video fetch (BOTH banks per scanline)
+GRSET       = $C050     ; graphics, not text
+SETDHIRES   = $C05E     ; AN3 LOW: double resolution, with 80COL on
+CLRDHIRES   = $C05F     ; AN3 HIGH: single resolution
+HIRESSET    = $C057     ; hi-res, not lo-res
 
 ; Autostart's power-up byte (docs/ui-design.md §11 risk 3). The reset
 ; handler takes the WARM path — jmp ($03F2) — only when $03F4 equals
@@ -406,6 +411,15 @@ m8main:
         sta UILEVEL
         lda #0
         sta UIHUMAN             ; the human plays White by default
+        ; The board screen. dhclear/dhinit are run ONCE -- the border never
+        ; changes and the scanline tables never change -- and the display is
+        ; handed to double hi-res, which is what the machine shows from the
+        ; moment it finishes booting. ESC swaps to the 40-column screen.
+        jsr dhclear
+        jsr dhinit
+        lda #1
+        sta UIDHGR
+        jsr uidhon
         jsr m8new
 
 ; The main loop. Every position change goes through uisync, and every
@@ -1351,6 +1365,8 @@ urdl:   jsr uiprompt
         beq urdbs
         cmp #$7F                ; DELETE
         beq urdbs
+        cmp #$1B                ; ESC: swap board screen <-> text screen
+        beq urdesc
         cmp #$20
         bcc urdl                ; other control keys: ignore
         cmp #$7B
@@ -1366,7 +1382,73 @@ urdbs:  lda UIBLEN
         beq urdl
         dec UIBLEN
         jmp urdl
+urdesc: jsr uiswap
+        jmp urdl
 urdx:   rts
+
+; ---------------------------------------------------------------------------
+; uiswap / uidhon / uidhoff: ESC swaps the display between the double-hi-res
+; board and the 40-column text screen, which is the same choice Sargon III
+; makes and for the same reason -- there is no room for both at once.
+;
+; ★ WHY NOT MIXED MODE, with the board above and four text lines below. It is
+; arithmetic, and the arithmetic is in AUX RAM, not on the screen. Double
+; hi-res needs 80COL on, and with 80COL on the mixed-mode text window is
+; 80-COLUMN text: its even columns come from AUX $0400-$07FF. Rows 20-23 are
+; aux $0650-$0677, $06D0-$06F7, $0750-$0777 and $07D0-$07F7 -- 160 bytes, in
+; four pieces, in the MIDDLE of the 7,680-byte aux hole the 7,407-byte opening
+; book now occupies. The two largest chunks left either side of the window are
+; 1,104 B and 6,152 B = 7,256 B, which is 151 B SHORT of the book. So mixed
+; mode and a contiguous resident book cannot both be had, and the way to have
+; both is to move the book's 1,702-byte NAME TABLE out of the blob into the
+; Language Card, leaving 5,705 B of header+entries that fit aux $0800-$1FFF
+; with room to spare. That is a blob-format change (cmd/genbook,
+; internal/book, the probe parity gate), not a renderer change, and it is
+; written up in docs/ui-design.md rather than half-done here.
+;
+; ★ SWITCHES THAT WERE UNVERIFIABLE AND ARE NOT ANY MORE. goapple2's IIe model
+; used to implement neither 80STORE nor AN3, so this whole routine would have
+; been hardware-only. It implements both now, with the 80STORE precedence that
+; makes it dangerous, and exposes DHires() -- so internal/ui asserts the exact
+; switch state below rather than trusting this comment.
+; ---------------------------------------------------------------------------
+uiswap:
+        lda UIDHGR
+        eor #1
+        sta UIDHGR
+        beq uidhoff
+        jsr uidhon
+        jmp dhboard             ; the board screen is stale: repaint it
+
+; uidhon: hand the display to double hi-res, full screen.
+uidhon:
+        sta CLR80STORE          ; ★ LOAD-BEARING. This renderer reaches the
+                                ;  aux half through RAMWRT; with 80STORE ON,
+                                ;  $2000-$3FFF follows PAGE2 and IGNORES
+                                ;  RAMWRT, so every aux byte would land in
+                                ;  MAIN and the board would come out as
+                                ;  interleaved garbage.
+        sta SET80COLON          ; the scanner fetches aux+main per byte column
+        sta SETDHIRES           ; AN3 low: 560 dots, not 280
+        sta GRSET               ; graphics
+        sta HIRESSET            ; hi-res
+        sta MIXCLR              ; full screen: see the note above
+        sta TXTPAGE1            ; page 1 = $2000-$3FFF in both banks
+        rts
+
+; uidhoff: hand it back to the 40-column text screen, exactly as m8main took
+; it at boot. AN3 goes back high too: leaving DHIRES selected under 40-column
+; text is harmless on a IIe, but "put every switch back" is one fewer state to
+; reason about.
+uidhoff:
+        sta CLR80STORE
+        sta SET80COLOFF
+        sta CLRDHIRES
+        sta SETALTCHAR
+        sta TXTSET
+        sta MIXCLR
+        sta TXTPAGE1
+        rts
 
 ; uilower: fold an ASCII letter to lower case, so an Apple IIe with CAPS
 ; LOCK down types the same moves as one without it.
@@ -1701,7 +1783,23 @@ qstubend:                       ;  since m8main invalidated the power-up byte
 ; Painting
 ; ===========================================================================
 
+; uipaint repaints EVERYTHING: the 40-column text screen every time, and the
+; double-hi-res board on top of that whenever the board screen is the one
+; being shown.
+;
+; The text screen is painted even when it is not displayed, and that is
+; deliberate: it costs 23,659 cycles against the 193,667 the board costs, it
+; makes ESC instantaneous (the screen behind it is already correct), and it
+; keeps ONE repaint path -- every screen gate in internal/ui is a gate on
+; bytes this always wrote.
 uipaint:
+        jsr uipaint40
+        lda UIDHGR
+        beq uipx
+        jmp dhboard
+uipx:   rts
+
+uipaint40:
         jsr uicls
         jsr uititle
         jsr uicoords
@@ -2208,3 +2306,17 @@ m_help2:    SCRSTR "MOVES ARE e2e4 / e7e8q. RETURN SENDS."
 m_enginebad: SCRSTR "ENGINE RETURNED AN ILLEGAL MOVE"
 m_histfull: SCRSTR "MOVE LIST FULL - CANNOT TAKE BACK"
 m_needsiie: SCRSTR "8FISH NEEDS A 128K APPLE IIE"
+
+; ---------------------------------------------------------------------------
+; The double-hi-res board renderer, and the generated tile dispatch tables it
+; indexes. LAST in UICODE on purpose: internal/ui's TestUIByteBudget prices
+; every section by label deltas between consecutive boundaries, so an include
+; dropped into the middle of an existing section silently reassigns that
+; section's bytes to it.
+;
+; The ARTWORK is not here. It is 1,824 B in Language Card bank 1 at DHTILES,
+; delivered by stage 2 of the chain load, so the renderer costs this payload
+; only its code and its 96-byte index tables.
+; ---------------------------------------------------------------------------
+        .include "dhgr.s"
+        .include "tiles.inc"

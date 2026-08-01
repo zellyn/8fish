@@ -21,6 +21,9 @@ package ui_test
 import (
 	"bytes"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,6 +32,7 @@ import (
 	"testing"
 
 	"github.com/zellyn/chess6502/internal/book"
+	"github.com/zellyn/chess6502/internal/chesstest"
 	"github.com/zellyn/chess6502/internal/delivery"
 	"github.com/zellyn/chess6502/internal/refchess"
 	"github.com/zellyn/chess6502/internal/tiles"
@@ -186,14 +190,20 @@ func TestDiskLedger(t *testing.T) {
 		t.Errorf("the two stages need %d sectors, %d more than the disk holds",
 			l.TotalSectors, l.TotalSectors-delivery.SectorsPerDisk)
 	}
-	// The staged payload must still end below stage 2's landing zone for the
-	// book at $2000, or stage 2 would be read over a payload that has not
-	// been lifted yet. (It HAS been lifted by then -- but only because the
-	// copier does the lift first, and that ordering is worth a gate.)
+	// The staged payload's cap is the ENGINE, not the book. It overlaps stage
+	// 2's landing zone for the book at $2000 and that is fine: the copier
+	// lifts the payload to $E000 BEFORE it re-enters the loader, so the two
+	// use $2000-$21FF at different times. The old layout could not do this,
+	// and 164 bytes of staging room under a resident book was the wall the UI
+	// kept hitting.
 	if l.PayloadRoom < 0 {
-		t.Errorf("the staged UI payload ends at $%04X, %d B into stage 2's landing zone "+
-			"for the book at $%04X", l.PayloadEnd, -l.PayloadRoom, delivery.BookOrg)
+		t.Errorf("the staged UI payload ends at $%04X, %d B into the engine at $%04X",
+			l.PayloadEnd, -l.PayloadRoom, delivery.EngineOrg)
 	}
+	t.Logf("  staged payload $%04X-$%04X, %d B below the engine; it overlaps stage 2's "+
+		"book landing zone at $%04X by %d B, which is safe because the copier lifts it "+
+		"to $E000 first", l.PayloadOrg, l.PayloadEnd-1, l.PayloadRoom,
+		delivery.BookOrg, max(0, l.PayloadEnd-delivery.BookOrg))
 
 	// The blobs on the disk must be the ones the Go side ships, or the UI's
 	// book probe and internal/book disagree about what the engine knows, and
@@ -461,11 +471,18 @@ func TestDiskBoots(t *testing.T) {
 		t.Error("ALTCHARSET is off: every black piece on a dark square would be " +
 			"flashing punctuation on a real IIe (see docs/results.md 2026-07-28)")
 	}
-	if m.Mem.Col80 {
-		t.Error("80COL is on: this 40-column screen would show one column in two")
+	// ---- 2b. the display is DOUBLE HI-RES, and every switch it needs is on --
+	// The disk boots to the BOARD, not to the text screen. goapple2's IIe
+	// model implements 80COL and AN3 now (and DHires() = Col80 && !An3), so
+	// this is an assertion rather than the comment it would have had to be.
+	if !m.Mem.DHires() {
+		t.Errorf("double hi-res is NOT selected: 80COL=%v AN3=%v. DHGR needs 80COL on "+
+			"($C00D) AND AN3 driven low ($C05E); with either wrong the board comes out "+
+			"as 280-dot hi-res reading only the main half", m.Mem.Col80, m.Mem.An3)
 	}
-	if !m.Mem.Text || m.Mem.Mixed || m.Mem.Page2 {
-		t.Errorf("display state wrong: TEXT=%v MIXED=%v PAGE2=%v", m.Mem.Text, m.Mem.Mixed, m.Mem.Page2)
+	if m.Mem.Text || m.Mem.Mixed || m.Mem.Page2 || !m.Mem.Hires {
+		t.Errorf("display state wrong for the board: TEXT=%v MIXED=%v PAGE2=%v HIRES=%v, "+
+			"want false/false/false/true", m.Mem.Text, m.Mem.Mixed, m.Mem.Page2, m.Mem.Hires)
 	}
 	// ★ 80STORE. This USED to be untestable: goapple2's IIe model implemented
 	// neither 80STORE state and counted both switch addresses in Unhandled,
@@ -766,4 +783,150 @@ func TestDiskQuitReboots(t *testing.T) {
 			t.Errorf("UIHCNT = %d after the reboot, want a fresh game", n)
 		}
 	})
+}
+
+// TestDiskBoardParity is the delivery's whole point, stated as a parity gate
+// rather than as a screenshot: BOOT THE SHIPPING DISK, and require that the
+// 16,384 bytes of double hi-res page 1 the booted machine holds are
+// byte-identical to internal/tiles' independent Go model of the same paint.
+//
+// It is a stronger claim than TestDHGRRenderParity, which runs the renderer
+// out of a purpose-built harness image with the artwork linked into main RAM
+// at a convenient address. Everything this one asserts had to survive the
+// real path: 1,824 bytes of artwork read off a real nibblised disk by the
+// real boot ROM in a SECOND loader entry, copied into Language Card bank 1,
+// indexed there by a renderer running from $E000, and painted through RAMWRT
+// into aux with 80STORE off. A board that only renders in a harness variant is
+// not delivered; this is the assertion that says it is.
+func TestDiskBoardParity(t *testing.T) {
+	dsk := dskPath(t)
+	m, err := ui.NewDiskMachine(dsk, ui.RomDir())
+	if err != nil {
+		t.Skipf("SKIP: no Apple II machine available: %v", err)
+	}
+	ok, err := m.RunToKeyboard(600_000_000)
+	if err != nil {
+		t.Fatalf("booting: %v", err)
+	}
+	if !ok {
+		t.Fatalf("the disk never reached the keyboard poll (PC $%04X)", m.CPU.PC())
+	}
+
+	screen := make([]byte, 0, tiles.A2FCSize)
+	screen = append(screen, m.Mem.Aux[0x2000:0x4000]...)
+	screen = append(screen, m.Mem.Main[0x2000:0x4000]...)
+
+	pos, err := chesstest.ParseFEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b64 [64]byte
+	for r := range 8 {
+		for f := range 8 {
+			b64[r*8+f] = pos.Board[(7-r)*16+f] & 0x0F
+		}
+	}
+	want, err := tiles.Render(tiles.DefaultBlob(), &b64, dhOriginCol, dhOriginY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(screen, want) {
+		n, first := 0, -1
+		for i := range want {
+			if screen[i] != want[i] {
+				if first < 0 {
+					first = i
+				}
+				n++
+			}
+		}
+		bank, addr := "aux", 0x2000+first
+		if first >= tiles.BankSize {
+			bank, addr = "main", 0x2000+first-tiles.BankSize
+		}
+		t.Fatalf("the BOOTED DISK's DHGR screen differs from the Go model in %d of %d "+
+			"bytes; first at %s $%04X: got $%02X, want $%02X", n, len(want), bank, addr,
+			screen[first], want[first])
+	}
+	t.Logf("the shipping disk's DHGR page 1 is byte-identical to internal/tiles' model, "+
+		"all %d bytes, from a cold $C600 boot", len(want))
+
+	// And write it out, doubled vertically so the 560x192 board is not a
+	// letterbox, so a human can look at what the disk actually painted.
+	s, err := tiles.Decode(screen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := image.NewGray(image.Rect(0, 0, tiles.ScreenW, 2*tiles.ScreenH))
+	for y := range tiles.ScreenH {
+		for x := range tiles.ScreenW {
+			if s.At(x, y) {
+				img.SetGray(x, 2*y, color.Gray{0xEE})
+				img.SetGray(x, 2*y+1, color.Gray{0xEE})
+			}
+		}
+	}
+	out := filepath.Join(os.TempDir(), "8fish-disk-board.png")
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("screenshot of the BOOTED DISK written to", out)
+}
+
+// TestDiskEscapeSwapsScreens: ESC swaps between the board and the 40-column
+// text screen, and both survive the swap. The text screen is the one every
+// other gate in this package reads, so what this really asserts is that
+// putting a board on the disk did not cost the screen that was already there.
+func TestDiskEscapeSwapsScreens(t *testing.T) {
+	dsk := dskPath(t)
+	m, err := ui.NewDiskMachine(dsk, ui.RomDir())
+	if err != nil {
+		t.Skipf("SKIP: no Apple II machine available: %v", err)
+	}
+	if ok, err := m.RunToKeyboard(600_000_000); err != nil || !ok {
+		t.Fatalf("booting: ok=%v err=%v", ok, err)
+	}
+	if !m.Mem.DHires() || m.Mem.Text {
+		t.Fatalf("the disk did not boot to the board: DHires=%v TEXT=%v",
+			m.Mem.DHires(), m.Mem.Text)
+	}
+	before := m.Screen().String()
+
+	const keyBudget2 = 400_000_000
+	if err := m.Key(0x1B, keyBudget2); err != nil { // ESC
+		t.Fatalf("ESC: %v", err)
+	}
+	if !m.Mem.Text || m.Mem.Col80 || !m.Mem.AltCharset {
+		t.Errorf("after ESC the display is not the 40-column text screen: TEXT=%v "+
+			"80COL=%v ALTCHARSET=%v", m.Mem.Text, m.Mem.Col80, m.Mem.AltCharset)
+	}
+	if got := m.Screen().String(); got != before {
+		t.Errorf("ESC changed the text screen's contents:\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+	if err := m.Key(0x1B, keyBudget2); err != nil { // ESC back
+		t.Fatalf("ESC back: %v", err)
+	}
+	if !m.Mem.DHires() || m.Mem.Text || m.Mem.Store80 {
+		t.Errorf("ESC did not come back to the board: DHires=%v TEXT=%v 80STORE=%v",
+			m.Mem.DHires(), m.Mem.Text, m.Mem.Store80)
+	}
+	// And the board is still painted -- the swap back repaints it, so a
+	// renderer that only worked once would show here.
+	blank := true
+	for _, b := range m.Mem.Aux[0x2000:0x4000] {
+		if b != 0 {
+			blank = false
+			break
+		}
+	}
+	if blank {
+		t.Error("the aux half of DHGR page 1 is entirely zero after swapping back: " +
+			"the board was not repainted")
+	}
+	t.Log("ESC swaps board <-> 40-column text screen, both intact")
 }

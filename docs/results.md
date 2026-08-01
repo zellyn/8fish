@@ -3,6 +3,87 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-31 — the DHGR board SHIPS: two-stage chain load, book to aux, 7.01 s boot
+
+The disk boots to the hand-drawn double-hi-res board. Full write-up in
+`docs/ui-design.md` §13; this is the measurement record.
+
+**Delivery.**
+
+| | sectors | of one page table | contents |
+|---|---|---|---|
+| stage 1 | 146 | 176 | copier $0D00 (171 B), UI payload $0E00 (5,064 B), engine $4000 (31,941 B) |
+| stage 2 | 37 | 176 | tile blob $0E00 (1,824 B), opening book $2000 (7,407 B) |
+| disk | 184 | of 560 | 376 sectors free |
+
+**Boot time: 7.01 s**, measured from the `$C600` entry to the first keyboard
+poll, on the real nibblised disk through the real Disk II boot ROM. Previous
+figure 6.15 s for 176 sectors of a single-shot image. The breakdown:
+
+| | cycles | s |
+|---|---:|---:|
+| stage 1 (146 sectors) | 5,478,812 | 5.37 |
+| stage 2 + both copies + dhclear/dhinit + first paint | 1,676,538 | 1.64 |
+| **total** | **7,155,350** | **7.01** |
+
++0.86 s against the old disk, for 8 more sectors, 9,231 B of new payload, two
+block copies (9,231 B), a 16,384-byte screen clear and a whole-board repaint.
+The loader stayed sequential: same ROM, same 2:1 interleave, one extra entry.
+
+**The ceiling was misstated, and the correction is worth more than the number.**
+Standard Delivery's page table is `$084F-$08FF` = **176 sectors = 45,056 B**,
+not `$084E`/177/45,312: the `LDA $084E` at `$0805` is pre-incremented at
+`$0802`. `diskii mksd`'s "44 KB cap" is not a tool policy, it is that same 176
+× 256. 8fish is 183 sectors, so single-shot was over by SEVEN sectors, not one.
+
+**And the table is a list of pages, not a base address.** Stage 1 scatter-loads
+three spans ($0D, $0E-$21, $40-$BC) with zero gap sectors; the old contiguous
+image would have paid 30 sectors for the $2200-$3FFF hole. This was not part of
+the plan and is worth more than the chain load: every future "it does not fit"
+is now a layout question.
+
+**Renderer cost, re-measured on the shipping build**: 193,667 cycles per
+whole-board repaint (unchanged — it is the same code), plus a one-time 115,000
+for `dhclear`. The 40-column screen is repainted every time as well (23,659
+cycles) so ESC is instantaneous; together that is 0.7% of a 30-second move.
+
+**Language Card budget**: UICODE 5,064 B of 5,888 (was 4,453); the renderer is
+380 B of code + 96 B of generated tables. 1,064 B of the $E000-$FFEF LC still
+free. The 1,824-byte artwork is in LC BANK 1 at $D300 and costs the payload
+nothing; LC bank 2 is still entirely unused (4,096 B).
+
+**Proof**: `TestDiskBoardParity` boots the shipping `.dsk` from `$C600` and
+asserts all 16,384 bytes of DHGR page 1 against `internal/tiles`' independent
+Go model. Not a harness variant — the artwork came off the disk in a second
+loader entry, through LC bank 1, painted into aux through RAMWRT.
+
+**★ 80STORE and AN3 are no longer untestable.** goapple2's `iie` package models
+both now (with the RAMRD/RAMWRT override precedence, validated against a2audit,
+and a `DHires()` accessor), so `sta CLR80STORE` and `sta SETDHIRES` are
+ASSERTED on the booted disk rather than documented as hardware-only hopes. This
+project's own lesson — the ALTCHARSET bug was found only when someone modelled
+the switch — paid out again, this time confirming the code was already right.
+
+**Two bugs found by gates, neither by inspection:**
+- the aux-capability probe wrote aux `$0300`, which stopped being transposition
+  table and became the RESIDENT BOOK when the table moved to `$4000`. It probes
+  `$3F00` now: DHGR page 1 in both banks, scratch by construction.
+- the book's main→aux copy, run from the copier, overwrote the copier itself on
+  an Apple ][+ (where `$C005` is not a soft switch), so the machine check that
+  prints NEEDS A 128K APPLE IIE never ran. It runs AFTER the check now.
+
+**Engine**: `TestMicroAB` matches `microABGolden` — the search tree is
+untouched. `engine.bin` grew 35 B (31,906 → 31,941) for the book probe's two
+aux primitives; no engine core source was modified.
+
+**What did NOT ship: mixed mode.** DHGR forces 80-column text, whose even
+columns come from aux `$0400-$07FF`; rows 20-23 are 160 bytes in four pieces in
+the middle of the 7,680-byte aux hole the 7,407-byte book occupies, and the two
+largest chunks either side are 7,256 B — 151 B short. The board is full screen
+with ESC to the 40-column text screen (Sargon III's arrangement). The route
+through is costed in ui-design §13.4: move the book's 1,702-byte name table
+into the Language Card, leaving 5,705 B that fit aux `$0800-$1FFF`.
+
 ## 2026-07-31 — ★ THE AUDIT WAS LYING: 2.4% of gauntlet games were harness artifacts reported as "0 quirk adjudications"
 
 Chasing a loose end I had noted twice and never opened — "8 games have no

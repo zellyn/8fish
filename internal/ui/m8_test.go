@@ -206,6 +206,8 @@ func TestUIByteBudget(t *testing.T) {
 		{"uipaint", "painting: title, status, prompt, messages, opening name"},
 		{"uithinkln", "think line + signed centipawn formatting"},
 		{"STSQ", "tables and strings (start position, levels, KTAB, all text)"},
+		{"dhclear", "asm/dhgr.s: the double-hi-res board renderer"},
+		{"TILEIDX", "generated tile dispatch tables (cmd/gentiles)"},
 	}
 	type row struct {
 		addr int

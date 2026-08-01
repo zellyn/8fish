@@ -6,9 +6,11 @@ package ui_test
 // through goapple2/iie's modelled IIe keyboard, and asks questions about
 // what a physical Apple IIe would do rather than what the harness does.
 //
-// Where the emulator cannot model the thing (80STORE, Ctrl-Reset), the
-// finding is argued in the review text, not here; these are the parts that
-// CAN be executed.
+// Where the emulator cannot model the thing (Ctrl-Reset), the finding is
+// argued in the review text, not here; these are the parts that CAN be
+// executed. 80STORE used to be on that list; goapple2/iie models it now,
+// and TestDiskBoots exercises it by booting from the hostile switch state
+// the 80-column firmware leaves behind.
 
 import (
 	"bytes"

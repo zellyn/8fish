@@ -158,9 +158,10 @@ m8main:
         ; off, so the disk boot is safe, but the 80-column FIRMWARE turns it
         ; ON — which is exactly the state a BLOAD/BRUN from BASIC.SYSTEM in
         ; 80-column mode (the default on a IIc, and on any IIe booted with
-        ; PR#3) inherits. goapple2's iie model does not implement 80STORE
-        ; (it counts $C000/$C001 in Unhandled), so no test can catch this:
-        ; it is a hardware-only failure, and the store costs three bytes.
+        ; PR#3) inherits. This USED to be a hardware-only failure, because
+        ; goapple2's iie model did not implement 80STORE; it does now, and
+        ; TestDiskBoots boots from the hostile state (80STORE + PAGE2 on)
+        ; and fails if this store goes missing.
         ;
         ; ALTCHARSET is the load-bearing one. A IIe powers up on the PRIMARY
         ; character set, in which $60-$7F is FLASHING PUNCTUATION — so every

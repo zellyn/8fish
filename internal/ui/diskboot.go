@@ -26,8 +26,9 @@ package ui
 // It renders nothing -- the caller reads the text page out of RAM -- so no
 // video scanner is involved.
 //
-// NOT MODELLED, because the boot path does not use it: 80STORE, aux video,
-// the $C100-$CFFF internal ROM and its SLOTCXROM/SLOTC3ROM switching, and
+// 80STORE and the $C100-$CFFF internal-ROM switching (INTCXROM/SLOTC3ROM/
+// INTC8ROM) ARE modelled by goapple2/iie now, though no internal ROM is
+// loaded here, so $C100-$CFFF is slots only. NOT MODELLED: aux video, and
 // every slot other than 6. Accesses to unimplemented $C0xx locations are
 // counted in the iie model's Unhandled map, and DiskMachine.Unhandled
 // surfaces them so an unnoticed dependency is loud.

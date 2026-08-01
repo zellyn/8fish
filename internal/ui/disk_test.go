@@ -255,6 +255,25 @@ func TestDiskBoots(t *testing.T) {
 	t.Logf("machine: Apple IIe (goapple2/iie 128K) + Disk II in slot %d, ROM = %s; "+
 		"entry $%04X (PR#%d)", ui.DiskSlot, m.ROMName, ui.BootEntry, ui.DiskSlot)
 
+	// Boot from the HOSTILE switch state, not the reset state. A IIe's
+	// 80-column firmware (PR#3, or ProDOS starting up) leaves 80STORE and
+	// PAGE2 on, and whatever ran before 8fish is what 8fish inherits. With
+	// them on, $0400-$07FF follows PAGE2 and IGNORES RAMRD/RAMWRT, so the
+	// engine's aux transposition table would have its $0400-$07FF slots
+	// land on the text page. asm/m8.s m8main's `sta CLR80STORE` is what
+	// fends that off; setting the switches here is what makes that store
+	// load-bearing in this test rather than decorative. (Deleting it from
+	// m8.s fails the Store80 check below. The SCREEN still comes out right
+	// even then, because m8main's `sta TXTPAGE1` leaves the text page
+	// pointing at main -- which is exactly why the switch itself has to be
+	// asserted, and why an end-state screen comparison is not enough.)
+	//
+	// goapple2's iie model gained 80STORE for this (its TestA2AuditAuxmem);
+	// before that it counted $C000/$C001 in Unhandled and no test here
+	// could tell the difference between the store being present and absent.
+	m.Mem.Store80 = true
+	m.Mem.Page2 = true
+
 	// ---- 1. the loader delivers the image ----------------------------------
 	// Stop the moment the loader jumps to the copier, before the copier has
 	// had a chance to touch anything.
@@ -311,21 +330,20 @@ func TestDiskBoots(t *testing.T) {
 	if !m.Mem.Text || m.Mem.Mixed || m.Mem.Page2 {
 		t.Errorf("display state wrong: TEXT=%v MIXED=%v PAGE2=%v", m.Mem.Text, m.Mem.Mixed, m.Mem.Page2)
 	}
-	// $C000 (80STORE OFF) is the ONE allowed exception. goapple2's iie model
-	// implements neither 80STORE state and counts both switch addresses in
-	// Unhandled; "off" is the state it does model, so the store is a no-op
-	// there and a necessity on hardware (asm/m8.s m8main). Everything else
-	// straying outside the modelled subset is still a failure.
+	// Nothing may stray outside the modelled subset. $C000/$C001 used to be
+	// an allowed exception here because the model did not implement 80STORE;
+	// it does now, so there is no exception left.
 	for addr, n := range m.Unhandled() {
-		if addr == 0xC000 {
-			continue
-		}
 		t.Errorf("the boot touched $%04X (%d times), which the IIe model does not implement", addr, n)
 	}
-	if m.Unhandled()[0xC000] == 0 {
-		t.Error("m8main never wrote $C000 (80STORE OFF): with the 80-column firmware's " +
-			"80STORE left on, the engine's AUX transposition table at $0400-$07FF would " +
-			"land on the MAIN text page instead")
+	// The switches were left hostile at power-on (see the top of this test);
+	// m8main has to have turned 80STORE back off, or the engine's AUX
+	// transposition table traffic at $0400-$07FF and the UI's text page are
+	// the same memory.
+	if m.Mem.Store80 {
+		t.Error("80STORE is still ON: m8main never did its `sta CLR80STORE`, so on a IIe " +
+			"booted from the 80-column firmware the screen and the engine's aux " +
+			"scratch at $0400-$07FF would be the same bytes")
 	}
 
 	// ---- 3. the screen is the gated screen ---------------------------------

@@ -3,6 +3,67 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-07-31 — the 80STORE finding now has a TEST: goapple2 stage 2 lands, `TestA2AuditAuxmem` un-skipped, a2audit untouched
+
+Two days ago I filed the missing `sta CLR80STORE` with the note that
+**"goapple2 does not model 80STORE, so no test in the repo could ever have
+caught it."** That was true about goapple2 and false about the project: the
+oracle already existed. `a2audit/audit/auxmem.asm` runs its four banking
+tests with 80STORE ON, and again with 80STORE + PAGE2 ON; `video.asm`
+exercises AN3. `TestA2AuditLangcard` had been passing all along. The aux
+half was sitting behind a `t.Skip` whose message named exactly what was
+missing — *"needs 80STORE/PAGE2/HIRES and INTCXROM/SLOTC3ROM support
+(stage 2)"*. I had dismissed stage 2 as infrastructure with no consumer in
+heartbeat after heartbeat. The DHGR renderer was its consumer.
+
+**goapple2 (`e646c2f`, `923fbdc` on `master`, not pushed).** 80STORE
+($C000/$C001, status $C018) with the precedence that is the entire point of
+the switch: it **overrides** RAMRD/RAMWRT for $0400-$07FF — and, with HIRES,
+$2000-$3FFF — which then follow PAGE2 alone for reads and writes. Plus AN3
+($C05E/$C05F) with a `DHires()` helper, and $C100-$CFFF ROM switching
+(INTCXROM, SLOTC3ROM, and the INTC8ROM decode a $C3xx access sets and a
+$CFFF access clears).
+
+**`TestA2AuditAuxmem` is un-skipped and passes IN FULL** — all twenty
+RAMRD x RAMWRT x 80STORE x PAGE2 x HIRES combinations plus a2audit's Cxxx
+ROM tests, verified running here (not skipping) with a IIe ROM from the MAME
+`apple2e` set that `internal/ui/diskboot.go` already uses. Without a ROM only
+tests $15-$1D skip, by name, with the reason logged; everything through $14
+always runs. Nine mutants of the new code (PAGE2 sense inverted, HIRES
+gating dropped, RAMRD allowed to win, SLOTC3ROM ignored, $CFFF not clearing
+INTC8ROM, …) were each caught by the audit — the pass is not vacuous.
+
+**Three harness bugs blocked the run; none were in a2audit, which stays
+byte-for-byte untouched** (verified, and the repo is clean):
+- Missing `JSR COPYTOAUX`. a2audit does this itself on a IIe; without it the
+  tests turn RAMRD on and the audit code vanishes from under the PC.
+- SP starts at $00, parking the stub's return address in **$0100 — one of
+  the thirteen addresses the tests seed and INC**. Fixed with `TXS`, as
+  a2audit's own `main` does.
+- Missing `JSR SETNORM`. COUT1 ANDs every character with INVFLG, so **every
+  a2audit failure screen had been coming back blank** — including
+  `TestA2AuditLangcard`'s diagnostics, for as long as that test has existed.
+
+**The payoff, verified independently here.** `TestDiskBoots` now boots from
+the state a IIe actually hands 8fish — 80STORE + PAGE2 **on**, as PR#3 and
+ProDOS leave them — and asserts `m8main` turned 80STORE back off. Commenting
+out the one store makes it **fail**; restoring it passes. The old assertion
+used `Unhandled[0xC000]` as a proxy and would have broken the moment the
+switch became real.
+
+**One finding worth keeping.** With the store deleted, **the screen still
+renders correctly**, because `sta TXTPAGE1` leaves the text page on main.
+Only the direct switch assertion catches it; an end-state screen comparison
+never would. The damage stays invisible until the engine's aux TT traffic
+reaches $0400-$07FF.
+
+**The lesson.** "No test can catch this" was a claim about the emulator that
+I stated as a claim about the project, and it retired a real defect into the
+"hardware-only, argue it in prose" bucket for two days. Before concluding
+that something is untestable, check whether the missing piece is an oracle
+or merely an implementation — this one was hardware-verified and already
+vendored.
+
 ## 2026-07-31 — ★ THE AUDIT WAS LYING: 2.4% of gauntlet games were harness artifacts reported as "0 quirk adjudications"
 
 Chasing a loose end I had noted twice and never opened — "8 games have no

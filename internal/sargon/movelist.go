@@ -2,7 +2,6 @@ package sargon
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 )
 
@@ -67,8 +66,8 @@ func parseMoveList(rows []string) []MoveRow {
 		if len(row) < blackColHi {
 			continue
 		}
-		n, err := strconv.Atoi(strings.TrimSpace(row[:listNumberCol]))
-		if err != nil || n <= 0 {
+		n, ok := parseListNumber(row[:listNumberCol])
+		if !ok {
 			continue
 		}
 		out = append(out, MoveRow{
@@ -78,6 +77,61 @@ func parseMoveList(rows []string) []MoveRow {
 		})
 	}
 	return out
+}
+
+// parseListNumber decodes Sargon III's move-number field (the row's first
+// listNumberCol columns).
+//
+// ★ It is NOT plain decimal past 99. Sargon renders the number with a
+// TWO-DIGIT routine that adds '0' to each column WITHOUT carrying out of the
+// tens, so the tens column runs off the end of the digits:
+//
+//	  99 -> "99"    100 -> ":0"   (':' == '0'+10)
+//	 109 -> ":9"    110 -> ";0"
+//	 119 -> ";9"    126 -> "<6"    128 -> "<8"
+//
+// All measured on the emulator (internal/sargon TestMoveNumberRendering), by
+// forcing Sargon's own move counter and reading the screen back.
+//
+// This mattered because the number — not the column text — is the commit and
+// move-accepted signal (see LastSargonEntry). `strconv.Atoi(":0")` fails, so
+// every row from move 100 on was DROPPED from the parsed list: LastSargonEntry
+// and LastOwnEntry froze at 99, Sargon's replies became invisible however long
+// the driver waited, and any game that reached move 100 died as a
+// "quirk-unresolved" harness artifact scored as a draw. That is the whole of
+// the residual quirk class the 2026-07-29 gauntlet audit reported (10/504 =
+// 2.0%) — reproduced live here, with Sargon's reply plainly visible on the
+// ":0" row the harness could not read.
+//
+// The field is right-justified and blank for a leading zero ("       1  ",
+// "      98  ", "      :0  "), so one or two characters after trimming. The
+// tens character is accepted up to '0'+25, the largest a byte counter can
+// produce; the ones character must be a digit.
+func parseListNumber(field string) (int, bool) {
+	f := strings.TrimSpace(field)
+	digit := func(c byte) (int, bool) {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		return int(c - '0'), true
+	}
+	switch len(f) {
+	case 1:
+		n, ok := digit(f[0])
+		return n, ok && n > 0
+	case 2:
+		tens := int(f[0] - '0') // ':' == 10, ';' == 11, ... 'I' == 25
+		if f[0] < '0' || tens > 25 {
+			return 0, false
+		}
+		ones, ok := digit(f[1])
+		if !ok {
+			return 0, false
+		}
+		n := tens*10 + ones
+		return n, n > 0
+	}
+	return 0, false
 }
 
 // entry returns the newest (highest move number) non-empty token in the
@@ -115,7 +169,16 @@ func (m *Machine) LastOwnEntry() (no int, tok string, ok bool) {
 // ErrListWrapped is returned when Sargon's displayed move number goes BACKWARDS.
 // Sargon III cannot record a game longer than 127 full moves: at move 128 the
 // move list restarts its numbering from 1 and its screen record no longer
-// matches the game being played (observed in 2/2 games that reached move 128).
+// matches the game being played (observed in 2/2 games that reached move 128,
+// with the pre-2026-07-26 text-based driver — the only driver that could get
+// that far, since the number-based one froze at move 100 until parseListNumber
+// learned Sargon's rendering).
+//
+// It is NOT the number FIELD that gives out: forcing the counter to 127 and
+// playing on shows move 128 rendered as "<8", which decodes cleanly (measured,
+// TestMoveNumberRendering). Whatever restarts at 128 is Sargon's move RECORD,
+// not its display. Nothing drives there anyway — cmd/sargon-symmatch clamps
+// -max-moves to MaxSargonMoves — so this stays a guard, not a path.
 var ErrListWrapped = fmt.Errorf("sargon move list wrapped (game exceeded Sargon's ~127-move capacity)")
 
 // MaxSargonMoves is the longest game Sargon III can record on its move list.

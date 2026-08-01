@@ -95,3 +95,74 @@ func TestCastlingEntryAndDisplay(t *testing.T) {
 		})
 	}
 }
+
+// paintListRow writes text straight into text page 1 for one move-list row, so
+// a list state can be posed without playing the game that produces it.
+func paintListRow(m *Machine, row int, text string) {
+	base := textRowBase(row)
+	for col := 0; col < 40; col++ {
+		c := byte(' ')
+		if col < len(text) {
+			c = text[col]
+		}
+		m.Poke(base+uint16(col), c)
+	}
+}
+
+// TestWrapNeedsTwoConsecutiveStrikes pins the ErrListWrapped guard against the
+// mid-search repaint. Sargon transiently BLANKS its newest move-list rows, so a
+// single poll that sees the number go backwards near the 127-move capacity is
+// far more likely a blank frame than a real wrap — and a spurious wrap ends a
+// game as a harness artifact, which is the class this driver exists to avoid.
+// Polls are pollChunk (500K cycles) apart, longer than the ~167K repaint, so
+// the guard requires the reading to REPEAT.
+func TestWrapNeedsTwoConsecutiveStrikes(t *testing.T) {
+	skipUnlessSlow(t) // needs the ROMs + disk image, though it steps no CPU
+	m, err := NewMachine(dskPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SargonWhite = true
+	full := func() {
+		paintListRow(m, 21, "      <5  A1-A2        H8-H7") // 125
+		paintListRow(m, 22, "      <6  A2-A1        H7-H8") // 126
+	}
+	blanked := func() { // repaint in progress: the newest rows are gone
+		paintListRow(m, 21, "")
+		paintListRow(m, 22, "")
+	}
+	paintListRow(m, 20, "      <4  B1-A1        G8-H8") // 124
+	full()
+	if no, _, ok := m.LastSargonEntry(); !ok || no != 126 {
+		t.Fatalf("posed list reads (%d,%v), want move 126", no, ok)
+	}
+	// A blank frame, once: NOT a wrap, and the caller keeps polling.
+	blanked()
+	if committed, err := m.sargonCommitted(126); committed || err != nil {
+		t.Fatalf("single blank frame = (%v,%v), want (false,nil) — a repaint is not a wrap", committed, err)
+	}
+	// The repaint completes: the strike must be forgotten.
+	full()
+	if committed, err := m.sargonCommitted(126); committed || err != nil {
+		t.Fatalf("repainted list = (%v,%v), want (false,nil)", committed, err)
+	}
+	blanked()
+	if _, err := m.sargonCommitted(126); err != nil {
+		t.Fatalf("first strike after a clean read = %v, want nil", err)
+	}
+	// Two consecutive backwards readings, half a million cycles apart in the
+	// real loops: that is a wrap, and the game must be abandoned.
+	if _, err := m.sargonCommitted(126); err != ErrListWrapped {
+		t.Fatalf("second consecutive blank reading = %v, want ErrListWrapped", err)
+	}
+	// Below the capacity the guard is inert: a backwards number mid-game is a
+	// repaint, always, however many times it is seen.
+	blanked()
+	paintListRow(m, 20, "")
+	paintListRow(m, 19, "      50  B1-A1        G8-H8")
+	for i := 0; i < 3; i++ {
+		if committed, err := m.sargonCommitted(60); committed || err != nil {
+			t.Fatalf("mid-game blank frame = (%v,%v), want (false,nil)", committed, err)
+		}
+	}
+}

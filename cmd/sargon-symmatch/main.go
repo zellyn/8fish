@@ -578,27 +578,36 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 		startFEN = normalizeFEN(fen)
 		base = "fen " + startFEN
 	}
+	// abandon ends a game that never became a game (boot, mode or setup failure).
+	// It logs a TERMINATION line with the same grep key every other exit uses:
+	// a game the harness could not even start is a HARNESS ARTIFACT scored as a
+	// draw, and an audit that cannot see it reports it as absent rather than as
+	// unknown (the 2026-07-31 `plies=-1` lesson, one level further up — these
+	// paths had no TERMINATION line at all, so they were invisible even to a
+	// fixed analyser).
+	abandon := func(reason, format string, args ...any) gameResult {
+		lg(format, args...)
+		lg("TERMINATION g%d result=%s reason=quirk-%s plies=-1", gameNo, resDraw, reason)
+		return resDraw
+	}
+
 	ref, err := refchess.ParseFEN(startFEN)
 	if err != nil {
-		lg("GAME %d: bad opening FEN %q: %v", gameNo, fen, err)
-		return resDraw
+		return abandon("bad-opening-fen", "GAME %d: bad opening FEN %q: %v", gameNo, fen, err)
 	}
 	seen := map[uint64]int{ref.ZobristKey(): 1}
 
 	// Boot Sargon fresh for this game, Hard Mode (NO Easy Mode), Infinite level.
 	m, err := sargon.NewMachine(dsk)
 	if err != nil {
-		lg("GAME %d: sargon new: %v", gameNo, err)
-		return resDraw
+		return abandon("sargon-new", "GAME %d: sargon new: %v", gameNo, err)
 	}
 	if err := m.BootToPrompt(); err != nil {
-		lg("GAME %d: sargon boot: %v", gameNo, err)
-		return resDraw
+		return abandon("sargon-boot", "GAME %d: sargon boot: %v", gameNo, err)
 	}
 	m.HardMode = true
 	if err := m.InfiniteLevel(); err != nil {
-		lg("GAME %d: sargon infinite level: %v", gameNo, err)
-		return resDraw
+		return abandon("sargon-level", "GAME %d: sargon infinite level: %v", gameNo, err)
 	}
 	m.Run(1_000_000)
 	// Assert, don't just log: the whole measurement assumes Sargon is on the
@@ -610,15 +619,14 @@ func playGame(lg func(string, ...any), eng *eightfish, dsk string, budget uint64
 	row3 := strings.ToUpper(strings.TrimSpace(m.TextRow(3)))
 	hard := verifyHardMode(m)
 	if !hard || !strings.Contains(row3, "LEVEL 9") {
-		lg("WARNING g%d: SARGON MODE WRONG — want Hard + LEVEL 9, row3=%q hard=%v; ABANDONING GAME",
-			gameNo, row3, hard)
 		lg("%s", m.ScreenDump(fmt.Sprintf("g%d bad-mode", gameNo)))
-		return resDraw
+		return abandon("sargon-mode",
+			"WARNING g%d: SARGON MODE WRONG — want Hard + LEVEL 9, row3=%q hard=%v; ABANDONING GAME",
+			gameNo, row3, hard)
 	}
 	if fen != "" {
 		if err := m.SetupPosition(fen); err != nil {
-			lg("GAME %d: sargon setup %q: %v", gameNo, fen, err)
-			return resDraw
+			return abandon("sargon-setup", "GAME %d: sargon setup %q: %v", gameNo, fen, err)
 		}
 	}
 	lg("GAME %d START: sargonWhite=%v hardMode=%v(row3=%q) opening=%q budget=%d",

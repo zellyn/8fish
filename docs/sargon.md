@@ -48,7 +48,8 @@ and retries a dropped/garbled entry.
 
 1. **Text move-list (authoritative, always reliable).** Text page 1
    (`$400-$7FF`, standard interleaved layout) shows a running move list on rows
-   10-23. Columns: move number right-justified in cols 0-7, WHITE's move from
+   10-23. Columns: move number right-justified in cols 0-7 (two characters, and
+   see hazard B — past 99 they are not both digits), WHITE's move from
    col 10 and BLACK's from col 23 — *regardless of who Sargon is*; only the
    SARGON/PLAYER header labels swap. A castle is printed one column right
    (`  O-O `). The widest token is 8 chars (`B7-B8/Q+`), so the scrape windows
@@ -57,7 +58,7 @@ and retries a dropped/garbled entry.
    `PXPEP`, `.../Q`, `+` for check). This works regardless of pondering.
 2. **Zero-page piece list (RAM, reliable only in Easy Mode).** See below.
 
-### Two move-list hazards (found 2026-07; both now handled)
+### Three move-list hazards (found 2026-07/08; all now handled)
 
 **A. Mid-search REPAINT.** While searching, Sargon transiently BLANKS the bottom
 move-list rows and repaints them identically ~167K cycles later. Measured
@@ -72,10 +73,33 @@ move). **Commit detection must key on the displayed move NUMBER**
 (`Machine.LastSargonEntry` / `sargonCommitted`), which only advances on a real
 commit and is immune to both the repaint and the scrolling.
 
-**B. 127-move capacity.** At move 128 Sargon restarts its move-list numbering at
+**B. THE MOVE NUMBER IS NOT DECIMAL PAST 99.** Sargon renders it with a
+two-digit routine that adds `'0'` to each column and never carries out of the
+tens, so the tens column runs off the end of the digits:
+
+| move | 99 | 100 | 109 | 110 | 119 | 126 | 128 |
+|---|---|---|---|---|---|---|---|
+| shown | `99` | `:0` | `:9` | `;0` | `;9` | `<6` | `<8` |
+
+Measured directly (`TestMoveNumberRendering`): Sargon's own move counter lives
+at `$1388`, and forcing it just under a boundary and playing on shows what the
+screen does. `strconv.Atoi(":0")` fails, so from move 100 the row DISAPPEARED
+from the parsed list and — since hazard A made the NUMBER the commit and
+move-accepted signal — `LastSargonEntry`/`LastOwnEntry` froze at 99: Sargon's
+replies were on screen and invisible however long the driver waited, and every
+injected move looked unaccepted. Every game that reached move 100 died as a
+`quirk-unresolved` harness artifact scored as a draw (10/504 = 2.0% of the
+2026-07-29 gauntlet; 1/150 measured directly on 2026-08-01 before the fix).
+`parseListNumber` decodes the field the way Sargon renders it.
+
+**C. 127-move capacity.** At move 128 Sargon restarts its move-list numbering at
 1 and its screen record no longer describes the game being played. All 3 games
 across two 300-game runs that reached move 128 broke there. `sargon.MaxSargonMoves`
-= 127 and `sargon-symmatch` clamps `-max-moves` to it.
+= 127 and `sargon-symmatch` clamps `-max-moves` to it. It is *not* the number
+field that gives out — 128 renders as `<8` and decodes cleanly (hazard B), so
+whatever restarts is Sargon's move RECORD, not its display. `ErrListWrapped`
+requires the backwards number to REPEAT on the next poll, because one backwards
+reading is also what hazard A's blank frame looks like.
 
 **Cross-check.** `Machine.CrossCheckHistory(hist, firstPly)` compares Sargon's own
 displayed list against our referee history ply for ply (overlapping suffix only —

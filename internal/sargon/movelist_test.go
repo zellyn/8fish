@@ -135,6 +135,79 @@ func TestRepaintBlankIsNotACommit(t *testing.T) {
 	}
 }
 
+// THE MOVE-100 REGRESSION. Sargon renders the move number with a two-digit
+// routine that never carries out of the tens column, so move 100 prints as
+// ":0". `strconv.Atoi` rejected that, the row vanished from the parsed list,
+// and the commit/accept signals froze at 99 — every game that reached move 100
+// died as a "quirk-unresolved" draw. Rows below are VERBATIM from the
+// adjudication dump of a standard-start game that hit it (2026-08-01, shard 3
+// game 1: Sargon's reply B2-C3 is plainly there on the ":0" row).
+var pastNinetyNineRows = rows(
+	"      95  C3-B3        C1-F1",
+	"      96  D2-D6        F1-B1+",
+	"      97  B3-C3        B1-C1",
+	"      98  D6-D2        F3-G3",
+	"      99  C3-B2        C1-F1",
+	"      :0  B2-C3",
+)
+
+func TestParseMoveListPastNinetyNine(t *testing.T) {
+	got := parseMoveList(pastNinetyNineRows)
+	if len(got) != 6 {
+		t.Fatalf("got %d rows, want 6: %+v", len(got), got)
+	}
+	if last := got[len(got)-1]; last.No != 100 || last.White != "B2-C3" || last.Black != "" {
+		t.Errorf("last row = %+v, want {100 B2-C3 }", last)
+	}
+	// The commit signal (Sargon is White here) must ADVANCE to 100; freezing at
+	// 99 is exactly the bug: Sargon's reply is on screen and invisible.
+	no, tok, ok := lastEntry(got, false /* White column */)
+	if !ok || no != 100 || tok != "B2-C3" {
+		t.Errorf("lastEntry = (%d,%q,%v), want (100,\"B2-C3\",true)", no, tok, ok)
+	}
+	// And the ply mapping must place it at ply 199, not 197.
+	plies := map[int]string{}
+	for _, r := range got {
+		if r.White != "" {
+			plies[2*r.No-1] = r.White
+		}
+	}
+	if plies[199] != "B2-C3" {
+		t.Errorf("ply 199 = %q, want %q", plies[199], "B2-C3")
+	}
+}
+
+// The rendering rule itself, measured on the emulator by forcing Sargon's move
+// counter and reading the screen back (TestMoveNumberRendering): the tens
+// column is '0'+n/10 with no carry, so it runs past '9' into ':', ';', '<'.
+func TestParseListNumber(t *testing.T) {
+	cases := []struct {
+		field string
+		want  int
+		ok    bool
+	}{
+		{"       1  ", 1, true},
+		{"      98  ", 98, true},
+		{"      99  ", 99, true},
+		{"      :0  ", 100, true}, // measured
+		{"      :9  ", 109, true}, // measured
+		{"      ;9  ", 119, true}, // measured
+		{"      <6  ", 126, true}, // measured
+		{"      <8  ", 128, true}, // measured
+		{"          ", 0, false},
+		{"       0  ", 0, false}, // move 0 does not exist
+		{"      -1  ", 0, false},
+		{"      A-  ", 0, false},
+		{"     100  ", 0, false}, // Sargon never prints three columns
+	}
+	for _, c := range cases {
+		got, ok := parseListNumber(c.field)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("parseListNumber(%q) = (%d,%v), want (%d,%v)", c.field, got, ok, c.want, c.ok)
+		}
+	}
+}
+
 func TestTokenSquares(t *testing.T) {
 	cases := []struct {
 		tok        string

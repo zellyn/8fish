@@ -247,8 +247,25 @@ func (m *Machine) sargonCommitted(baseNo int) (bool, error) {
 		return false, nil
 	}
 	if no < baseNo && baseNo >= MaxSargonMoves-1 {
+		// CONFIRM before condemning the game. A backwards number near the
+		// capacity is ALSO exactly what the mid-search repaint looks like (it
+		// blanks the newest rows for ~167K cycles; measured in TestRepaintWatch),
+		// and a spurious ErrListWrapped ends a game as a harness artifact — the
+		// very thing this file exists to avoid. Callers poll pollChunk (500K
+		// cycles) apart, longer than the repaint window, so a reading that
+		// repeats on the NEXT poll cannot be a blank frame.
+		//
+		// This window (baseNo >= 126) only became reachable when move numbers
+		// past 99 became readable at all: before that the driver froze at 100.
+		// Deliberately observation-based rather than "settle and re-read": it
+		// must not hand Sargon cycles of thinking that the budget did not.
+		m.wrapStrikes++
+		if m.wrapStrikes < 2 {
+			return false, nil
+		}
 		return false, ErrListWrapped
 	}
+	m.wrapStrikes = 0
 	return no > baseNo, nil
 }
 

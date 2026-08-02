@@ -364,33 +364,22 @@ func TestBuildRejectsBrokenArtwork(t *testing.T) {
 	// Square (0,0) is light, so an ODD dx is background-dark. dx=41 sits in
 	// the right margin the tile format assumes holds nothing.
 	broken := bytes.Clone(loadArt(t))
-	setDot(broken, SrcOriginX+41, SrcOriginY+10)
+	SetDot(broken, SrcOriginX+41, SrcOriginY+10)
 	if _, err := Build(broken); err == nil {
 		t.Fatal("Build accepted artwork with content outside the stored byte columns")
 	}
 	// Same for the top-left square's left margin (dx=1, also odd).
 	broken = bytes.Clone(loadArt(t))
-	setDot(broken, SrcOriginX+1, SrcOriginY+10)
+	SetDot(broken, SrcOriginX+1, SrcOriginY+10)
 	if _, err := Build(broken); err == nil {
 		t.Fatal("Build accepted artwork with content in the left margin")
 	}
 	// And an empty square that stops being empty.
 	broken = bytes.Clone(loadArt(t))
-	setDot(broken, SrcOriginX+SrcSquareW*0+20, SrcOriginY+SrcSquareH*3+10)
+	SetDot(broken, SrcOriginX+SrcSquareW*0+20, SrcOriginY+SrcSquareH*3+10)
 	if _, err := Build(broken); err == nil {
 		t.Fatal("Build accepted artwork with a non-blank 'empty' square")
 	}
-}
-
-// setDot lights dot (x,y) in an A2FC screen save, inverting Decode's
-// address arithmetic: byte column x/14, aux bank for the low 7 dots of
-// the pair and main for the high 7, LSB first.
-func setDot(data []byte, x, y int) {
-	off := lineOffset(y) + x/14
-	if x%14 >= 7 {
-		off += BankSize
-	}
-	data[off] |= 1 << (x % 14 % 7)
 }
 
 // TestTileIndexMirrorsPIECECH: the dark<<4|nibble index space maps to

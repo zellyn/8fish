@@ -92,6 +92,63 @@ aux/main column interleave itself is NOT on that list: `Window()`
 de-interleaves it the way the scanner does and the gates assert real strings
 read back out of both banks.
 
+## 2026-08-01 — ★★ THE DECISIVE NUMBER: +148 Elo vs Sargon III over 360 standard-start games, on the DEVICE config, with ZERO harness artifacts
+
+The measurement this project has been trying to make since the beginning, on
+an instrument that can finally be trusted.
+
+    GAMES 360:  +203 =99 -58
+    score 70.14%   Elo +148   95% CI [+117, +182]
+    360/360 games classified   0 quirk adjudications
+
+**Configuration: the shipped disk, not something adjacent to it.**
+`-standard-start -book -noponder -softclock` — both engines on their own books
+from move 1, the estimated clock a IIe requires (FT2_SOFTCLK + FT2_ADAPT), and
+ponder removed symmetrically because `asm/m8.s` never ponders. Six shards of 60
+games, independent dither and book seeds.
+
+| how the 360 games ended | | |
+|---|---:|---:|
+| checkmate | 261 | 72.5% |
+| threefold | 86 | 23.9% |
+| insufficient material | 5 | 1.4% |
+| move-cap adjudication | 4 | 1.1% |
+| stalemate | 3 | 0.8% |
+| fifty-move | 1 | 0.3% |
+| **harness artifacts** | **0** | **0.0%** |
+
+**Zero is the number that matters.** The previous standard-start run
+(2026-07-26, 300 games, +132) reported **17 quirk adjudications, 5.7%**, and
+the 07-29 gauntlet 2.0%. Those were the move-number defect fixed this morning:
+Sargon renders move 100 as `:0`, the driver could not parse it, and every game
+that got that far died with Sargon's reply visible on screen and invisible to
+the harness. Here every one of 360 games ended by a rule of chess.
+
+**The number is if anything CONSERVATIVE on compute.** Mean `spend_ratio`
+(8fish total / Sargon total) is **0.9506** — 8fish used about 5% LESS emulated
+compute than its opponent across the run — and own-budget adherence is 0.9676.
+It won by 148 Elo while spending less than the machine it beat.
+
+**Why this supersedes +132 rather than merely updating it.** That number came
+from an instrument with a 5.7% artifact rate, and the artifacts were **not
+conservative** as that entry claimed: measured this morning, the games that
+crossed move 100 scored 0.375 for 8fish, not the 0.5 an adjudicated draw hands
+out, so the old figure was biased UPWARD by roughly 2 Elo. The honest reading
+is not "+132 improved to +148"; it is that +132 was measured through a broken
+instrument and +148 is the first standard-start figure worth quoting.
+
+**What is being claimed, precisely.** 8fish beats Sargon III decisively at
+equal per-move cycle budget on an emulated 1.02 MHz 6502, from the standard
+starting position, with both engines using their own opening books, in the
+configuration the bootable disk actually runs. The lower bound of the interval
+is **+117**.
+
+**What is NOT being claimed.** Nothing about real hardware — no game in this run
+was played on an Apple IIe, and nobody has yet played 8fish on one. Nothing
+about Sargon III at its own native time control on original hardware. And
+nothing about other engines of the era: Sargon III is one benchmark, and
+docs/results.md's own 6502 landscape note puts Schröder/Mephisto above it.
+
 ## 2026-08-01 — ★ the DISPLAY is a gate now: goapple2 learns IIe double-res video, and zellyn's 7-dot shift is MEASURED
 
 zellyn implemented Apple IIe graphics for OpenEmulator, found that the simplest

@@ -1,10 +1,6 @@
 package tiles
 
 import (
-	"image"
-	"image/color"
-	"image/png"
-	"os"
 	"testing"
 )
 
@@ -87,29 +83,8 @@ func TestRoundTrip(t *testing.T) {
 		}
 	}
 
-	if err := writePNG(renderPNG, out); err != nil {
+	if err := WritePNG(renderPNG, out); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("round-trip screenshot: %s", renderPNG)
-}
-
-// writePNG renders a decoded screen at 1x2 (square-ish pixels), matching
-// cmd/dhgr2png's output so the two are directly comparable.
-func writePNG(path string, s *Screen) error {
-	img := image.NewGray(image.Rect(0, 0, ScreenW, 2*ScreenH))
-	on := color.Gray{0xEE}
-	for y := range ScreenH {
-		for x := range ScreenW {
-			if s.At(x, y) {
-				img.SetGray(x, 2*y, on)
-				img.SetGray(x, 2*y+1, on)
-			}
-		}
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return png.Encode(f, img)
 }

@@ -500,9 +500,12 @@ func (u *Machine) History() []string {
 }
 
 // TwoPlayer puts the UI in referee mode, where it never searches: the "S"
-// command cycles WHITE -> BLACK -> TWO PLAYERS. Passing through BLACK hands
-// the move to the engine, which replies immediately, so this finishes with a
-// new game.
+// command cycles WHITE -> TWO PLAYERS -> BLACK, so from the default it is ONE
+// press and nothing has moved -- that ordering is the point of the cycle (the
+// harmless state first; see asm/m8.s cmd_swap). The loop and the closing new
+// game are kept because the caller may not be starting from the default, and
+// reaching TWO PLAYERS from BLACK does pass through a press that hands the
+// move to the engine.
 func (u *Machine) TwoPlayer() error {
 	for range 3 {
 		if u.Peek(UIHUMAN) == 0xFF {

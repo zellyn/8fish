@@ -1854,6 +1854,14 @@ cmd_resign:
         sta UIWIN
         lda #RES_RESIGN
         sta UIRESULT
+        ; ...and clear whatever was on the message row, because uistatrow
+        ; only fills in "WHITE WINS" / "BLACK WINS" when the row is EMPTY
+        ; (so that "GAME OVER - N STARTS A NEW ONE" survives a repaint).
+        ; Without this, resigning straight after any command that leaves a
+        ; message -- S, or a declined draw -- would announce the winner
+        ; nowhere. This and cmd_draw's acceptance are the only two places a
+        ; result is LATCHED outside uisync, which re-derives its own.
+        jmp uiclrmsg
 :       rts
 
 ; cmd_draw: offer a draw. The engine accepts if its last completed search
@@ -1876,7 +1884,8 @@ cdno:   lda #<m_drawno
         jmp uisetmsg
 cdyes:  lda #RES_AGREED
         sta UIRESULT
-        rts
+        jmp uiclrmsg            ; ...so uistatrow can say GAME DRAWN; see
+                                ;  cmd_resign for why the row must be empty
 
 cmd_level:
         lda #<m_level
@@ -1897,22 +1906,49 @@ cllk:   jsr entkey
         sta UILEVEL
 cllx:   jmp uiclrmsg
 
-; cmd_swap: cycle WHITE -> BLACK -> TWO PLAYERS -> WHITE. Two-player mode is
+; cmd_swap: cycle WHITE -> TWO PLAYERS -> BLACK -> WHITE. Two-player mode is
 ; the referee mode: the UI validates and displays but never searches, which
 ; is what you want for playing a friend, replaying a game, or setting up a
 ; position by hand.
+;
+; ★ WHAT A REAL PLAYER HIT, 2026-08-01, and both halves were this routine
+; "working": "S when white immediately makes the computer move and switches to
+; black; S again when black does nothing the first time, then switches the
+; second." The first press handed White to the engine, which searched and
+; moved before anything could be reconsidered; the second selected TWO
+; PLAYERS, where nothing searches because that IS the mode -- and the only
+; thing that said so was thirteen characters inside a forty-column inverse
+; title bar. Two separate faults, and they compounded:
+;
+;   1. THE CYCLE WAS ORDERED WRONG. The very first press of an unlabelled key
+;      was the DESTRUCTIVE one: it committed a move. The reordering puts the
+;      HARMLESS state first -- one press gets you referee mode with nothing
+;      moving, and handing a colour to the engine now takes a second,
+;      deliberate press. Cost: zero bytes; it is the same three-way cycle
+;      walked the other way round.
+;
+;   2. NOTHING WAS ANNOUNCED. It ended in `jmp uiclrmsg`, so landing in a mode
+;      actively BLANKED the one row that could have named it. It now names the
+;      mode it landed in AND what the next press does, on both screens (the
+;      message row is painted by uipaint40 and, with the board up, by
+;      uipaintmsg's window half). A one-key three-way cycle whose states do
+;      not name their successor cannot be discovered from the keyboard.
 cmd_swap:
         lda UIHUMAN
-        beq cswb
+        beq cswt                ; White -> TWO PLAYERS: the harmless press
         cmp #COLORMASK
-        beq cswt
-        lda #0
-        beq cswset
-cswb:   lda #COLORMASK
+        beq csww                ; Black -> White
+        lda #COLORMASK          ; two players -> Black
         bne cswset
 cswt:   lda #$FF
+        bne cswset
+csww:   lda #0
 cswset: sta UIHUMAN
-        jmp uiclrmsg
+        jsr uiwhoidx            ; 0 = White, 1 = Black, 2 = two players --
+        tay                     ;  the same index the title bar's who-field
+        lda sidelo,y            ;  uses, so the two can never disagree
+        ldx sidehi,y
+        jmp uisetmsg
 
 cmd_help:
         lda #<m_help2
@@ -1998,13 +2034,33 @@ uipaint40:
         ldx #>s_help2
         jmp uiputs
 
+; uipaintmsg: the message row, on BOTH screens.
+;
+; ★ THE WINDOW HALF IS NOT OPTIONAL, and leaving it out shipped a bug. The
+; 40-column message row is row 17, and MIXED MODE SHOWS ONLY ROWS 20-23 -- so
+; a caller that set a message and painted it without a full repaint (cmd_level
+; and uiaskpromo: both put up a prompt and then block in entkey) wrote it to a
+; row the player cannot see while the board is up. "L only shows extra info in
+; text mode", reported from a real IIe, 2026-08-01: the level prompt was
+; painted, correctly, onto an invisible screen.
+;
+; Fixing it HERE rather than at the two call sites is what keeps the two
+; screens from forking: there is one routine that paints a message, and it
+; paints it wherever the message row currently is. uipaint40 also comes
+; through here, which costs one redundant window-row blit per full repaint (a
+; few thousand cycles against the 23,659 + 193,667 a repaint already spends)
+; and buys the guarantee that no future caller can forget.
 uipaintmsg:
         lda #MSGROW
         ldx #0
         jsr uigotorc
         lda #<UIMSGB
         ldx #>UIMSGB
-        jmp uiputs
+        jsr uiputs
+        lda UIDHGR              ; ...and the window's third row, if the board
+        beq uipmx               ;  is the screen being shown
+        jmp ui80msg
+uipmx:  rts
 
 uipaintbook:
         lda #BOOKROW
@@ -2162,7 +2218,7 @@ uprc:   lda UI80BUF,y
         beq uprx
         lda #<s_help2
         ldx #>s_help2
-        ldy #41
+        ldy #WIN80R
         jsr ui80puts
         lda #DHTXTTOP+3
         jmp ui80row
@@ -2189,14 +2245,22 @@ uprx:   rts
 ; to be reachable with one ESC:
 ;
 ;   20  the inverse title bar (version, level, which colour you have)  cols 0-39
-;       whose move it is, or how the game ended                       cols 40-59
-;       CHECK                                                         cols 60-79
+;       whose move it is, or how the game ended                       cols 41-59
+;       CHECK / THINKING...                                           cols 60-79
 ;   21  the think line: depth, score, the engine's best move          cols 0-39
-;       BOOK: <opening name>                                          cols 40-79
+;       BOOK: <opening name>                                          cols 41-79
 ;   22  the message row (illegal move, draw offers, game over)        cols 0-39
 ;       the first help line                                           cols 41-79
 ;   23  the input prompt, what you have typed, and the cursor         cols 0-39
 ;       the second help line                                          cols 41-79
+;
+; ★ COLUMN 40 IS A GUTTER ON EVERY ROW, and on row 20 it is load-bearing. The
+; title bar is INVERSE VIDEO for exactly its first 40 columns -- a solid white
+; block whose last character is an inverse space -- so a status field starting
+; at column 40 put "WHITE TO MOVE" hard against that edge, and on a real IIe
+; the row read as YOU ARE WHITEWHITE TO MOVE (reported 2026-08-01). The gutter
+; must be NORMAL video: an inverse space there is another white cell, which is
+; not a separator but more bar. See WIN80R.
 ;
 ; The MOVE LIST, the rank/file coordinates and the long-form help are what got
 ; left out; all three are on the 40-column screen, one ESC away. Every one of
@@ -2207,6 +2271,11 @@ uprx:   rts
 
 DHTXTTOP  = 20          ; first screen row of the four-row window (mixed mode
                         ;  shows text rows 20-23 under scanlines 0-159)
+WIN80R    = 41          ; the window's RIGHT-HAND COLUMN: every row's second
+                        ;  field starts here. Column 40 is deliberately left
+                        ;  blank as the gutter -- on row 20 it is the one cell
+                        ;  of black that separates the end of the inverse
+                        ;  title bar from "WHITE TO MOVE".
 
 ; ui80clr: blank all 80 columns of the staging line. Clobbers A,Y.
 ui80clr:
@@ -2301,8 +2370,19 @@ ui80stat:
         lda #0                  ; the inverse title bar, level digit and all
         ldx #0
         jsr ui80get
-        lda #STATROW            ; ...whose move it is, or the result
-        ldx #40
+        lda #STATROW            ; ...whose move it is, or the result, at the
+        ldx #WIN80R             ;  window's RIGHT-HAND COLUMN. ★ NOT column 40:
+                                ;  the title bar is 40 columns of INVERSE
+                                ;  video whose last character is an inverse
+                                ;  SPACE, so a status field at 40 puts
+                                ;  "WHITE TO MOVE" hard against the end of a
+                                ;  white bar and the row reads as
+                                ;  "YOU ARE WHITEWHITE TO MOVE" -- reported
+                                ;  from a real IIe, 2026-08-01. Column 41
+                                ;  leaves one NORMAL-video cell of black
+                                ;  between them, and it is the same column
+                                ;  the two help lines start at, so all four
+                                ;  window rows share one right-column origin.
         jsr ui80get
         lda #CHKROW             ; ...and CHECK / THINKING..., over its spaces
         ldx #60
@@ -2319,7 +2399,7 @@ ui80think:
         ldx #0
         jsr ui80get
         lda #BOOKROW
-        ldx #40
+        ldx #WIN80R             ; the right-hand column, like every other row
         jsr ui80get
         lda #DHTXTTOP+1
         jmp ui80row
@@ -2329,19 +2409,24 @@ ui80think:
 uidhtext:
         jsr ui80stat
         jsr ui80think
+        jsr ui80msg
+        jmp uiprompt            ; row 23 paints itself into both screens
 
+; ui80msg: rebuild the window's THIRD row -- the message row and the first
+; help line. Split out for the same reason ui80stat and ui80think are: a
+; caller that changes only the message (cmd_level, uiaskpromo, both through
+; uipaintmsg) must be able to repaint it without a 217,000-cycle full repaint.
+ui80msg:
         jsr ui80clr
         lda #MSGROW
         ldx #0
         jsr ui80get
         lda #<s_help1
         ldx #>s_help1
-        ldy #41
+        ldy #WIN80R
         jsr ui80puts
         lda #DHTXTTOP+2
-        jsr ui80row
-
-        jmp uiprompt            ; row 23 paints itself into both screens
+        jmp ui80row
 
 ; uisetmsg / uiclrmsg: the message row's contents live in LC RAM so a full
 ; repaint restores them.
@@ -2657,6 +2742,11 @@ reslo:  .byte <s_white, <s_mate2, <s_stale, <s_d50, <s_drep, <s_resign
 reshi:  .byte >s_white, >s_mate2, >s_stale, >s_d50, >s_drep, >s_resign
         .byte >s_agreed, >s_err
 
+; cmd_swap's announcement, indexed by uiwhoidx (0 White, 1 Black, 2 two
+; players) -- the same index the title bar's who-field uses.
+sidelo: .byte <m_sidew, <m_sideb, <m_side2
+sidehi: .byte >m_sidew, >m_sideb, >m_side2
+
 TITLELVL  = 20          ; column of the level digit in s_title
 TITLEWHO  = 26          ; column of the 13-character "who plays what" field
 PROMPTLEN = 11          ; length of s_movq / s_cmdq
@@ -2700,6 +2790,12 @@ m_help2:    SCRSTR "MOVES ARE e2e4 / e7e8q. RETURN SENDS."
 m_enginebad: SCRSTR "ENGINE RETURNED AN ILLEGAL MOVE"
 m_histfull: SCRSTR "MOVE LIST FULL - CANNOT TAKE BACK"
 m_needsiie: SCRSTR "8FISH NEEDS A 128K APPLE IIE"
+; cmd_swap's three announcements. Each names the mode S just entered AND what
+; the next S does, so the three-way cycle is discoverable from any one of its
+; states. 39 characters is the message row's limit (uisetmsg).
+m_sidew:    SCRSTR "YOU PLAY WHITE. S NEXT: TWO PLAYERS"
+m_sideb:    SCRSTR "YOU PLAY BLACK. S NEXT: YOU PLAY WHITE"
+m_side2:    SCRSTR "TWO PLAYERS. S NEXT: YOU PLAY BLACK"
 
 ; ---------------------------------------------------------------------------
 ; The double-hi-res board renderer, and the generated tile dispatch tables it

@@ -474,7 +474,13 @@ func TestResignAwardsTheRightSide(t *testing.T) {
 		want  string
 	}{
 		{"human is White", func(t *testing.T, u *ui.Machine) {}, "BLACK WINS"},
-		{"human is Black", func(t *testing.T, u *ui.Machine) { mustEnter(t, u, "s") }, "WHITE WINS"},
+		// TWO presses: the cycle is WHITE -> TWO PLAYERS -> BLACK, so reaching
+		// Black is deliberate. The engine answers on the way, which leaves
+		// Black -- the human -- to move, and therefore to resign.
+		{"human is Black", func(t *testing.T, u *ui.Machine) {
+			mustEnter(t, u, "s")
+			mustEnter(t, u, "s")
+		}, "WHITE WINS"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			u := boot(t)
@@ -838,25 +844,27 @@ func TestTakebackAcrossABookMove(t *testing.T) {
 	}
 }
 
-// TestSideSwapBookkeeping: `S` cycles WHITE -> BLACK -> TWO PLAYERS without
-// disturbing the position, and `N` resets the game. Swapping to a colour whose
-// opponent is to move legitimately hands that move to the engine, so the
-// board-unchanged assertion is made on the swap that does not.
+// TestSideSwapBookkeeping: `S` cycles WHITE -> TWO PLAYERS -> BLACK -> WHITE
+// without disturbing the position, and `N` resets the game. Swapping to a
+// colour whose opponent is to move legitimately hands that move to the engine,
+// so the board-unchanged assertion is made on a swap that does not: here the
+// game is left with BLACK to move, and TWO PLAYERS -> BLACK is therefore the
+// human's own turn either way.
 func TestSideSwapBookkeeping(t *testing.T) {
 	u := twoPlayer(t)
-	for _, mv := range []string{"e2e4", "e7e5", "g1f3", "b8c6"} {
+	for _, mv := range []string{"e2e4", "e7e5", "g1f3"} {
 		mustEnter(t, u, mv)
 	}
-	if got := u.Screen().Text(12); !contains(got, "WHITE TO MOVE") {
+	if got := u.Screen().Text(12); !contains(got, "BLACK TO MOVE") {
 		t.Fatalf("row 12 = %q", got)
 	}
 	fen, n := normFEN(u.FEN()), u.Peek(ui.UIHCNT)
 
-	// TWO PLAYERS -> WHITE, with White to move: still the human's turn, so
+	// TWO PLAYERS -> BLACK, with Black to move: still the human's turn, so
 	// nothing may happen to the game at all.
 	mustEnter(t, u, "s")
-	if got := u.Screen().Text(0); !contains(got, "YOU ARE WHITE") {
-		t.Errorf("row 0 = %q, want YOU ARE WHITE", got)
+	if got := u.Screen().Text(0); !contains(got, "YOU ARE BLACK") {
+		t.Errorf("row 0 = %q, want YOU ARE BLACK", got)
 	}
 	if got := normFEN(u.FEN()); got != fen {
 		t.Errorf("S changed the position: %q, want %q", got, fen)
@@ -864,8 +872,19 @@ func TestSideSwapBookkeeping(t *testing.T) {
 	if got := u.Peek(ui.UIHCNT); got != n {
 		t.Errorf("S changed UIHCNT to %d, want %d", got, n)
 	}
-	if got := u.Screen().Text(12); !contains(got, "WHITE TO MOVE") {
+	if got := u.Screen().Text(12); !contains(got, "BLACK TO MOVE") {
 		t.Errorf("S changed the side to move: row 12 = %q", got)
+	}
+
+	// BLACK -> WHITE, with Black to move: this one DOES hand the move to the
+	// engine, and exactly one ply may come of it.
+	mustEnter(t, u, "s")
+	if got := u.Screen().Text(0); !contains(got, "YOU ARE WHITE") {
+		t.Errorf("row 0 = %q, want YOU ARE WHITE", got)
+	}
+	if got := u.Peek(ui.UIHCNT); got != n+1 {
+		t.Errorf("swapping to White with Black to move added %d plies, want exactly 1",
+			int(got)-int(n))
 	}
 
 	// N with the human on White: a fresh start position, human to move.

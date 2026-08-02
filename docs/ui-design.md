@@ -1408,11 +1408,14 @@ ESC away.
 
 ```
      0                   20                  40                  60         79
- 20 | 8FISH 1.0    LEVEL 4     YOU ARE WHITE |WHITE TO MOVE      |CHECK       |
- 21 |D 5  +0.34 e2e4                         |BOOK: C78 Ruy Lopez, Morphy     |
+ 20 | 8FISH 1.0    LEVEL 4     YOU ARE WHITE | WHITE TO MOVE     |CHECK       |
+ 21 |D 5  +0.34 e2e4                         | BOOK: C78 Ruy Lopez, Morphy    |
  22 |ILLEGAL MOVE - TRY AGAIN                | N-NEW T-TAKEBACK R-RESIGN D-DRAW|
  23 |YOUR MOVE? e2e4_                        | L-LEVEL S-SIDES Q-QUIT ?-HELP   |
 ```
+
+Column 40 is a **gutter on every row**, and on row 20 it is load-bearing; §16.1
+is why the two right-hand fields moved into it.
 
 - **Row 20** is the inverse title bar (version, level, which colour you have)
   beside **whose move it is** — or how the game ended — and CHECK.
@@ -1747,3 +1750,175 @@ in the data path only, leaving the address path alone — did NOT fail
 bytes and drew them as hi-res, which matches no row of the DHGR page. The
 window tests caught it. A single gate would have been enough to feel safe
 and would not have been; the pair is the coverage.
+
+## 16. WHAT A PLAYER FOUND (2026-08-01)
+
+Everything above this section was built from tests and from reading. Then
+zellyn booted `asm/8fish.dsk` on a real Apple IIe and **played it** — the
+project's first real usage feedback — and hit three things in one sitting:
+
+> 1. no gap between "YOU ARE WHITE" and "WHITE TO MOVE"
+> 2. "L" only shows extra info in text mode
+> 3. typing "S" when white immediately makes the computer move and switches to
+>    black. Typing "S" again when black does nothing the first time, then
+>    switches the second.
+
+All three were reproduced through `internal/ui`'s harness against the shipping
+disk before anything was changed, and all three are now gated by
+`internal/ui/window_test.go`. What is worth recording is **why the existing
+suite could not see any of them**: every window gate used
+`strings.Contains`. That predicate cannot see *where* a field landed, cannot
+see whether a field was painted on the screen actually being shown, and cannot
+see whether a state change said anything at all. Three defects, one blind spot.
+
+### 16.1 The gutter: column 40 (issue 1)
+
+Row 20's title bar is **inverse video for exactly its first 40 columns** — the
+video-sense gate of §14.6 measured that — and its last character is an inverse
+space. The side-to-move field started at column 40, so `WHITE TO MOVE` began
+in the cell immediately after a solid white block, and the row read as one
+word. Nothing was overlapping; the two fields were simply flush.
+
+The fix is one column: `WIN80R = 41`, which is where the two help lines
+already started, so the window now has a single right-hand column origin on
+all four rows, with column 40 blank on every one of them. It costs **zero
+bytes** (an immediate operand changed value) and it must be **normal** video —
+an inverse space there is another white cell, which is more bar, not a
+separator.
+
+Room check, since the field moved right: the longest side-to-move string is
+`DRAW: REPETITION` (16), which now ends at column 56 and still clears
+CHECK/THINKING at 60; the longest opening line is
+`BOOK: B34 Sicilian, Accelerated Dragon` (38), which now ends at column 78.
+Nothing is pushed off the end of the 80.
+
+`TestWindowTitleBarHasAGapBeforeTheStatus` asserts the concrete contract
+(column 40 is a normal-video space, the field starts at 41) *and* the general
+property, derived from the video attributes rather than assumed: the first
+non-blank cell after the inverse run must be at least two columns past its
+end, and every cell between must be normal video.
+
+### 16.2 The level prompt was painted on an invisible screen (issue 2)
+
+`cmd_level` sets a message, calls `uipaintmsg`, and then **blocks in `entkey`**
+waiting for the digit — so it never reaches the main loop's full repaint. And
+`uipaintmsg` painted the 40-column message row, **row 17**, which mixed mode
+does not display: MIXED shows text rows 20-23 only. The prompt was rendered
+correctly, onto a screen the player cannot see. `uiaskpromo`, the promotion
+prompt, is the other caller and had the identical bug.
+
+The fix is in `uipaintmsg`, not at the two call sites: it now blits the
+window's message row too whenever the board is up (`ui80msg`, factored out of
+`uidhtext`). One routine paints a message and it paints it wherever the
+message row currently is; a third blocking prompt cannot reacquire the bug.
+Cost: 9 bytes, plus one redundant window-row blit per full repaint (a few
+thousand cycles against the 23,659 + 193,667 a repaint already spends).
+
+`TestWindowShowsTheLevelPrompt` asserts **equality** between the window's
+message field and 40-column row 17, not a substring — that is §14.1's
+one-piece-of-code-per-string invariant, and it fails if the window ever grows
+its own copy of the text.
+
+### 16.3 The S key: reordered, and it announces itself (issue 3)
+
+Not a logic bug. `cmd_swap` was a deliberate three-way cycle and two-player
+mode is the referee mode, where the UI validates and displays but never
+searches. Both halves of what zellyn saw were the code working. But there were
+**two real defects around it**, and they compounded:
+
+- **The cycle was ordered wrong.** The very first press of an unlabelled key
+  was the *destructive* one: WHITE → BLACK hands White to the engine, which
+  searches and commits a move before anything can be reconsidered. The cycle is
+  now **WHITE → TWO PLAYERS → BLACK → WHITE**: one press gets you referee mode
+  with nothing moving, and handing a colour to the engine takes a second,
+  deliberate press. Zero bytes — the same cycle walked the other way round.
+- **Nothing was announced.** `cmd_swap` ended in `jmp uiclrmsg`, so landing in
+  a mode actively *blanked* the one row that could have named it. The only
+  evidence of the third state was thirteen characters inside a forty-column
+  inverse title bar — which issue 1 had made hard to read. It now names the
+  mode it landed in **and what the next press does**, on both screens:
+
+  ```
+  YOU PLAY WHITE. S NEXT: TWO PLAYERS
+  TWO PLAYERS. S NEXT: YOU PLAY BLACK
+  YOU PLAY BLACK. S NEXT: YOU PLAY WHITE
+  ```
+
+  Indexed by `uiwhoidx`, the same index the title bar's who-field uses, so the
+  two cannot disagree. Cost: 10 bytes of code, 6 of table, 111 of strings.
+
+**Is a three-way cycle on one key the right design?** With the reorder and the
+announcement, yes — and the reasoning is worth stating because the alternatives
+are not obviously worse:
+
+- *Separate keys* is the obvious alternative and it is what a keyboard with
+  spare letters would want. `W`/`B`/`2` reads better than "press S until". But
+  the eight command letters are already `N T R D L S Q ?`, the help line that
+  advertises them is 29 characters in a 39-column half-row, and three keys
+  would replace one `S-SIDES` with something like `W/B/2-SIDES` — more keys to
+  document in less space, for a setting that is changed once or twice a game.
+- *A prompt* (`SIDES? W/B/2`) is the `L` pattern and is self-documenting, but
+  it costs a second keystroke on every use and another blocking `entkey` loop —
+  the exact construct that produced issue 2.
+- *An explicit mode line* is what the title bar already is. The bar was not
+  wrong; it was unreadable (issue 1) and unremarkable (nothing drew the eye to
+  a 13-character field changing).
+
+What actually made the cycle unusable was that its first step was destructive
+and its transitions were silent. Both are fixed, and a cycle whose every state
+names its successor is discoverable from the keyboard alone — you can find all
+three modes by pressing one key three times and reading. If the command set
+ever gets more room, `W`/`B`/`2` is the better shape and this is the note that
+says so.
+
+### 16.4 One thing found on the way
+
+`cmd_resign` and `cmd_draw`'s acceptance are the only two places a result is
+**latched** outside `uisync` (which re-derives its own every turn), and
+`uistatrow` only fills in `WHITE WINS` / `BLACK WINS` / `GAME DRAWN` when the
+message row is **empty** — so that `GAME OVER - N STARTS A NEW ONE` survives a
+repaint. Adding a message to `cmd_swap` therefore turned "S then R" into a
+resignation that announced the winner nowhere. Both now clear the row as they
+latch (5 bytes). The same hole was already reachable through `D` (declined) →
+`R`; it is closed for both.
+
+### 16.5 The cost, and the gates
+
+**+144 bytes** of the UI payload: 5,333 → 5,477 B of `UICODE`, leaving **651 B**
+free of `$E000-$FFEF` (`TestUIByteBudget`). Stage 1 of the disk grew by one
+sector, 147 → 148 of its 176, and boot time went from **7.10 s to 7.13 s** of
+emulated IIe time ($C600 to the first keyboard poll) — the 0.03 s is that
+sector. Nothing was added to the boot path itself.
+
+Three new gates, all driven through the **shipping disk**, all mutation-checked
+by breaking the thing they guard and watching them fail:
+
+| mutation | what failed |
+|---|---|
+| status field back to column 40 | *"column 40 is $D7 (\"W\", inverse=false); it must be a NORMAL-video space"* |
+| `ui80clr` blanks with `$20` (inverse space) | *"column 40 is $20 (\" \", inverse=true) … an INVERSE space is a white block"* |
+| `uipaintmsg`'s window half removed | *"L prompts on the 40-column screen but NOT in the window under the board"* |
+| `ui80msg` composes from the wrong 40-column row | *"the announcement must be on both screens, from one string"*; the level prompt gate fails too |
+| `cmd_swap` back to `jmp uiclrmsg` | *"it must NAME the mode S just entered (\"TWO PLAYERS\")"* — and `TestCommands` |
+| `cmd_swap` back to the old cycle order | *"S #1 must be the HARMLESS press … but the game went from 0 plies to 1"* |
+
+`TestMicroAB` against `microABGolden` and `TestBookProbeParityASMvsGo` are
+unchanged and green: this was the screen, not the engine.
+
+Three existing tests encoded the old cycle order and were updated to the new
+one — `TestCommands`, `TestResignAwardsTheRightSide`, `TestSideSwapBookkeeping`.
+The last of those now leaves the game with **Black** to move, because the press
+whose harmlessness it asserts is `TWO PLAYERS → BLACK`, and it gained an
+assertion that the following press adds *exactly one* ply.
+
+### 16.6 Not ours, and still failing
+
+`internal/ui`'s `TestLongGameIsNotDrawn` fails on `main` and fails here,
+identically: it pokes canary bytes into `$FF00-$FF0F` as "free LC RAM just past
+`UIHASH3`", and that is `UI80BUF`, the mixed-mode staging line, which
+`uiprompt` rewrites on every keystroke *in both display modes*. The canary has
+been aimed at occupied memory since mixed mode landed. It is skipped in
+`-short`, which is why it was not noticed. Not touched here — it is a
+pre-existing gate bug with its own fix (move the canary above `$FF50`), and
+changing a failing test inside a change that also touches the code it tests is
+how a real regression gets laundered.

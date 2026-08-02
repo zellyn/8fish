@@ -379,8 +379,24 @@ func TestCommands(t *testing.T) {
 	if got := u.Screen().Text(0); !contains(got, "LEVEL 2") {
 		t.Errorf("title = %q, want LEVEL 2", got)
 	}
-	// S cycles WHITE -> BLACK -> TWO PLAYERS -> WHITE. Going to BLACK hands
-	// the move to the engine, which replies at once; check the move panel.
+	// S cycles WHITE -> TWO PLAYERS -> BLACK -> WHITE, and the order is the
+	// point: the FIRST press is the harmless one -- referee mode, where
+	// nothing searches -- so one press of an unlabelled key can never commit
+	// a move. Handing a colour to the engine takes a second, deliberate press.
+	mustEnter(t, u, "s")
+	if got := u.Screen().Text(0); !contains(got, "TWO PLAYERS") {
+		t.Errorf("title = %q, want TWO PLAYERS on the first S", got)
+	}
+	if n := u.Peek(ui.UIHCNT); n != 0 {
+		t.Errorf("the first S committed a move (UIHCNT = %d); it selects referee mode, "+
+			"where nothing searches", n)
+	}
+	if got := u.Screen().Text(17); !contains(got, "TWO PLAYERS") {
+		t.Errorf("row 17 = %q; landing in a mode must announce it, or the state change "+
+			"is thirteen characters inside an inverse title bar", strings.TrimSpace(got))
+	}
+	// The second press goes to Black, which DOES hand the move to the engine;
+	// it replies at once out of the book.
 	mustEnter(t, u, "s")
 	if got := u.Screen().Text(0); !contains(got, "YOU ARE BLACK") {
 		t.Errorf("title = %q, want YOU ARE BLACK", got)

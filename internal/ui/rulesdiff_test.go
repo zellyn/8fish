@@ -709,6 +709,16 @@ func longGame(t *testing.T, plies int) []string {
 //   - nothing is written past the last byte of any array (canaries);
 //   - takeback is REFUSED, in words, rather than replaying to a position
 //     that is not the one before the last move.
+// canaryLo/canaryHi bracket free Language Card RAM above UI80BUF
+// ($FF00-$FF4F, the mixed-mode window's staging line). The canary used to sit
+// at $FF00 under the comment "free LC RAM just past UIHASH3" -- true when it
+// was written, false the moment MIXED MODE landed, and invisible because this
+// test is -short-skipped and `make test` runs -short.
+const (
+	canaryLo = uint16(0xFF50)
+	canaryHi = uint16(0xFF60)
+)
+
 func TestLongGameIsNotDrawn(t *testing.T) {
 	if testing.Short() {
 		t.Skip("types 262 moves into the image")
@@ -723,8 +733,12 @@ func TestLongGameIsNotDrawn(t *testing.T) {
 	for i := range hash0 {
 		hash0[i] = u.Peek(ui.UIHASH0 + uint16(0x100*i))
 	}
-	for a := uint16(0xFF00); a < 0xFF10; a++ {
-		u.Poke(a, 0xC5) // free LC RAM just past UIHASH3
+	// canaryLo/canaryHi bracket 16 bytes of GENUINELY free Language Card RAM,
+	// which is not the same thing as "just past UIHASH3": $FF00-$FF4F is
+	// UI80BUF, the mixed-mode window's staging line, rewritten on every
+	// keystroke. Free space starts at $FF50 and runs to the 6502 vectors.
+	for a := canaryLo; a < canaryHi; a++ {
+		u.Poke(a, 0xC5)
 	}
 
 	p, err := refchess.ParseFEN(refchess.StartFEN)
@@ -766,7 +780,13 @@ func TestLongGameIsNotDrawn(t *testing.T) {
 				"the end of the array below it", i, hash0[i], got)
 		}
 	}
-	for a := uint16(0xFF00); a < 0xFF10; a++ {
+	// The canary sits ABOVE UI80BUF. $FF00-$FF4F is the mixed-mode window's
+	// 80-column staging line, which uiprompt rewrites on EVERY keystroke in
+	// both display modes -- so a canary at $FF00 is not watching free RAM, it
+	// is watching a live buffer, and this test failed for every keystroke
+	// rather than for an overrun. $FF50-$FFEF is what is actually free below
+	// the 6502 vectors; see the UI80BUF comment in asm/ui.s.
+	for a := canaryLo; a < canaryHi; a++ {
 		if got := u.Peek(a); got != 0xC5 {
 			t.Errorf("$%04X = $%02X: written past the end of UIHASH3", a, got)
 		}

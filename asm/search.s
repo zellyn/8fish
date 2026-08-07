@@ -157,10 +157,17 @@ checkclocks:
 ; ---------------------------------------------------------------
 ; checkclock: poll the harness clock; set ABORT once cycles reach the
 ; hard limit (2x budget). No-op in fixed-depth mode (budget 0).
+; Once ABORT is set the divider is rearmed to 1 instead of 128, so
+; EVERY subsequent search entry lands back here and takes the dummy-
+; score unwind at ccsite — that is what lets search's per-node entry
+; drop its own ABORT test (deep opt r6: 6 cycles at every node for a
+; flag that is nonzero only while unwinding).
 ; ---------------------------------------------------------------
 checkclock:
         lda #128                ; rearm the poll divider (search counts it
         sta NODECNT             ;  down; 0 -> poll here -> reset to 128)
+        lda ABORT               ; already unwinding: keep every node polling
+        bne ccarm1
         lda BUDGET0
         ora BUDGET1
         ora BUDGET2
@@ -177,6 +184,8 @@ checkclock:
         bcc ccout               ; still under the limit
         lda #1
         sta ABORT
+ccarm1: lda #1                  ; aborting: every node must poll (and unwind)
+        sta NODECNT
 ccout:  rts
 
 ; PCOSTLO/PCOSTHI: what 128 nodes at taper phase X cost, in CLOCK_TRAP's
@@ -211,18 +220,23 @@ PCOSTHI:
 ; ---------------------------------------------------------------
 ; search
 ; ---------------------------------------------------------------
-search:
-        dec NODECNT             ; countdown: poll the clock every 128 nodes
-        bne :+                  ;  (checkclock rearms; first poll after 256)
+; The poll block sits ABOVE the search entry so the entry's beq reaches
+; it and the non-poll path (127 nodes of every 128) falls straight
+; through. ABORT is tested HERE, once per poll, not once per node: while
+; aborting, checkclock rearms the divider to 1, so every node lands here
+; and unwinds — see ccarm1 above (deep opt r6, −6 cyc/node).
 ccsite: jsr checkclock          ; operand patched to checkclocks by the
                                 ;  FT2_SOFTCLK setup in engine.s
-:       lda ABORT
-        beq :+
+        lda ABORT
+        beq sentry
         lda #0                  ; aborting: unwind with a dummy score
         sta SCORE
         sta SCORE+1
         rts
-:       lda PLY
+search:
+        dec NODECNT             ; countdown: poll the clock every 128 nodes
+        beq ccsite              ;  (checkclock rearms; first poll after 256)
+sentry: lda PLY
         beq sdrawend            ; root: no draw checks; a move is required
                                 ;  (and never at the ply cap)
         cmp #MAXPLY-1
@@ -278,12 +292,15 @@ snorep:
         ; and 2.2% of the ENDGAME, where every hit is), which is absurd
         ; for a quantity that changes only when a pawn is captured or
         ; promoted. NPAWNS is maintained on those two cold paths instead
-        ; (see defs.inc), so the test is now one load.
+        ; (see defs.inc), so the test is now one load. NPAWNS is tested
+        ; FIRST (deep opt r6): almost every node has a pawn on the board,
+        ; so the common path is one load + taken branch (6 cyc) instead
+        ; of load + compare + branch (8); the conjunction commutes.
+        lda NPAWNS
+        bne sdrawend            ; a pawn exists: playable
         lda PHASE
         cmp #2
         bcs sdrawend
-        lda NPAWNS
-        bne sdrawend            ; a pawn exists: playable
 sdraw:  lda #0
         sta SCORE
         sta SCORE+1

@@ -199,8 +199,12 @@ Derivations for the rejected/deferred rows:
   price the trade, because a documented precaution makes a very convincing
   false cause.
 
-- **Hi-res page 1, and the actual artwork.** The 28-px/4-byte square priced
-  above was sized for *invented* glyphs. The real asset
+- **Hi-res page 1, and the actual artwork.** *(The 44 x 21 source grid and
+  its top-2-row trim, below, were SUPERSEDED on 2026-08-06: the board was
+  redrawn at 42 x 19 as `assets/chess2-dazzledraw-save.bin`, so there is no
+  trim any more and the 28 clipped pixels are no longer paid. See §17 and
+  `assets/README.md`. Everything else here still holds.)* The 28-px/4-byte
+  square priced above was sized for *invented* glyphs. The real asset
   (`assets/chess-dazzledraw-save.bin`, hand-drawn in DazzleDraw) is 560-wide
   DHGR with **44 x 21** squares, i.e. 22 px at 280 — neither 28 nor
   byte-aligned. Two further facts any hi-res attempt must budget for, both
@@ -1922,3 +1926,114 @@ been aimed at occupied memory since mixed mode landed. It is skipped in
 pre-existing gate bug with its own fix (move the canary above `$FF50`), and
 changing a failing test inside a change that also touches the code it tests is
 how a real regression gets laundered.
+
+## 17. THE BOARD IS REDRAWN AT 42x19 (2026-08-06)
+
+**§3.1's 44x21 source grid and its top-2-row trim are superseded.** The board
+was redrawn at the size the engine renders it, so the slicer no longer throws
+anything away.
+
+### 17.1 What was wrong
+
+The first artwork, DazzleDraw picture **CHESS1**, was a specimen sheet on a
+**44 x 21** grid. The UI has 152 scanlines for eight ranks, so `cmd/gentiles`
+cut 42 x 19 tiles out of it: the two rightmost dot columns (harmless — measured
+pure background in all 64 squares) and **the top two source rows** (not
+harmless). That trim cost **28 dots** of bishop and king finial, board-wide.
+
+The depth had been chosen as a measured knee — top 2 rows cost 28 dots, top 3
+cost 80, the bottom row alone cost 115 — and the checker printed the whole
+curve. That made it a *defensible* bad option. It was still a bad option, and it
+showed up where these things always show up: on screen.
+
+### 17.2 What was done
+
+zellyn redrew all 24 pieces into **CHESS2**, a picture laid out at **42 x 19**,
+which is the engine's own square size. `assets/chess2-dazzledraw-save.bin`
+replaces `assets/chess-dazzledraw-save.bin`; the old save is in git history.
+
+| constant | CHESS1 | CHESS2 | re-derived or carried? |
+|---|---|---|---|
+| `SrcSquareW` x `SrcSquareH` | 44 x 21 | **42 x 19** | re-derived from the pixels |
+| `SrcTrimTop` | 2 | **0** | re-derived |
+| `SrcOriginX`, `SrcOriginY` | 8, 2 | **8, 2** | re-verified against the pixels |
+| `TileW` x `TileH` | 42 x 19 | 42 x 19 | unchanged (and now == the source square) |
+| `ContentMinDX`..`ContentMaxDX` | 8..34 | 8..34 | re-verified: ink spans exactly 8..34 |
+| bounding box | x 0..367, y 0..171 | **x 0..351, y 0..155** | re-derived |
+| `BorderBot` | 171 | **155** | re-derived |
+| right bar | literal `364` | **`BorderRight` = 348** | re-derived, and now *computed* |
+| `BorderW`, `FrameGapX`, `FrameGapY` | — | **4, 4, 1** | new, measured |
+
+The frame the artist draws is 4-dot bars down each side, 1-dot rules top and
+bottom, and a gap of 4 dots / 1 row between the frame and the grid. `8 x 42 =
+336` dots plus two 4-dot gaps and two 4-dot bars is 352 = the measured width;
+`8 x 19 = 152` rows plus two gap rows and two rules is 156 = the measured
+height. The grid **exactly fills** the frame, and that is now asserted.
+
+### 17.3 The delivery did not move
+
+The blob is still **1,824 B** (4 B x 19 rows x 24 tiles), and both generated
+includes — `asm/tiledefs.inc` and `asm/tiles.inc` — regenerated **byte-identical**.
+So §14.3's memory map and the stage-2 page table are unchanged, and so are the
+sector counts: **stage 1 148/176, stage 2 38/176, 187 of 560**, verified against
+a baseline build of `main`. The two disk images differ in **130 bytes**, exactly
+the number of bytes the blob changed by. Boot time **7.13 s**, unchanged.
+
+### 17.4 The gate that could not fire, and what replaced it
+
+`gentiles -check` headlined **CLIPPED INK**: the dots the top trim discarded.
+With `SrcTrimTop = 0` that section is structurally empty. Leaving it there would
+have been this project's sixth gate that cannot fail (see docs/results.md).
+
+- The headline was **widened, not deleted**. **LOST INK** measures ink outside
+  the whole *kept window* — rows `SrcTrimTop..SrcSquareH-1` crossed with the
+  dots the four stored byte columns cover (`dx 7..34`). The dot-column half is
+  live; the row half cannot fail today, and the report **prints that fact**
+  instead of a bare zero. If a future UI ever needs shorter ranks, one constant
+  brings the row half back, and the what-if trim curve is still measured so the
+  cost can be priced.
+- A **new** `[grid]` check asserts the thing that actually went wrong: the
+  constants must describe one consistent drawing (grid + gaps span the frame
+  exactly; `TileW == SrcSquareW`; `TileH == SrcSquareH - SrcTrimTop`; the stored
+  byte columns contain the content window), **and** the pixels must agree (the
+  frame-to-grid gap is entirely dark). Nothing had ever said the source square
+  and the tile were the same size. Now something does.
+- **Exit status 1 is retired** and left unallocated. It meant "slices, but the
+  trim clips ink"; there is no trim, and any lost dot is now also outside the
+  content window, which is a structural break (2). Reusing 1 would let an old
+  script mis-read a new run.
+- **`-check` is wired into a gate.** `cmd/gentiles`' `TestCheckOnCommittedArtwork`
+  requires exit **0** — it could only tolerate exit 1 before, because the
+  committed artwork clipped 28 dots — and `make test` runs it. `make check-tiles`
+  is the convenient spelling for a human mid-redraw.
+
+### 17.5 Mutation checks
+
+Every assertion added or changed was shown failing with the thing it guards
+broken:
+
+| mutation | what failed |
+|---|---|
+| `SrcSquareW` 42 → 44 (redraw at the old grid) | *"grid right edge x=359 runs into the right border (starts at 348)"*; `TestBoundingBox` *"board width 352 dots, want 368"* |
+| `SrcTrimTop` 0 → 2 (reinstate the trim) | `TestNoTrim`; *"[grid] TileH=19 but the source square is 19 rows with 2 trimmed"*; 130 dots reported lost |
+| `FrameGapX` 4 → 3 | *"[grid] left gap is 4 dots (origin x=8, bar ends at 3) but FrameGapX=3"* |
+| `BorderW` 4 → 5 | *"[grid] BorderLeft=3 but the side bars are BorderW=5 dots wide"*; *"[border] border column x=4 is broken at y=1"* |
+| `BoardMaxX` 351 → 367 (the old bbox) | *"lit bounding box is x 0..351 … want x 0..367"*; *"[grid] the right gap … is lit at (348,1)"* |
+| `SrcOriginY` 2 → 3 (grid off by one row) | 28 dots reported lost; *"ink spans dx 0..40, outside the declared window 8..34"* |
+| `ContentMaxDX` 34 → 33 | *"[content-window] a8: ink at (dx=34,dy=16) is in the right margin"* |
+| `LastCol` 4 → 3 (store one byte column fewer) | `TestNothingIsLost`; `TestCheckOnCommittedArtwork` *"exit = 2, want 0 (clean)"* |
+| delete `checkGrid`'s frame-gap pixel sweep | *"a lit dot at (5,77) in the left frame gap produced no [grid] finding"* |
+| LOST INK stops counting the **dot-column** half | *"lost total = 0, want 1"* — the live half |
+| LOST INK stops counting the **row** half | **nothing fails.** That is the claim, confirmed: the row half is a tautology today, which is why the report labels it rather than presenting it as a passing check |
+| committed blob reverted to the pre-redraw one | *"Check's blob differs from the committed one"*, naming all 13 changed tiles |
+
+### 17.6 Gates
+
+`make test` (short) green end to end. Named: `TestDiskBoardParity` (all 16,384
+bytes of DHGR page 1 from a cold `$C600` boot), `TestDiskBoots`, the five
+`internal/ui` videoscan gates (`TestDiskScannerMixedSplit`,
+`…SevenDotShift`, `…BoardExtent`, `…WindowIsReadable`, `…WindowVideoSense`),
+`internal/delivery`'s layout suite, `internal/tiles`, `cmd/gentiles`,
+`TestMicroAB` vs `microABGolden`, `TestBookProbeParityASMvsGo` (264 positions /
+4,194 probes). A decoded PNG of the board **as the shipping disk boots it** is
+written by `TestDiskBoardParity` to `$TMPDIR/8fish-disk-board.png`.

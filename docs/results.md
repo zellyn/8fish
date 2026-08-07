@@ -3,6 +3,56 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-06 — the board is REDRAWN at 42x19, and the gate that could not fire is replaced
+
+zellyn redrew every piece. The old artwork (DazzleDraw picture **CHESS1**) was
+drawn on a **44x21** grid and `cmd/gentiles` sliced it into 42x19 tiles by
+dropping the top two source rows of every square — **28 dots of bishop and king
+finial, thrown away silently**, which he noticed on screen. The new artwork
+(**CHESS2**, `assets/chess2-dazzledraw-save.bin`) is drawn at the engine's own
+square size, so the source square and the rendered tile are the same rectangle
+and `SrcTrimTop` is **0**. Nothing is clipped. Full write-up:
+**docs/ui-design.md §17**; the drawing spec is `assets/README.md`.
+
+**The delivery did not move.** The blob is still **1,824 B** (4 B x 19 rows x 24
+tiles), and `asm/tiledefs.inc` and `asm/tiles.inc` regenerated **byte-identical**
+— so the stage-2 page table is untouched. Disk: **stage 1 148/176, stage 2
+38/176, 187 of 560 sectors**, all three unchanged against a baseline build of
+`main`. The two disk images differ in exactly **130 bytes**, which is exactly the
+number of bytes that changed in the blob. Boot time **7.13 s** of emulated IIe
+time, unchanged. `TestMicroAB` vs `microABGolden` and `TestBookProbeParityASMvsGo`
+green: this was the artwork, not the engine.
+
+**The point of the day: `-check`'s headline had gone vacuous, and was not left
+that way.** Its top section measured *ink the top trim throws away*. With
+`SrcTrimTop = 0` that measurement is structurally zero and can never fail again
+— the sixth entry in this project's ledger of gates that cannot fire. Two
+changes, both mutation-checked:
+
+- The headline was **widened, not deleted**. "LOST INK" now measures ink outside
+  the whole **kept window** — rows *and* dot columns. The dot-column half is
+  live (the 4-byte tile row only covers dx 7..34); the row half is a tautology
+  today, and the report **says so in as many words** rather than printing a zero
+  that looks like a passing check. Mutation confirms the split exactly:
+  disabling the dot-column half fails `TestCheckCatchesLostInk`; disabling the
+  row half changes **nothing**, which is the claim.
+- A **new** check, `[grid]`, asserts what actually went wrong: that the declared
+  8x8 grid **exactly fills the frame the artist drew around it**, and that the
+  gap between frame and grid is blank. Nothing had ever said the source square
+  and the tile were the same size. Redraw at 44x21 now and it fails at the
+  source: *"grid right edge x=359 runs into the right border (starts at 348)"*.
+
+Exit status **1 is retired** (it meant "slices but the trim clips ink") and left
+unallocated rather than reused, so a script that special-cases it cannot
+silently mis-read a new run. `make test` now requires `-check` to exit **0**,
+which it could not do while the committed artwork clipped 28 dots.
+
+Board constants re-derived from the pixels, not carried over: bounding box
+x 0..**351** y 0..**155** (was 367/171), bottom rule y=**155**, right bar starts
+at x=**348** (the old literal 364 is gone — it is derived now). Unchanged and
+re-verified against the pixels: origin **(8,2)**, `TileW` **42**, `TileH` **19**,
+content window dx **8..34**.
+
 ## 2026-08-01 — ★ MIXED MODE SHIPS: the board keeps four lines of 80-column text under it
 
 `asm/8fish.dsk` now boots to the double-hi-res board **with a four-row,

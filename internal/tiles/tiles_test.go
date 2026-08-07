@@ -8,7 +8,7 @@ import (
 )
 
 // artPath is the hand-drawn source of truth, relative to this package.
-var artPath = filepath.Join("..", "..", "assets", "chess-dazzledraw-save.bin")
+var artPath = filepath.Join("..", "..", "assets", "chess2-dazzledraw-save.bin")
 
 func loadArt(t *testing.T) []byte {
 	t.Helper()
@@ -31,7 +31,7 @@ func loadScreen(t *testing.T) *Screen {
 	return s
 }
 
-// TestBoundingBox: the drawing occupies exactly x=0..367, y=0..171.
+// TestBoundingBox: the drawing occupies exactly x=0..351, y=0..155.
 // Everything else on the 560x192 screen is dark.
 func TestBoundingBox(t *testing.T) {
 	s := loadScreen(t)
@@ -52,14 +52,20 @@ func TestBoundingBox(t *testing.T) {
 		t.Errorf("lit bounding box = x %d..%d, y %d..%d; want x %d..%d, y %d..%d",
 			minX, maxX, minY, maxY, BoardMinX, BoardMaxX, BoardMinY, BoardMaxY)
 	}
-	if h := maxY - minY + 1; h != 172 {
-		t.Errorf("board height %d scanlines, want 172", h)
+	// 8 ranks of TileH scanlines, plus the frame's two rules and the gap
+	// either side of the grid. Written as the arithmetic rather than as a
+	// literal so it says WHY the number is what it is.
+	if h, want := maxY-minY+1, 8*SrcSquareH+2*(FrameGapY+1); h != want {
+		t.Errorf("board height %d scanlines, want %d (8 x %d + frame)", h, want, SrcSquareH)
+	}
+	if w, want := maxX-minX+1, 8*SrcSquareW+2*(FrameGapX+BorderW); w != want {
+		t.Errorf("board width %d dots, want %d (8 x %d + frame)", w, want, SrcSquareW)
 	}
 }
 
-// TestBorder: rows 0 and 171 are fully lit across the board's width, and
-// columns 0..3 and 364..367 are fully lit down its height. That border is
-// what pins the grid origin, so it is worth asserting directly.
+// TestBorder: rows 0 and 155 are fully lit across the board's width, and
+// the BorderW columns at each end are fully lit down its height. That
+// frame is what pins the grid origin, so it is worth asserting directly.
 func TestBorder(t *testing.T) {
 	s := loadScreen(t)
 	for _, y := range []int{BorderTop, BorderBot} {
@@ -69,7 +75,11 @@ func TestBorder(t *testing.T) {
 			}
 		}
 	}
-	for _, x := range []int{0, 1, 2, 3, 364, 365, 366, 367} {
+	cols := BorderCols()
+	if len(cols) != 2*BorderW {
+		t.Fatalf("BorderCols() has %d entries, want %d", len(cols), 2*BorderW)
+	}
+	for _, x := range cols {
 		for y := BoardMinY; y <= BoardMaxY; y++ {
 			if !s.At(x, y) {
 				t.Fatalf("border column %d: dot (%d,%d) is dark", x, x, y)
@@ -83,15 +93,67 @@ func TestBorder(t *testing.T) {
 	}
 }
 
-// TestGridFitsInsideBorder: 8 squares of 44x21 from origin (8,2) land
-// strictly inside the drawn border.
-func TestGridFitsInsideBorder(t *testing.T) {
-	if lastX := SrcOriginX + 8*SrcSquareW - 1; lastX >= 364 {
-		t.Errorf("grid right edge x=%d runs into the right border (starts at 364)", lastX)
+// TestGridExactlyFillsTheFrame is the assertion the 2026-08-06 redraw
+// exists because nobody had. The first artwork was drawn on a 44x21 grid
+// and sliced into 42x19 tiles, and nothing anywhere said the two had to
+// agree, so 28 dots of finial were thrown away silently. Now the grid must
+// EXACTLY fill what the artist's frame encloses — and the gap between the
+// frame and the grid must be blank, which is the pixel-side half of the
+// same claim.
+//
+// Redraw the board at a different square size and this fails at the source
+// instead of shipping a clipped tile.
+func TestGridExactlyFillsTheFrame(t *testing.T) {
+	s := loadScreen(t)
+	if lastX := SrcOriginX + 8*SrcSquareW - 1; lastX >= BorderRight {
+		t.Errorf("grid right edge x=%d runs into the right border (starts at %d)", lastX, BorderRight)
 	}
 	if lastY := SrcOriginY + 8*SrcSquareH - 1; lastY >= BorderBot {
 		t.Errorf("grid bottom edge y=%d runs into the bottom border (%d)", lastY, BorderBot)
 	}
+	// The grid plus the declared gaps spans the frame exactly, in both axes.
+	if got, want := SrcOriginX-(BorderLeft+1), FrameGapX; got != want {
+		t.Errorf("left gap = %d dots, want FrameGapX = %d", got, want)
+	}
+	if got, want := BorderRight-(SrcOriginX+8*SrcSquareW), FrameGapX; got != want {
+		t.Errorf("right gap = %d dots, want FrameGapX = %d", got, want)
+	}
+	if got, want := SrcOriginY-(BorderTop+1), FrameGapY; got != want {
+		t.Errorf("top gap = %d rows, want FrameGapY = %d", got, want)
+	}
+	if got, want := BorderBot-(SrcOriginY+8*SrcSquareH), FrameGapY; got != want {
+		t.Errorf("bottom gap = %d rows, want FrameGapY = %d", got, want)
+	}
+	// The tile IS the square: nothing is dropped in either axis.
+	if TileH != SrcSquareH-SrcTrimTop || TileW != SrcSquareW {
+		t.Errorf("tile %dx%d does not cover the %dx%d source square (SrcTrimTop=%d)",
+			TileW, TileH, SrcSquareW, SrcSquareH, SrcTrimTop)
+	}
+	// And the pixels agree: the frame's inner margin holds nothing.
+	gaps := FrameGaps()
+	if len(gaps) != 4 {
+		t.Fatalf("FrameGaps() returned %d rectangles, want 4", len(gaps))
+	}
+	swept := 0
+	for i, g := range gaps {
+		name := []string{"left", "right", "top", "bottom"}[i]
+		if g[2] < g[0] || g[3] < g[1] {
+			t.Errorf("%s frame gap is empty: %v — the sweep below would be vacuous", name, g)
+			continue
+		}
+		for y := g[1]; y <= g[3]; y++ {
+			for x := g[0]; x <= g[2]; x++ {
+				swept++
+				if s.At(x, y) {
+					t.Fatalf("%s gap between frame and grid is lit at (%d,%d)", name, x, y)
+				}
+			}
+		}
+	}
+	if swept == 0 {
+		t.Error("the frame-gap sweep visited no dots at all")
+	}
+	t.Logf("frame gap: %d dots swept, all dark", swept)
 }
 
 // TestSquareShades: row 0 reads L D L D L D L D, and each square's
@@ -164,10 +226,9 @@ func TestDitherPhaseLock(t *testing.T) {
 	}
 }
 
-// TestOuterColumnsPureBackground: dx 0..7 and 35..43 deviate from the
-// background in ZERO of the 64 squares. This is what lets the tile drop
-// the two rightmost dot columns losslessly and store only byte columns
-// 1..4.
+// TestOuterColumnsPureBackground: dx 0..7 and 35..41 deviate from the
+// background in ZERO of the 64 squares. This is what lets a tile row store
+// four of its six byte columns.
 func TestOuterColumnsPureBackground(t *testing.T) {
 	s := loadScreen(t)
 	if n := BoardDeviations(s, 0, SrcSquareH-1, 0, ContentMinDX-1); n != 0 {
@@ -177,71 +238,86 @@ func TestOuterColumnsPureBackground(t *testing.T) {
 		t.Errorf("right margin dx %d..%d has %d non-background dots, want 0",
 			ContentMaxDX+1, SrcSquareW-1, n)
 	}
-	// The trimmed columns (dx 42,43) are inside that right margin, so the
-	// 44 -> 42 narrowing is lossless.
-	if n := BoardDeviations(s, 0, SrcSquareH-1, TileW, SrcSquareW-1); n != 0 {
-		t.Errorf("trimmed dot columns %d..%d hold %d non-background dots, want 0",
-			TileW, SrcSquareW-1, n)
+	// Stated in the terms the FORMAT uses: the two byte columns nobody
+	// stores. This is the same fact as the margins above, but it is the
+	// spelling the 4-bytes-per-row layout actually rests on, and it names
+	// the dot ranges so a redraw can see them.
+	for _, c := range []int{0, TileCols - 1} {
+		lo, hi, _ := colPixels(c)
+		if n := BoardDeviations(s, 0, SrcSquareH-1, lo, hi); n != 0 {
+			t.Errorf("dropped byte column %d (dx %d..%d) holds %d non-background dots, want 0",
+				c, lo, hi, n)
+		}
 	}
 }
 
-// TestTrimCosts: dropping the top two source rows costs exactly 28
-// non-background dots board-wide. Three costs 80, and the bottom row
-// alone costs 115 — the numbers behind choosing "top 2".
-func TestTrimCosts(t *testing.T) {
-	s := loadScreen(t)
-	for _, tc := range []struct {
-		name   string
-		y0, y1 int
-		want   int
-	}{
-		{"top 2 rows (the trim we take)", 0, 1, 28},
-		{"top 3 rows", 0, 2, 80},
-		{"bottom 1 row", SrcSquareH - 1, SrcSquareH - 1, 115},
-	} {
-		if got := BoardDeviations(s, tc.y0, tc.y1, 0, SrcSquareW-1); got != tc.want {
-			t.Errorf("%s: %d non-background dots, want %d", tc.name, got, tc.want)
-		}
-	}
-	if SrcTrimTop != 2 {
-		t.Errorf("SrcTrimTop = %d; the measured knee is 2", SrcTrimTop)
+// TestNoTrim: since the CHESS2 redraw the tile is the WHOLE source square,
+// so the slicer throws nothing away in the vertical axis.
+//
+// The old test here (TestTrimCosts) pinned the 28/80/115-dot trim curve
+// and asserted SrcTrimTop == 2. That curve is now a what-if — nobody pays
+// it — so pinning its numbers would be a gate on nothing. What replaces it
+// is the claim that actually holds the format up: the tile covers the
+// square in both axes, and the row range the slicer reads is the whole
+// square. The curve is still MEASURED (Check reports it) so a future UI
+// that needs shorter ranks can price the trim; it is just not a gate.
+func TestNoTrim(t *testing.T) {
+	if SrcTrimTop != 0 {
+		t.Errorf("SrcTrimTop = %d; the CHESS2 artwork is drawn at the tile's own size, so nothing is trimmed", SrcTrimTop)
 	}
 	if TileH != SrcSquareH-SrcTrimTop {
 		t.Errorf("TileH = %d, want SrcSquareH-SrcTrimTop = %d", TileH, SrcSquareH-SrcTrimTop)
 	}
+	if TileW != SrcSquareW {
+		t.Errorf("TileW = %d, want SrcSquareW = %d: the tile must cover the whole square", TileW, SrcSquareW)
+	}
+	y0, y1, _, _ := KeptWindow()
+	if y0 != 0 || y1 != SrcSquareH-1 {
+		t.Errorf("KeptWindow rows %d..%d, want the whole square 0..%d", y0, y1, SrcSquareH-1)
+	}
+	// Informational, and the reason the redraw happened: the artist now
+	// draws in rows the old 44x21 slicer would have thrown away.
+	s := loadScreen(t)
+	t.Logf("what-if trim curve (paid by nobody): top 1 row = %d, top 2 = %d, top 3 = %d, bottom 1 row = %d",
+		BoardDeviations(s, 0, 0, 0, SrcSquareW-1),
+		BoardDeviations(s, 0, 1, 0, SrcSquareW-1),
+		BoardDeviations(s, 0, 2, 0, SrcSquareW-1),
+		BoardDeviations(s, SrcSquareH-1, SrcSquareH-1, 0, SrcSquareW-1))
 }
 
-// TestNothingElseIsLost: the ONLY content the tile format discards is
-// those 28 top-trim dots. Everything outside the retained window
-// (dy 2..20 x the stored byte columns' dots, dx 7..34) is background.
-func TestNothingElseIsLost(t *testing.T) {
+// TestNothingIsLost: the tile format discards NOTHING. Everything drawn is
+// inside the kept window — rows SrcTrimTop..SrcSquareH-1 crossed with the
+// dots the stored byte columns cover (dx 7..34).
+//
+// The row half of that is structurally true today (see TestNoTrim); the
+// DOT-COLUMN half is the live one, and it is what fails if a piece grows
+// into a square's margins. TestBuildRejectsBrokenArtwork mutation-checks
+// it from the Build side.
+func TestNothingIsLost(t *testing.T) {
 	s := loadScreen(t)
 	total := BoardDeviations(s, 0, SrcSquareH-1, 0, SrcSquareW-1)
-	// The stored byte columns are ordered aux0..2 then main0..2, so their
-	// dot coverage is a UNION; assert it is the contiguous span 7..34.
-	covered := map[int]bool{}
-	for c := FirstCol; c <= LastCol; c++ {
-		lo, hi, _ := colPixels(c)
-		for x := lo; x <= hi; x++ {
-			covered[x] = true
-		}
+	if total == 0 {
+		t.Fatal("the artwork has no ink at all; every measurement below would be vacuous")
 	}
-	loCol, hiCol := 7, 34
-	if len(covered) != hiCol-loCol+1 {
-		t.Fatalf("stored columns cover %d dots, want %d", len(covered), hiCol-loCol+1)
+	loCol, hiCol, contiguous := StoredDotSpan()
+	if !contiguous {
+		t.Fatalf("stored byte columns %d..%d cover a non-contiguous dot span %d..%d",
+			FirstCol, LastCol, loCol, hiCol)
 	}
-	for x := loCol; x <= hiCol; x++ {
-		if !covered[x] {
-			t.Fatalf("stored byte columns %d..%d leave dot dx=%d uncovered", FirstCol, LastCol, x)
-		}
+	if loCol != 7 || hiCol != 34 {
+		t.Errorf("stored dot span = %d..%d, want 7..34", loCol, hiCol)
 	}
 	if loCol > ContentMinDX || hiCol < ContentMaxDX {
 		t.Fatalf("stored span %d..%d does not contain the content span %d..%d",
 			loCol, hiCol, ContentMinDX, ContentMaxDX)
 	}
-	kept := BoardDeviations(s, SrcTrimTop, SrcSquareH-1, loCol, hiCol)
-	if lost := total - kept; lost != 28 {
-		t.Errorf("tile format discards %d non-background dots (total %d, kept %d); want exactly the 28 top-trim dots",
+	y0, y1, x0, x1 := KeptWindow()
+	if x0 != loCol || x1 != hiCol {
+		t.Fatalf("KeptWindow dots %d..%d disagree with StoredDotSpan %d..%d", x0, x1, loCol, hiCol)
+	}
+	kept := BoardDeviations(s, y0, y1, x0, x1)
+	if lost := total - kept; lost != 0 {
+		t.Errorf("tile format discards %d non-background dots (total %d, kept %d); want 0",
 			lost, total, kept)
 	}
 }

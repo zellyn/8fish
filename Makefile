@@ -12,7 +12,7 @@ endif
 
 DISKII := diskii
 
-.PHONY: all hello perft banktest entropytest uitest m8 engine tables tiles dsk test test-full test-siblings clean
+.PHONY: all hello perft banktest entropytest uitest m8 engine tables tiles check-tiles dsk test test-full test-siblings clean
 
 all: hello perft engine test
 
@@ -42,6 +42,18 @@ engine: asm/engine.bin
 tables: asm/tables.s
 
 tiles: internal/tiles/tileblob.bin
+
+# Read the artwork and report EVERY broken assumption at once, writing
+# nothing. This is what you run while REDRAWING the board -- `make tiles`
+# stops at the first problem, which is right for a generator and useless for
+# a redraw. Exit 0 means the drawing slices and loses nothing.
+#
+# The same check runs inside `make test` (cmd/gentiles'
+# TestCheckOnCommittedArtwork requires exit 0), so this target is the
+# convenient spelling, not the gate. A redraw that breaks an assumption fails
+# the suite whether or not anyone remembers to type this.
+check-tiles:
+	go run ./cmd/gentiles -check
 
 asm/banktest.bin: asm/banktest.s asm/banktest.cfg
 	cd asm && $(CA65) banktest.s -o banktest.o
@@ -130,7 +142,7 @@ asm/tables.s: cmd/gentables/main.go cmd/gentables/pesto.go
 # real rule, and the two .inc files depend on the blob with an empty recipe
 # (the gentiles run that made the blob already wrote them). Any consumer of a
 # .inc therefore forces the blob to be up to date FIRST.
-internal/tiles/tileblob.bin: assets/chess-dazzledraw-save.bin cmd/gentiles/main.go internal/tiles/tiles.go
+internal/tiles/tileblob.bin: assets/chess2-dazzledraw-save.bin cmd/gentiles/main.go internal/tiles/tiles.go
 	go run ./cmd/gentiles
 
 asm/tiledefs.inc asm/tiles.inc: internal/tiles/tileblob.bin

@@ -123,6 +123,16 @@ curincheck:
 ; thousands of samples. Measured error distribution: docs/results.md.
 ; ---------------------------------------------------------------
 checkclocks:
+        lda ABORT               ; unwinding: FREEZE the estimate. Once ABORT
+        bne checkclock          ;  is set, ccarm1 makes EVERY node poll (that
+                                ;  is the unwind mechanism, deep opt r6) — so
+                                ;  charging here would bill a 128-node
+                                ;  quantum PER NODE and explode the estimate
+                                ;  ~128x (TestSoftClockAccuracy caught it,
+                                ;  est/true 6.8 at 1 s budgets). Not charging
+                                ;  is also nearer the truth than the old
+                                ;  1-in-128 sampling: an unwinding node costs
+                                ;  ~45 cycles against PCOST's ~4,600/node.
         lda PHASE               ; clamp: PHASE exceeds 24 after promotions
         cmp #NPCOST
         bcc :+

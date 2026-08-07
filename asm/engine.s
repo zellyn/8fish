@@ -215,6 +215,9 @@ idloopj:
 ; sit between idloop and this path was removed 2026-07-25 with the
 ; feature; see docs/results.md.)
 iterate:
+        jsr fgpatch             ; fold the per-search-constant feature bits
+                                ;  into the four FGSITE jmp operands (deep
+                                ;  opt r6; board.s, TABLES hole)
         lda BESTFROM
         sta PREVFROM
         lda BESTTO

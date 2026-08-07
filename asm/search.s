@@ -1347,9 +1347,10 @@ sgo:    ldy PLY
         sta CURPTR
         sta CURSORLO,y
         lda CURPTR+1
-        adc #0
-        sta CURPTR+1
-        sta CURSORHI,y
+        bcc :+                  ; no page cross (63 of 64): skip the high
+        adc #0                  ;  byte's +1 (C=1 here) and its store
+        sta CURPTR+1            ;  (deep opt r6, −2 cyc on the common path)
+:       sta CURSORHI,y
         ; fall through to sdomove
 sdomove:
         ; The in-check test that used to open the post-make lazy-legality
@@ -1612,7 +1613,10 @@ lvskip:
         ldy PLY                 ; PLY = child here
         dey
         lda LEGALCNT,y
-        clc
+        clc                     ; NOT removable (deep opt r6 tried): the
+                                ;  not-king-aligned entry (`beq spinleg`)
+                                ;  arrives with a data-dependent carry from
+                                ;  the alignment test's `adc #$77`
         adc #1
         sta LEGALCNT,y
         ; ---- child window mode (FT_LMR: PVS + late move reductions):
@@ -1626,9 +1630,12 @@ lvskip:
         lda QSKIND,y
         bne sqgo
         ldx #0
-        lda FEATURES
-        and #FT_LMR
-        beq smset
+fglmr:  jmp fglmron             ; FGSITE (deep opt r6): operand = fglmron
+                                ;  (FT_LMR set) or smset (clear), patched
+                                ;  by fgpatch at every iterate. FEATURES
+                                ;  is a per-search constant; this replaces
+                                ;  a per-legal-move lda/and/beq.
+fglmron:
         lda LEGALCNT,y
         cmp #2
         bcc smset               ; first legal move: the PV move

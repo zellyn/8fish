@@ -262,6 +262,32 @@ func TestQHistDiag(t *testing.T) {
 	}
 }
 
+// TestQHistTaxDiag (QHIST_DIAG=1): one full-budget move per bench FEN with
+// the partition armed and the screen's charges set, reporting the probe/
+// update volume and the charged share of the cycle budget — the "state the
+// charges" number for the results entry.
+func TestQHistTaxDiag(t *testing.T) {
+	if os.Getenv("QHIST_DIAG") == "" {
+		t.Skip("set QHIST_DIAG=1 to run")
+	}
+	for _, fen := range adaptFENs {
+		pos, err := ParseFEN(fen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := NewEngine()
+		e.CheckExt = CheckExtParams{MaxExt: 1}
+		e.QHist = QHistParams{Form: 1, PartThresh: 8}
+		e.Costs.QHistProbe, e.Costs.QHistUpdate, e.Costs.QHistAge = 23, 30, 8
+		e.SetPosition(pos)
+		e.SearchCycleBudget(143000000, MaxPly-1)
+		charged := 23*e.Cyc.QHistProbes + 30*e.Cyc.QHistUpdates + 8*256
+		t.Logf("%s: probes %d, updates %d, charged %d cyc = %.3f%% of Est %d",
+			fen, e.Cyc.QHistProbes, e.Cyc.QHistUpdates, charged,
+			100*float64(charged)/float64(e.Cyc.Est), e.Cyc.Est)
+	}
+}
+
 // TestQHistPartitionExhaustive: with the partition pass armed, the set of
 // LEGAL moves searched at a node must be unchanged — partitioning may only
 // reorder quiets, never drop or duplicate one. Asserted indirectly but

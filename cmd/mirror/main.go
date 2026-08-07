@@ -305,6 +305,24 @@ func match(args []string) {
 	bSEECost := fs.String("bseecost", "", "B SEE cycle costs")
 	aCkExt := fs.String("ackext", "", "A check-extension params: maxext[,capturesonly] (empty = off)")
 	bCkExt := fs.String("bckext", "", "B check-extension params")
+	aQH := fs.String("aqh", "", "A quiet-history params: form,part,lmrhigh,lmrlow,lmpthresh form=1(side-to)|2(ptype-to)|3(side-ptype-to) (empty = off)")
+	bQH := fs.String("bqh", "", "B quiet-history params")
+	aQHCost := fs.String("aqhcost", "", "A quiet-history cycle costs: probe,update,ageperbyte (cycle mode only)")
+	bQHCost := fs.String("bqhcost", "", "B quiet-history cycle costs")
+	aIIR := fs.String("aiir", "", "A IIR params: minrem[,anywindow] (empty = off)")
+	bIIR := fs.String("biir", "", "B IIR params")
+	aIIRCost := fs.Float64("aiircost", 0, "A per-full-width-node IIR test cost (cycle mode only)")
+	bIIRCost := fs.Float64("biircost", 0, "B per-full-width-node IIR test cost (cycle mode only)")
+	aRazor := fs.String("arazor", "", "A razoring margins: m1,m2 centipawns at remaining 1/2, 0 = off at that rem (empty = off)")
+	bRazor := fs.String("brazor", "", "B razoring margins")
+	aRazorCost := fs.Float64("arazorcost", 0, "A per-test razoring cost (cycle mode only)")
+	bRazorCost := fs.Float64("brazorcost", 0, "B per-test razoring cost (cycle mode only)")
+	aNullR := fs.String("anullr", "", "A adaptive null-move reduction: deepr,minrem (empty = shipped R=2)")
+	bNullR := fs.String("bnullr", "", "B adaptive null-move reduction")
+	aTTR := fs.Int("attrepl", 0, "A TT replacement: 1 = depth-preferred + age (0 = shipped always-replace)")
+	bTTR := fs.Int("bttrepl", 0, "B TT replacement")
+	aTTRCost := fs.Float64("attreplcost", 0, "A per-store TT replacement-policy cost (cycle mode only)")
+	bTTRCost := fs.Float64("bttreplcost", 0, "B per-store TT replacement-policy cost (cycle mode only)")
 	fs.Parse(args)
 
 	lines, err := mirror.GenOpenings(sprt.Openings, *pairs, *seed)
@@ -314,7 +332,12 @@ func match(args []string) {
 		LMP: parseLMP(*aLMP), Asp: parseAsp(*aAsp), CM: parseCM(*aCM), CMCost: *aCMCost, Improving: parseImp(*aImp),
 		SEE: parseSEE(*aSEE), SEECosts: parseSEECost(*aSEECost),
 		CheckExt: parseCheckExt(*aCkExt),
-		Extra:    parseExtra(*aExtra), EvalTermsCost: *aExtraCost,
+		QHist:    parseQHist(*aQH), QHistCosts: parseTriple(*aQHCost, "quiet-history costs"),
+		IIR: parseIIR(*aIIR), IIRCost: *aIIRCost,
+		Razor: parseRazor(*aRazor), RazorCost: *aRazorCost,
+		NullR:  parseNullR(*aNullR),
+		TTRepl: mirror.TTReplParams{DepthPref: *aTTR != 0}, TTReplCost: *aTTRCost,
+		Extra: parseExtra(*aExtra), EvalTermsCost: *aExtraCost,
 		Mopup: parseMopup(*aMop), EG: parseEG(*aEG), EGCost: *aEGCost,
 		Mid: parseMid(*aMid), MidCost: *aMidCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
@@ -323,7 +346,12 @@ func match(args []string) {
 		LMP: parseLMP(*bLMP), Asp: parseAsp(*bAsp), CM: parseCM(*bCM), CMCost: *bCMCost, Improving: parseImp(*bImp),
 		SEE: parseSEE(*bSEE), SEECosts: parseSEECost(*bSEECost),
 		CheckExt: parseCheckExt(*bCkExt),
-		Extra:    parseExtra(*bExtra), EvalTermsCost: *bExtraCost,
+		QHist:    parseQHist(*bQH), QHistCosts: parseTriple(*bQHCost, "quiet-history costs"),
+		IIR: parseIIR(*bIIR), IIRCost: *bIIRCost,
+		Razor: parseRazor(*bRazor), RazorCost: *bRazorCost,
+		NullR:  parseNullR(*bNullR),
+		TTRepl: mirror.TTReplParams{DepthPref: *bTTR != 0}, TTReplCost: *bTTRCost,
+		Extra: parseExtra(*bExtra), EvalTermsCost: *bExtraCost,
 		Mopup: parseMopup(*bMop), EG: parseEG(*bEG), EGCost: *bEGCost,
 		Mid: parseMid(*bMid), MidCost: *bMidCost,
 		NodeBudget: *budget, CycleBudget: *cbudget, MaxIters: *maxiters}
@@ -337,9 +365,9 @@ func match(args []string) {
 	if *cbudget > 0 {
 		mode = fmt.Sprintf("budget %d cycles/move (maxiters %d)", *cbudget, *maxiters)
 	}
-	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q mop=%q eg=%q mid=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q extra=%q mop=%q eg=%q mid=%q) %s: %s (%v)\n",
-		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aImp, *aSEE, *aCkExt, *aExtra, *aMop, *aEG, *aMid,
-		byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bImp, *bSEE, *bCkExt, *bExtra, *bMop, *bEG, *bMid,
+	fmt.Printf("A(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q qh=%q iir=%q razor=%q nullr=%q ttrepl=%d extra=%q mop=%q eg=%q mid=%q) vs B(%#02x %s fix=%v lmr=%q qs=%q ord=%q lmp=%q asp=%q cm=%q imp=%q see=%q ckext=%q qh=%q iir=%q razor=%q nullr=%q ttrepl=%d extra=%q mop=%q eg=%q mid=%q) %s: %s (%v)\n",
+		byte(*aMask), *aw, *aFix, *aLMR, *aQS, *aOrd, *aLMP, *aAsp, *aCM, *aImp, *aSEE, *aCkExt, *aQH, *aIIR, *aRazor, *aNullR, *aTTR, *aExtra, *aMop, *aEG, *aMid,
+		byte(*bMask), *bw, *bFix, *bLMR, *bQS, *bOrd, *bLMP, *bAsp, *bCM, *bImp, *bSEE, *bCkExt, *bQH, *bIIR, *bRazor, *bNullR, *bTTR, *bExtra, *bMop, *bEG, *bMid,
 		mode, res, time.Since(start).Round(time.Second))
 }
 
@@ -590,6 +618,80 @@ func parseSEECost(s string) [3]float64 {
 		os.Exit(2)
 	}
 	return [3]float64{g, c, r}
+}
+
+// parseQHist parses "form,part,lmrhigh,lmrlow,lmpthresh" into a
+// QHistParams; empty means off (zero value). Trailing fields default to 0
+// (that use disabled).
+func parseQHist(s string) mirror.QHistParams {
+	if s == "" {
+		return mirror.QHistParams{}
+	}
+	var form, part, lmrhigh, lmrlow, lmpthresh int
+	n, err := fmt.Sscanf(s, "%d,%d,%d,%d,%d", &form, &part, &lmrhigh, &lmrlow, &lmpthresh)
+	if n < 1 || (err != nil && n < 1) || form < 1 || form > 3 {
+		fmt.Fprintf(os.Stderr, "bad quiet-history params %q (want form,part,lmrhigh,lmrlow,lmpthresh)\n", s)
+		os.Exit(2)
+	}
+	return mirror.QHistParams{Form: form, PartThresh: part, LMRHigh: lmrhigh,
+		LMRLowThresh: lmrlow, LMPThresh: lmpthresh}
+}
+
+// parseTriple parses "a,b,c" into a [3]float64; empty means all zero.
+func parseTriple(s, what string) [3]float64 {
+	if s == "" {
+		return [3]float64{}
+	}
+	var a, b, c float64
+	n, err := fmt.Sscanf(s, "%g,%g,%g", &a, &b, &c)
+	if err != nil || n != 3 {
+		fmt.Fprintf(os.Stderr, "bad %s %q (want three comma-separated numbers)\n", what, s)
+		os.Exit(2)
+	}
+	return [3]float64{a, b, c}
+}
+
+// parseIIR parses "minrem[,anywindow]" into an IIRParams; empty means off.
+func parseIIR(s string) mirror.IIRParams {
+	if s == "" {
+		return mirror.IIRParams{}
+	}
+	var minrem, anyw int
+	n, err := fmt.Sscanf(s, "%d,%d", &minrem, &anyw)
+	if (err != nil && n < 1) || n < 1 {
+		fmt.Fprintf(os.Stderr, "bad IIR params %q (want minrem[,anywindow])\n", s)
+		os.Exit(2)
+	}
+	return mirror.IIRParams{MinRem: minrem, AnyWindow: anyw != 0}
+}
+
+// parseRazor parses "m1,m2" into a RazorParams; empty means off.
+func parseRazor(s string) mirror.RazorParams {
+	if s == "" {
+		return mirror.RazorParams{}
+	}
+	var m1, m2 int
+	n, err := fmt.Sscanf(s, "%d,%d", &m1, &m2)
+	if err != nil || n != 2 {
+		fmt.Fprintf(os.Stderr, "bad razoring margins %q (want m1,m2)\n", s)
+		os.Exit(2)
+	}
+	return mirror.RazorParams{M1: m1, M2: m2}
+}
+
+// parseNullR parses "deepr,minrem" into a NullRParams; empty means the
+// shipped fixed R=2.
+func parseNullR(s string) mirror.NullRParams {
+	if s == "" {
+		return mirror.NullRParams{}
+	}
+	var deepr, minrem int
+	n, err := fmt.Sscanf(s, "%d,%d", &deepr, &minrem)
+	if err != nil || n != 2 {
+		fmt.Fprintf(os.Stderr, "bad null-R params %q (want deepr,minrem)\n", s)
+		os.Exit(2)
+	}
+	return mirror.NullRParams{DeepR: deepr, MinRem: minrem}
 }
 
 // parseAsp parses "delta[,policy]" into an AspirationParams; empty means

@@ -107,5 +107,16 @@ func (e *Engine) firstQuietPass() int {
 	if e.CM.on() {
 		return 6 // after-killers, but no killer pass: countermove first
 	}
-	return 4 // final quiet pass
+	return e.finalQuietPass(e.qhPartActive())
+}
+
+// finalQuietPass returns the pass that follows the killer/countermove
+// passes: the history-partition pass 8 when armed (qhist.go), else the
+// final quiet pass 4. With QHist off it is the constant 4, keeping the
+// disabled path byte-identical.
+func (e *Engine) finalQuietPass(qhPart bool) int {
+	if qhPart {
+		return 8
+	}
+	return 4
 }

@@ -116,6 +116,25 @@ type CycleCosts struct {
 	// (defaults to 0, an untaxed node-budget run); a cycle screen sets it
 	// via PlayerCfg.CMCost to a pessimistic per-node surcharge (~20-40).
 	Countermove float64
+	// QHist* are the cheap-quiet-history costs (qhist.go), NOT part of the
+	// calibration fit (default 0 = untaxed; a cycle screen sets them via
+	// PlayerCfg.QHistCosts). QHistProbe per counter probe (one indexed load
+	// + compare, ~13 cyc with the base-page setup amortized); QHistUpdate
+	// per saturating bump on a quiet cutoff (~30 cyc read-modify-write);
+	// QHistAge per table BYTE halved once per root move (~8 cyc/byte LSR
+	// sweep — 2-12K cycles/move depending on form, charged in newMove).
+	QHistProbe, QHistUpdate, QHistAge float64
+	// IIR is charged once per full-width node while internal iterative
+	// reduction is enabled (the test itself: ~10 cyc — TTFROM is already in
+	// a register after the probe). See iir.go.
+	IIR float64
+	// Razor is charged per razor margin test (one CMP against an eval the
+	// RFP block already computed, ~10 cyc). See razor.go.
+	Razor float64
+	// TTRepl is charged per ttstore while the depth-preferred replacement
+	// policy is enabled (read-compare of the incumbent's depth/age byte,
+	// ~15 cyc). See ttrepl.go.
+	TTRepl float64
 	// EGTerm is the per-eval-call cost of the endgame-TECHNIQUE terms
 	// (endgame.go), charged ONLY on the calls where the phase gate actually
 	// fires (in the asm the gate is a 3-cycle compare-and-return, so a
@@ -233,6 +252,15 @@ type CycleAccount struct {
 	// the losing verdicts; SEERescans the move-list items rescanned by
 	// deferred passes.
 	SEEGates, SEECalls, SEECallsQS, SEELosing, SEERescans uint64
+
+	// Cheap quiet-history counters (qhist.go).
+	QHistProbes, QHistUpdates uint64
+	// IIR counters: tests run / reductions applied (iir.go).
+	IIRTests, IIRHits uint64
+	// Razoring counters: margin tests / QS drops taken (razor.go).
+	RazorTests, RazorDrops uint64
+	// TTReplSkips counts stores skipped by the depth-preferred policy.
+	TTReplSkips uint64
 }
 
 // EvalTermsCost returns a conservative estimated per-eval-call cost, in

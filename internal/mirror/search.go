@@ -185,6 +185,12 @@ func (e *Engine) newMove() {
 		// per-game fresh Engine in self-play resets it between games anyway).
 		e.counter = [8][128]Move{}
 	}
+	if e.QHist.on() {
+		e.qhNewMove() // age (halve) the quiet-history counters
+	}
+	if e.TTRepl.on() {
+		e.ttAge ^= 0x80 // flip the TT generation bit (asm: EOR #$80)
+	}
 	if e.Features&FtHistory != 0 {
 		if e.hist == nil {
 			e.hist = &[2][128][128]int32{}
@@ -362,28 +368,7 @@ func (e *Engine) search() int {
 	}
 
 	if ply >= e.MaxDepth {
-		// Quiescence entry; in check it becomes a full evasion node
-		// (no TT probe, no sprep, but full move loop + mate detection).
-		e.QSNodes++
-		if !e.inChk[ply] {
-			e.qsKind[ply] = true
-			score := e.eval()
-			if score >= e.beta[ply] {
-				return e.beta[ply] // stand pat
-			}
-			if score > e.alpha[ply] {
-				e.alpha[ply] = score
-			}
-			// QS ply cap: beyond it, the stand-pat result is final.
-			if e.QS.PlyCap > 0 && ply-e.MaxDepth >= e.QS.PlyCap {
-				return e.alpha[ply]
-			}
-			// Delta-pruning threshold, disabled at low phase.
-			if p.Phase >= 6 {
-				e.deltaT[ply] = e.alpha[ply] - score - 200
-			}
-		}
-		return e.moveLoop()
+		return e.qsEntry()
 	}
 
 	// Full-width node: probe the transposition table.
@@ -391,7 +376,10 @@ func (e *Engine) search() int {
 		e.ttFrom[ply] = ent.from
 		e.ttTo[ply] = ent.to
 		if ply != 0 {
-			stored := int(ent.depthBound >> 2)
+			// &31: bit 7 of depthBound is the TTRepl age bit (never set
+			// with the policy off — depth is clamped to 31 on store, so
+			// the mask is behavior-identical there).
+			stored := int(ent.depthBound>>2) & 31
 			remaining := e.MaxDepth - ply
 			if remaining <= stored {
 				switch ent.depthBound & 3 {
@@ -410,20 +398,71 @@ func (e *Engine) search() int {
 		}
 	}
 
+	// Internal iterative reduction: a TT-missing node with real remaining
+	// depth is searched one ply shallower (iir.go). The horizon change must
+	// cover the whole node (sprep gates, children, the exit TT store), so
+	// the remainder of the node is the factored sprepAndMove.
+	if e.iirApplies(ply) {
+		e.MaxDepth--
+		score := e.sprepAndMove(ply)
+		e.MaxDepth++
+		return score
+	}
+	return e.sprepAndMove(ply)
+}
+
+// qsEntry is the quiescence entry (the ply >= MaxDepth branch of search):
+// stand pat, the QS ply cap, the delta-pruning threshold, then the move
+// loop. In check it falls through to a full evasion node. Factored so
+// razoring (razor.go) can drop a shallow full-width node into quiescence
+// through the engine's own entry path.
+func (e *Engine) qsEntry() int {
+	p := &e.Pos
+	ply := p.Ply
+	e.QSNodes++
+	if !e.inChk[ply] {
+		e.qsKind[ply] = true
+		score := e.eval()
+		if score >= e.beta[ply] {
+			return e.beta[ply] // stand pat
+		}
+		if score > e.alpha[ply] {
+			e.alpha[ply] = score
+		}
+		// QS ply cap: beyond it, the stand-pat result is final.
+		if e.QS.PlyCap > 0 && ply-e.MaxDepth >= e.QS.PlyCap {
+			return e.alpha[ply]
+		}
+		// Delta-pruning threshold, disabled at low phase.
+		if p.Phase >= 6 {
+			e.deltaT[ply] = e.alpha[ply] - score - 200
+		}
+	}
+	return e.moveLoop()
+}
+
+// sprepAndMove is the full-width node's tail: sprep (null move, RFP/
+// futility, razoring) and the move loop. Factored from search so IIR can
+// wrap it in a horizon reduction; with IIR off the extraction is
+// behavior-identical.
+func (e *Engine) sprepAndMove(ply int) int {
+	p := &e.Pos
 	// sprep: pruning before move generation (never when in check).
 	if !e.inChk[ply] {
-		// Null move R=2: not at root, not right after a null,
-		// remaining >= 4, phase >= 3, beta below the +mate zone, and
-		// the static eval already meets beta.
+		// Null move R=2 (NullR can deepen the reduction at deep nodes —
+		// razor.go): not at root, not right after a null, remaining >= 4,
+		// phase >= 3, beta below the +mate zone, and the static eval
+		// already meets beta.
 		if e.Features&FtNull != 0 && ply != 0 && e.undo[ply-1].from != NoSq &&
 			e.MaxDepth-ply >= 4 && p.Phase >= 3 && e.beta[ply] < mateZoneLo &&
 			e.eval() >= e.beta[ply] {
+			R := e.nullReduction(ply)
 			e.makenull()
 			e.alpha[ply+1] = -e.beta[ply]
 			e.beta[ply+1] = -e.beta[ply] + 1
-			e.MaxDepth -= 2
+			e.MaxDepth -= R
 			score := -e.search()
-			e.MaxDepth += 2
+			e.MaxDepth += R
 			e.unmakenull()
 			if score >= e.beta[ply] {
 				// Null cutoff: fail hard; store a moveless lower bound.
@@ -467,6 +506,22 @@ func (e *Engine) search() int {
 				}
 				if rfpM > 0 && ev-rfpM >= e.beta[ply] {
 					return e.beta[ply] // reverse futility: fail high
+				}
+				// Razoring (razor.go): eval far BELOW alpha at remaining
+				// 1-2 -> drop into quiescence. Shares the RFP compare's
+				// eval and this block's mate-zone guard; one extra CMP on
+				// the 6502 (Costs.Razor).
+				if rm := e.Razor.margin(remaining); rm > 0 {
+					if e.cyc {
+						e.Cyc.RazorTests++
+						e.Cyc.Est += uint64(e.Costs.Razor)
+					}
+					if ev+rm <= e.alpha[ply] {
+						if e.cyc {
+							e.Cyc.RazorDrops++
+						}
+						return e.razorDrop()
+					}
 				}
 				if remaining == 1 && futM > 0 && ev+futM <= e.alpha[ply] {
 					e.futile[ply] = true
@@ -538,6 +593,18 @@ func (e *Engine) moveLoop() int {
 	rem := e.MaxDepth - ply
 	lmpOn := !qs && e.lmpNodeOK(ply, rem)
 
+	// Quiet-history partition (qhist.go): when armed, pass 8 (between the
+	// killers/countermove and the final quiet pass) searches quiets whose
+	// history counter clears PartThresh; pass 4 then skips exactly those
+	// (recorded in qhPart8 — the counters move during child searches, so a
+	// second probe could disagree with the pass-8 verdict). On the asm this
+	// is one more tier-filtered rescan with a tier-bit rewrite on the
+	// searched moves, as in the SEE deferred pass.
+	qhPart := !qs && e.qhPartActive()
+	if qhPart {
+		e.qhPart8[ply] = e.qhPart8[ply][:0]
+	}
+
 	// Improving-conditional LMR: computed once per node (the signal is a
 	// property of the node, not the move). notImp is true only when the LMR
 	// application is on and this node is NOT improving; then late quiets get
@@ -604,12 +671,28 @@ func (e *Engine) moveLoop() int {
 						if !e.CM.BeforeKillers && e.Features&FtKiller != 0 && e.killerMatch(ply, m) {
 							continue
 						}
+					case 8: // history-partition pass: high-history quiets only
+						if e.Features&FtKiller != 0 && e.killerMatch(ply, m) {
+							continue // killers already searched
+						}
+						if e.CM.on() && e.counterMatch(ply, m) {
+							continue // counter already searched
+						}
+						if e.qhVal(m) < e.QHist.PartThresh {
+							continue // low history: left for pass 4
+						}
+						// Record the pass-8 verdict (asm: tier-bit rewrite)
+						// so pass 4 skips exactly this move, probe-free.
+						e.qhPart8[ply] = append(e.qhPart8[ply], m)
 					case 4: // final pass: skip killers and the counter (both done)
 						if e.Features&FtKiller != 0 && e.killerMatch(ply, m) {
 							continue
 						}
 						if e.CM.on() && e.counterMatch(ply, m) {
 							continue
+						}
+						if qhPart && e.qhPart8Match(ply, m) {
+							continue // searched in pass 8 (asm: rewritten tier)
 						}
 					case 5: // QS quiet-checks pass: keep quiets; the
 						// gives-check filter is applied after make() below.
@@ -683,8 +766,15 @@ func (e *Engine) moveLoop() int {
 			// threshold(rem) legal moves are skipped. Killers (pass 3) are
 			// spared only with ExemptKillers; checks are spared only with
 			// KeepChecks (which needs the move made to be known).
-			lmpQuiet := pass == 4 || (pass == 3 && !e.LMP.ExemptKillers)
+			lmpQuiet := pass == 4 || pass == 8 || (pass == 3 && !e.LMP.ExemptKillers)
 			lmpCand := lmpOn && lmpQuiet && e.legal[ply] >= e.LMP.lmpThreshold(rem)
+			// History-gated LMP (qhist.go): a late quiet whose history
+			// counter clears LMPThresh survives the count prune — the
+			// ordering-enabler form of the LMP re-screen.
+			if lmpCand && e.QHist.on() && e.QHist.LMPThresh > 0 &&
+				e.qhVal(m) >= e.QHist.LMPThresh {
+				lmpCand = false
+			}
 			if lmpCand && !e.LMP.KeepChecks {
 				continue
 			}
@@ -697,6 +787,14 @@ func (e *Engine) moveLoop() int {
 			// the parity gates — so the twin has to skip them too.
 			if e.inChk[ply] && e.evasionFiltered(m, ply) {
 				continue
+			}
+			// Quiet-history LMR gate operands, captured BEFORE make (the
+			// gate itself runs post-make, when From is empty and Side has
+			// flipped). No charge: the asm reads these from the move-stack
+			// entry it already holds.
+			var qhSide, qhMover byte
+			if e.QHist.on() {
+				qhSide, qhMover = p.Side, p.Board[m.From]&TypeMask
 			}
 			// Make + legality: the mover must not leave their king
 			// attacked.
@@ -754,7 +852,7 @@ func (e *Engine) moveLoop() int {
 			if e.Features&FtLMR != 0 && !qs && e.legal[ply] >= 2 &&
 				(e.LMR.EvasionPVS || !e.inChk[ply]) {
 				mode = 1
-				passOK := pass == 4 || (e.LMR.ReduceKillers && pass == 3)
+				passOK := pass == 4 || pass == 8 || (e.LMR.ReduceKillers && pass == 3)
 				rem := e.MaxDepth - ply
 				if ply != 0 && passOK && !e.inChk[ply] && !e.inChk[ply+1] &&
 					e.legal[ply] >= e.LMR.LateR1 && rem >= e.LMR.MinRemR1 {
@@ -768,6 +866,18 @@ func (e *Engine) moveLoop() int {
 					// when a natural eval ran in free-signal, else permissive).
 					if notImp {
 						mode += e.Improving.lmrExtra()
+					}
+					// History-gated LMR (qhist.go): a high-history late quiet
+					// is not reduced; a no-history one is reduced one ply
+					// more. One probe + compare per reduced candidate (the
+					// mover's side/type were captured pre-make above).
+					if e.QHist.on() && (e.QHist.LMRHigh > 0 || e.QHist.LMRLowThresh > 0) {
+						hv := e.qhValAt(qhSide, qhMover, m.To)
+						if e.QHist.LMRHigh > 0 && hv >= e.QHist.LMRHigh {
+							mode = 1
+						} else if e.QHist.LMRLowThresh > 0 && hv < e.QHist.LMRLowThresh {
+							mode++
+						}
 					}
 				}
 			}
@@ -839,6 +949,12 @@ func (e *Engine) moveLoop() int {
 						m.Flags&(FlEP|FlPromo) == 0 {
 						e.storeCounter(ply, m)
 					}
+					// Quiet-history bump (qhist.go): reward the quiet cutter
+					// with rem*rem, saturating at the byte ceiling.
+					if e.QHist.on() && p.Board[m.To] == 0 &&
+						m.Flags&(FlEP|FlPromo) == 0 {
+						e.qhBump(m, rem)
+					}
 					e.ttstore(ttLower, m.From, m.To, e.beta[ply])
 				}
 				return e.beta[ply]
@@ -892,14 +1008,16 @@ func (e *Engine) moveLoop() int {
 			if e.CM.on() && !e.CM.BeforeKillers {
 				pass = 6 // after-killers countermove pass follows the killers
 			} else {
-				pass = 4
+				pass = e.finalQuietPass(qhPart)
 			}
 		case 6:
 			if e.CM.BeforeKillers && e.Features&FtKiller != 0 {
 				pass = 3 // before-killers: the killers still follow
 			} else {
-				pass = 4
+				pass = e.finalQuietPass(qhPart)
 			}
+		case 8:
+			pass = 4 // history partition done: the remaining quiets
 		case 7:
 			return e.done()
 		default: // pass 4 (full-width final) or pass 5 (QS quiet-checks)
@@ -1105,9 +1223,19 @@ func (e *Engine) ttstore(bound int, from, to byte, score int) {
 		score:      int16(score),
 		depthBound: byte(depth)<<2 | byte(bound),
 	}
+	idx := ttIndex(p.Hash)
+	if e.TTRepl.on() {
+		// Depth-preferred + age replacement (ttrepl.go): keep a deeper
+		// current-generation entry for a different position; tag stores
+		// with the generation bit.
+		if e.ttKeepOld(&e.tt[idx], ent.verify, depth) {
+			return
+		}
+		ent.depthBound |= e.ttAge
+	}
 	if e.TTHook != nil {
 		e.TTHook(TTOp{Op: TTStore, Hash: p.Hash, Ply: p.Ply, From: from, To: to,
 			Score: ent.score, DepthBound: ent.depthBound})
 	}
-	e.tt[ttIndex(p.Hash)] = ent
+	e.tt[idx] = ent
 }

@@ -6,26 +6,52 @@ import (
 	"testing"
 )
 
-// TestCheckAgreesWithTrimCosts: Check's clipped-ink total, measured by
-// comparing each square against a SAME-SHADE EMPTY square, must equal the
-// analytic measurement (deviation from bgDot) that TestTrimCosts uses.
-// Two independent definitions of "ink", one number: if the empty-square
-// reference were the wrong shade — the easy mistake — every light square
-// would read as solid ink and this would blow up by three orders of
-// magnitude.
-func TestCheckAgreesWithTrimCosts(t *testing.T) {
+// TestCheckAgreesWithTheAnalyticMeasurement: Check measures ink by
+// comparing each square against a SAME-SHADE EMPTY square; BoardDeviations
+// measures it analytically, against the dither formula. Two independent
+// definitions, and every number the report prints has to come out the same
+// under both. If the empty-square reference were the wrong shade — the
+// easy mistake — every light square would read as solid ink and this would
+// blow up by three orders of magnitude.
+//
+// It also pins the committed artwork's goal state: nothing lost, nothing
+// broken, and the blob in the tree is the blob the artwork slices to.
+func TestCheckAgreesWithTheAnalyticMeasurement(t *testing.T) {
 	art := loadArt(t)
+	s := loadScreen(t)
 	rep, err := Check(art)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := rep.ClippedTotal, BoardDeviations(loadScreen(t), 0, SrcTrimTop-1, 0, SrcSquareW-1); got != want {
-		t.Errorf("Check reports %d clipped dots, analytic measurement says %d", got, want)
+
+	// LOST ink, both halves, against the analytic measurement.
+	y0, y1, x0, x1 := KeptWindow()
+	total := BoardDeviations(s, 0, SrcSquareH-1, 0, SrcSquareW-1)
+	if got, want := rep.LostTotal, total-BoardDeviations(s, y0, y1, x0, x1); got != want {
+		t.Errorf("Check reports %d lost dots, analytic measurement says %d", got, want)
 	}
-	// The whole trim curve, cross-checked the same way. TestTrimCosts owns
-	// the absolute numbers; this owns the agreement between the two
-	// measurements at every trim depth.
-	s := loadScreen(t)
+	if rep.LostTotal != 0 {
+		t.Errorf("the committed artwork loses %d dots; the redraw's whole point is that it loses none", rep.LostTotal)
+	}
+	// The row half of the split can no longer fail (SrcTrimTop is 0). Say
+	// so as an assertion rather than letting a zero look like a passing
+	// check: if a trim is ever reinstated this fails and has to be re-read.
+	if SrcTrimTop == 0 && rep.LostRows != 0 {
+		t.Errorf("LostRows = %d with no trim; the row half of the split must be structurally zero", rep.LostRows)
+	}
+
+	// The board-wide ink box: the number a redraw actually works against.
+	if rep.InkMinDX < ContentMinDX || rep.InkMaxDX > ContentMaxDX {
+		t.Errorf("ink spans dx %d..%d, outside the declared window %d..%d",
+			rep.InkMinDX, rep.InkMaxDX, ContentMinDX, ContentMaxDX)
+	}
+	if rep.InkMinDY < 0 || rep.InkMaxDY > SrcSquareH-1 {
+		t.Errorf("ink spans dy %d..%d, outside the square 0..%d", rep.InkMinDY, rep.InkMaxDY, SrcSquareH-1)
+	}
+
+	// The what-if trim curve, cross-checked the same way. It gates nothing
+	// now, but a diagnostic that quietly disagrees with the measurement it
+	// claims to report is worse than no diagnostic.
 	for n := 1; n < len(rep.TrimCosts); n++ {
 		if got, want := rep.TrimCosts[n], BoardDeviations(s, 0, n-1, 0, SrcSquareW-1); got != want {
 			t.Errorf("top-%d trim cost = %d, analytic says %d", n, got, want)
@@ -34,6 +60,7 @@ func TestCheckAgreesWithTrimCosts(t *testing.T) {
 	if got, want := rep.BottomCost, BoardDeviations(s, SrcSquareH-1, SrcSquareH-1, 0, SrcSquareW-1); got != want {
 		t.Errorf("bottom-row cost = %d, analytic says %d", got, want)
 	}
+
 	// The committed artwork slices: no geometry finding at all.
 	for _, v := range rep.Violations {
 		t.Errorf("committed artwork has a geometry finding: %s", v)
@@ -47,8 +74,8 @@ func TestCheckAgreesWithTrimCosts(t *testing.T) {
 	if len(rep.Changed) != 0 {
 		t.Errorf("Check reports %v changed vs the committed blob", rep.Changed)
 	}
-	if rep.Clean() != (rep.ClippedTotal == 0) {
-		t.Errorf("Clean() = %v with %d clipped dots and no violations", rep.Clean(), rep.ClippedTotal)
+	if !rep.Clean() {
+		t.Errorf("Clean() = false with %d lost dots and %d violations", rep.LostTotal, len(rep.Violations))
 	}
 }
 
@@ -81,35 +108,91 @@ func TestRefEmptyIsSameShade(t *testing.T) {
 	}
 }
 
-// TestCheckCatchesClippedInk: a dot drawn in the trimmed rows of a square
-// that is clean today must show up as clipped ink, named by square.
-func TestCheckCatchesClippedInk(t *testing.T) {
-	// a1 (r=7,f=0) is a dark square whose ink starts at dy 4 today, and
-	// dx 20 is inside the content window, so this dot is PURELY a clip.
-	broken := mustSetDot(t, loadArt(t), 7, 0, 0, 20)
+// TestCheckCatchesLostInk: a dot drawn in a square's right MARGIN is a dot
+// the 4-byte tile row cannot carry. It must be reported as lost, named by
+// square, and counted in the DOT-COLUMN half of the split.
+//
+// This is the replacement for TestCheckCatchesClippedInk, which drew into
+// a trimmed row. With SrcTrimTop at 0 there are no trimmed rows, so that
+// test could no longer fail for the reason it claimed — it would have
+// become a passing test of nothing.
+func TestCheckCatchesLostInk(t *testing.T) {
+	// a1 (r=7,f=0) is a dark square, so any dot is background-dark and
+	// lighting one is a real change. dx 40 is past ContentMaxDX and past
+	// the stored dot span, i.e. genuinely unreachable by any tile.
+	const dx, dy = 40, 10
+	if _, _, _, x1 := KeptWindow(); dx <= x1 {
+		t.Fatalf("dx %d is inside the kept dot span (..%d); this test would prove nothing", dx, x1)
+	}
+	broken := mustSetDot(t, loadArt(t), 7, 0, dy, dx)
 
 	rep, err := Check(broken)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.ClippedTotal != 29 {
-		t.Errorf("clipped total = %d, want 29 (the 28 in the artwork plus the one we drew)", rep.ClippedTotal)
+	if rep.LostTotal != 1 {
+		t.Errorf("lost total = %d, want 1 (the committed artwork loses none, plus the one we drew)", rep.LostTotal)
+	}
+	if rep.LostCols != 1 || rep.LostRows != 0 {
+		t.Errorf("lost split = %d rows / %d cols, want 0 / 1", rep.LostRows, rep.LostCols)
 	}
 	var found *SquareInk
-	for i, sq := range rep.Clipped {
+	for i, sq := range rep.Lost {
 		if sq.R == 7 && sq.F == 0 {
-			found = &rep.Clipped[i]
+			found = &rep.Lost[i]
 		}
 	}
 	if found == nil {
-		t.Fatal("Check did not report clipped ink on a1")
+		t.Fatal("Check did not report lost ink on a1")
 	}
-	if len(found.Dots) != 1 || found.Dots[0] != (Dot{DX: 20, DY: 0}) {
-		t.Errorf("a1 clipped dots = %v, want exactly [{20 0}]", found.Dots)
+	if len(found.Dots) != 1 || found.Dots[0] != (Dot{DX: dx, DY: dy}) {
+		t.Errorf("a1 lost dots = %v, want exactly [{%d %d}]", found.Dots, dx, dy)
 	}
-	// A clip is not a structural break: the artwork still slices.
-	for _, v := range rep.Violations {
-		t.Errorf("a clipped dot produced a geometry finding: %s", v)
+	if rep.Clean() {
+		t.Error("Clean() is true for artwork that loses a dot")
+	}
+}
+
+// TestCheckCatchesInkInTheFrameGap: the blank margin between the drawn
+// frame and the 8x8 grid is what ties the declared grid to the drawing.
+// A dot there means the frame, the grid, or a piece has moved.
+func TestCheckCatchesInkInTheFrameGap(t *testing.T) {
+	gaps := FrameGaps()
+	if len(gaps) != 4 {
+		t.Fatalf("FrameGaps() returned %d rectangles, want 4", len(gaps))
+	}
+	for i, name := range []string{"left", "right", "top", "bottom"} {
+		t.Run(name, func(t *testing.T) {
+			g := gaps[i]
+			// The middle of the gap, so the dot cannot be confused with the
+			// frame itself or with a square.
+			x, y := (g[0]+g[2])/2, (g[1]+g[3])/2
+			art := bytes.Clone(loadArt(t))
+			if s, err := Decode(art); err != nil {
+				t.Fatal(err)
+			} else if s.At(x, y) {
+				t.Fatalf("gap dot (%d,%d) is already lit; this mutation would change nothing", x, y)
+			}
+			SetDot(art, x, y)
+
+			rep, err := Check(art)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var hit bool
+			for _, v := range rep.Violations {
+				if v.Kind == KindGrid && strings.Contains(v.Detail, name+" gap") {
+					hit = true
+				}
+			}
+			if !hit {
+				t.Errorf("a lit dot at (%d,%d) in the %s frame gap produced no [grid] finding; got:\n  %s",
+					x, y, name, strings.Join(violationStrings(rep.Violations), "\n  "))
+			}
+			if rep.Clean() {
+				t.Error("Clean() is true for artwork with ink outside the grid")
+			}
+		})
 	}
 }
 
@@ -137,8 +220,12 @@ func TestCheckCatchesGeometryViolations(t *testing.T) {
 		// dx must be ODD on a light square: the even dots are already lit
 		// by the dither, so setting one would be a no-op.
 		{"empty square", 3, 3, 10, 21, KindEmptySq, "d5", true},
-		// Only ONE pawn of the four same-shade pawns in row 6.
-		{"pawn row", 6, 2, 3, 21, KindPawnRow, "c2", false},
+		// Only ONE pawn of the four same-shade pawns in row 6. dy 10 / dx 16
+		// is a dark dot inside c2's pawn body: inside the content window, so
+		// nothing but the pawn-row check can object to it. (mustSetDot fails
+		// loudly if a redraw ever lights it, rather than silently mutating
+		// nothing.)
+		{"pawn row", 6, 2, 10, 16, KindPawnRow, "c2", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			broken := mustSetDot(t, loadArt(t), tc.r, tc.f, tc.dy, tc.dx)

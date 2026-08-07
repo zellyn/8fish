@@ -10,12 +10,37 @@ package tiles
 //
 // Two kinds of finding, deliberately distinguished:
 //
-//   - CLIPPED ink: piece dots in source rows dy 0..SrcTrimTop-1, which
-//     the tile drops. The art still slices; it just loses those dots.
-//     Zero is the goal state.
+//   - LOST ink: piece dots outside KeptWindow — the region of a source
+//     square that actually reaches a tile. Zero is the goal state, and
+//     since the CHESS2 redraw it is the state the artwork is in.
 //   - VIOLATIONS: assumptions whose failure means the art does not slice
 //     at all (content outside dx ContentMinDX..ContentMaxDX, a broken
 //     dither phase, an empty square that is no longer empty, ...).
+//
+// WHAT IS AND IS NOT LOAD-BEARING SINCE THE REDRAW (2026-08-06). The old
+// artwork was 44x21 with the top two source rows trimmed away, and this
+// file's headline measured the ink that trim threw out. With SrcTrimTop
+// at 0 the VERTICAL half of that measurement is structurally zero: the
+// tile is the whole square, so no row can be dropped and no assertion
+// about dy can fail. Saying "no ink was clipped" would now be a tautology
+// dressed as a gate, which is the specific way this project has been
+// bitten before.
+//
+// So the measurement was widened rather than deleted. LOST ink is now
+// measured against KeptWindow in BOTH axes, and its HORIZONTAL half is
+// very much alive: the 4-byte tile row only covers dx 7..34, so a dot in
+// a square's dx margins is still lost and still fails. And a new check —
+// KindGrid — asserts the thing the redraw actually changed: that the
+// declared 42x19 grid is the grid that was drawn, by requiring it to
+// exactly fill the frame the artist drew around it. That is the assertion
+// that would have caught this entire episode at the source.
+//
+// Load-bearing today: artmap, grid, bounding-box, border, dither,
+// content-window, outer-column, empty-square, extra-square, pawn-row, and
+// the horizontal half of LOST ink.
+// Tautological today, and labelled as such where they are reported: the
+// vertical half of LOST ink, and the trim-cost curve (which is now a
+// what-if diagnostic for a future UI, not a gate).
 
 import (
 	"bytes"
@@ -65,6 +90,7 @@ func (v Violation) String() string {
 // Violation kinds, in the order a report should present them.
 const (
 	KindArtMap   = "artmap"         // the transcription itself
+	KindGrid     = "grid"           // the 8x8 grid vs the frame drawn around it
 	KindBBox     = "bounding-box"   // lit extent of the whole drawing
 	KindBorder   = "border"         // the drawn frame that pins the origin
 	KindDither   = "dither"         // light-square phase / $55,$2A constants
@@ -80,7 +106,7 @@ const (
 // report order. KindBuild is not one of them: it is the escape hatch for
 // a Build failure none of these explains.
 var CheckKinds = []string{
-	KindArtMap, KindBBox, KindBorder, KindDither, KindWindow,
+	KindArtMap, KindGrid, KindBBox, KindBorder, KindDither, KindWindow,
 	KindOuterCol, KindEmptySq, KindExtraSq, KindPawnRow,
 }
 
@@ -88,11 +114,18 @@ var kindOrder = append(append([]string{}, CheckKinds...), KindBuild)
 
 // Report is everything one Check run learned about a piece of artwork.
 type Report struct {
-	// Clipped is the per-square piece ink that the top trim discards,
-	// squares in board order, only squares that lose something.
-	Clipped []SquareInk
-	// ClippedTotal is the board-wide clipped dot count.
-	ClippedTotal int
+	// Lost is the per-square piece ink that falls outside KeptWindow and
+	// therefore never reaches a tile, squares in board order, only squares
+	// that lose something.
+	Lost []SquareInk
+	// LostTotal is the board-wide lost dot count.
+	LostTotal int
+	// LostRows / LostCols split LostTotal by WHY a dot was lost: outside
+	// the kept ROW range (the trim), outside the kept DOT COLUMNS (the
+	// 4-byte format). A dot outside both counts in each. With SrcTrimTop
+	// at 0 the row half is structurally zero and the report says so
+	// instead of quietly presenting it as a passing check.
+	LostRows, LostCols int
 
 	// Violations are the broken assumptions, in kindOrder.
 	Violations []Violation
@@ -101,9 +134,16 @@ type Report struct {
 	// names, in blob-tile-index order.
 	Extents []Extent
 
+	// InkMinDX..InkMaxDY is the board-wide ink bounding box, square-local:
+	// where the drawing actually sits inside its squares, and therefore
+	// how much slack it has against the declared window.
+	InkMinDX, InkMaxDX int
+	InkMinDY, InkMaxDY int
+
 	// TrimCosts[n] is the board-wide ink in the top n source rows, for
-	// n = 0..3, plus BottomCost for the last row alone. These are the
-	// numbers behind choosing SrcTrimTop.
+	// n = 0..3, plus BottomCost for the last row alone. DIAGNOSTIC ONLY
+	// since SrcTrimTop went to 0: it prices a trim nobody is taking, for
+	// a future UI that might need shorter ranks.
 	TrimCosts  [4]int
 	BottomCost int
 
@@ -115,8 +155,8 @@ type Report struct {
 }
 
 // Clean reports whether the artwork slices AND loses nothing: the state a
-// redraw is aiming at.
-func (r *Report) Clean() bool { return r.ClippedTotal == 0 && len(r.Violations) == 0 }
+// redraw is aiming at, and the state the committed artwork is in.
+func (r *Report) Clean() bool { return r.LostTotal == 0 && len(r.Violations) == 0 }
 
 // Check runs every assumption over an A2FC artwork save and reports them
 // all. It writes nothing, and it never mutates its argument.
@@ -125,19 +165,36 @@ func Check(a2fc []byte) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	rep := &Report{}
+	rep := &Report{InkMinDX: SrcSquareW, InkMaxDX: -1, InkMinDY: SrcSquareH, InkMaxDY: -1}
 
-	// --- The headline: ink the top trim would throw away. --------------
+	// --- The headline: ink that never reaches a tile. ------------------
+	ky0, ky1, kx0, kx1 := KeptWindow()
 	for r := range 8 {
 		for f := range 8 {
-			if ink := inkIn(s, r, f, 0, SrcTrimTop-1, 0, SrcSquareW-1); ink.Count() > 0 {
-				rep.Clipped = append(rep.Clipped, ink)
-				rep.ClippedTotal += ink.Count()
+			lost := SquareInk{R: r, F: f}
+			for _, d := range inkIn(s, r, f, 0, SrcSquareH-1, 0, SrcSquareW-1).Dots {
+				rep.InkMinDX, rep.InkMaxDX = min(rep.InkMinDX, d.DX), max(rep.InkMaxDX, d.DX)
+				rep.InkMinDY, rep.InkMaxDY = min(rep.InkMinDY, d.DY), max(rep.InkMaxDY, d.DY)
+				badRow := d.DY < ky0 || d.DY > ky1
+				badCol := d.DX < kx0 || d.DX > kx1
+				if badRow {
+					rep.LostRows++
+				}
+				if badCol {
+					rep.LostCols++
+				}
+				if badRow || badCol {
+					lost.Dots = append(lost.Dots, d)
+				}
+			}
+			if lost.Count() > 0 {
+				rep.Lost = append(rep.Lost, lost)
+				rep.LostTotal += lost.Count()
 			}
 		}
 	}
 
-	// --- The trim-cost curve, for context. -----------------------------
+	// --- The trim-cost curve, DIAGNOSTIC ONLY (SrcTrimTop is 0). -------
 	for n := range 4 {
 		if n > 0 {
 			rep.TrimCosts[n] = boardInk(s, 0, n-1, 0, SrcSquareW-1)
@@ -147,6 +204,7 @@ func Check(a2fc []byte) (*Report, error) {
 
 	// --- Every other assumption, as a list. ----------------------------
 	rep.Violations = append(rep.Violations, checkArtMapV()...)
+	rep.Violations = append(rep.Violations, checkGrid(s)...)
 	rep.Violations = append(rep.Violations, checkBBox(s)...)
 	rep.Violations = append(rep.Violations, checkBorder(s)...)
 	rep.Violations = append(rep.Violations, checkDither(s)...)
@@ -307,9 +365,18 @@ func checkBBox(s *Screen) []Violation {
 		minX, maxX, minY, maxY, BoardMinX, BoardMaxX, BoardMinY, BoardMaxY)}}
 }
 
-// borderCols are the fully-lit frame columns the grid origin is measured
-// from: the left border is 0..BorderLeft, and the right one mirrors it.
-var borderCols = []int{0, 1, 2, 3, 364, 365, 366, 367}
+// BorderCols are the fully-lit frame columns the grid origin is measured
+// from: BorderW columns at each end of the drawing, DERIVED from the
+// measured bounding box rather than written down, so moving the drawing
+// cannot leave a stale literal behind.
+func BorderCols() []int {
+	var out []int
+	for i := range BorderW {
+		out = append(out, BoardMinX+i, BorderRight+i)
+	}
+	sort.Ints(out)
+	return out
+}
 
 func checkBorder(s *Screen) []Violation {
 	var out []Violation
@@ -322,7 +389,7 @@ func checkBorder(s *Screen) []Violation {
 			}
 		}
 	}
-	for _, x := range borderCols {
+	for _, x := range BorderCols() {
 		for y := BoardMinY; y <= BoardMaxY; y++ {
 			if !s.At(x, y) {
 				out = append(out, Violation{Kind: KindBorder,
@@ -335,9 +402,9 @@ func checkBorder(s *Screen) []Violation {
 		out = append(out, Violation{Kind: KindBorder,
 			Detail: fmt.Sprintf("grid origin x=%d overlaps the border (0..%d)", SrcOriginX, BorderLeft)})
 	}
-	if lastX := SrcOriginX + 8*SrcSquareW - 1; lastX >= borderCols[4] {
+	if lastX := SrcOriginX + 8*SrcSquareW - 1; lastX >= BorderRight {
 		out = append(out, Violation{Kind: KindBorder,
-			Detail: fmt.Sprintf("grid right edge x=%d runs into the right border (starts at %d)", lastX, borderCols[4])})
+			Detail: fmt.Sprintf("grid right edge x=%d runs into the right border (starts at %d)", lastX, BorderRight)})
 	}
 	if lastY := SrcOriginY + 8*SrcSquareH - 1; lastY >= BorderBot {
 		out = append(out, Violation{Kind: KindBorder,
@@ -345,6 +412,110 @@ func checkBorder(s *Screen) []Violation {
 	}
 	return out
 }
+
+// FrameGaps are the four dark rectangles between the drawn frame and the
+// 8x8 grid, in absolute screen coordinates (inclusive). They are the empty
+// margin the artist left inside the frame; nothing may be drawn there, and
+// their widths are what tie the declared grid to the drawn frame.
+func FrameGaps() [][4]int {
+	gx0, gy0 := SrcOriginX, SrcOriginY
+	gx1, gy1 := SrcOriginX+8*SrcSquareW-1, SrcOriginY+8*SrcSquareH-1
+	inX0, inX1 := BorderLeft+1, BorderRight-1 // strictly inside the side bars
+	inY0, inY1 := BorderTop+1, BorderBot-1    // strictly inside the rules
+	return [][4]int{
+		{inX0, inY0, gx0 - 1, inY1}, // left gap
+		{gx1 + 1, inY0, inX1, inY1}, // right gap
+		{inX0, inY0, inX1, gy0 - 1}, // top gap
+		{inX0, gy1 + 1, inX1, inY1}, // bottom gap
+	}
+}
+
+// checkGrid asserts that the declared grid is the grid that was DRAWN.
+//
+// This is the check the 2026-08-06 redraw exists because nobody had: the
+// first artwork was on a 44x21 grid and the code trimmed it into 42x19
+// tiles, and no assertion anywhere said "the source square and the tile
+// are the same size". Two things are asserted here, and they meet in the
+// middle:
+//
+//   - the CONSTANTS are self-consistent — the 8x8 grid, plus the declared
+//     gaps, exactly spans the frame the bounding box and border checks
+//     measure out of the pixels;
+//   - the PIXELS agree — the gap between the frame and the grid is
+//     entirely dark, so neither the frame nor any piece has moved into it.
+//
+// Break either half and the artwork stops slicing, loudly, at the source.
+func checkGrid(s *Screen) []Violation {
+	var out []Violation
+	bad := func(format string, args ...any) {
+		out = append(out, Violation{Kind: KindGrid, Detail: fmt.Sprintf(format, args...)})
+	}
+
+	// --- The constants describe one consistent drawing. ----------------
+	if BorderLeft != BorderW-1 {
+		bad("BorderLeft=%d but the side bars are BorderW=%d dots wide", BorderLeft, BorderW)
+	}
+	if BorderTop != BoardMinY || BorderBot != BoardMaxY {
+		bad("the frame rules (y=%d,%d) are not the bounding box's top and bottom (y=%d,%d)",
+			BorderTop, BorderBot, BoardMinY, BoardMaxY)
+	}
+	if got := SrcOriginX - (BorderLeft + 1); got != FrameGapX {
+		bad("left gap is %d dots (origin x=%d, bar ends at %d) but FrameGapX=%d", got, SrcOriginX, BorderLeft, FrameGapX)
+	}
+	if got := BorderRight - (SrcOriginX + 8*SrcSquareW); got != FrameGapX {
+		bad("right gap is %d dots (grid ends at x=%d, bar starts at %d) but FrameGapX=%d",
+			got, SrcOriginX+8*SrcSquareW-1, BorderRight, FrameGapX)
+	}
+	if got := SrcOriginY - (BorderTop + 1); got != FrameGapY {
+		bad("top gap is %d rows (origin y=%d, rule at %d) but FrameGapY=%d", got, SrcOriginY, BorderTop, FrameGapY)
+	}
+	if got := BorderBot - (SrcOriginY + 8*SrcSquareH); got != FrameGapY {
+		bad("bottom gap is %d rows (grid ends at y=%d, rule at %d) but FrameGapY=%d",
+			got, SrcOriginY+8*SrcSquareH-1, BorderBot, FrameGapY)
+	}
+
+	// --- The tile is the square, and the stored columns reach the ink. -
+	if TileH != SrcSquareH-SrcTrimTop {
+		bad("TileH=%d but the source square is %d rows with %d trimmed", TileH, SrcSquareH, SrcTrimTop)
+	}
+	if TileW != SrcSquareW {
+		bad("TileW=%d but the source square is %d dots wide: the tile no longer covers the square",
+			TileW, SrcSquareW)
+	}
+	if TileW%14 != 0 || SrcOriginX%2 != 0 || SrcSquareW%2 != 0 {
+		bad("the dither phase needs TileW %% 14 == 0 and even SrcOriginX/SrcSquareW; got %d, %d, %d",
+			TileW, SrcOriginX, SrcSquareW)
+	}
+	lo, hi, contiguous := StoredDotSpan()
+	if !contiguous {
+		bad("stored byte columns %d..%d cover a NON-contiguous dot span %d..%d", FirstCol, LastCol, lo, hi)
+	}
+	if lo > ContentMinDX || hi < ContentMaxDX {
+		bad("stored byte columns cover dx %d..%d, which does not contain the declared content window dx %d..%d",
+			lo, hi, ContentMinDX, ContentMaxDX)
+	}
+
+	// --- The pixels agree: the frame's inner margin is empty. ----------
+	for i, g := range FrameGaps() {
+		name := []string{"left", "right", "top", "bottom"}[i]
+		for y := g[1]; y <= g[3]; y++ {
+			for x := g[0]; x <= g[2]; x++ {
+				if s.At(x, y) {
+					bad("the %s gap between the frame and the grid is lit at (%d,%d): "+
+						"nothing may be drawn between the frame and the 8x8 grid", name, x, y)
+					if len(out) > maxGapFindings {
+						return out
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// maxGapFindings caps the gap sweep: a frame drawn one dot off would
+// otherwise report thousands of identical dots.
+const maxGapFindings = 24
 
 // checkDither asserts the phase lock the whole byte format rests on: on a
 // light square the LIT background dots are the even-absolute-x ones, and

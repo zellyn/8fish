@@ -1,25 +1,30 @@
 ; Double-hi-res board renderer for 8fish.
 ;
-; Paints the owner's hand-drawn chessboard (assets/chess-dazzledraw-save.bin,
+; Paints the owner's hand-drawn chessboard (assets/chess2-dazzledraw-save.bin,
 ; sliced into tiles by cmd/gentiles) onto DHGR page 1 at FULL 560x192
 ; resolution. See docs/ui-design.md 3.1.
 ;
 ; GEOMETRY (all measured from the artwork; cmd/gentiles asserts every number)
 ;
-;   The artwork's squares are 44 x 21 at origin (8,2). Columns 0-7 and 35-43
-;   of every square are pure background in ALL 64 squares (measured: zero
-;   deviating pixels), and the top 2 rows of each square carry only 28
-;   non-background pixels across the whole artwork. So a square trims to
-;   42 x 19:
+;   The artwork's squares are 42 x 19 at origin (8,2), which is EXACTLY the
+;   rendered tile -- the board is drawn at the size it is displayed, so
+;   nothing the artist draws is thrown away. (It was not always so: the first
+;   artwork was 44 x 21 and the slicer dropped the top two source rows,
+;   silently clipping 28 pixels of bishop and king finial. The board was
+;   redrawn at 42 x 19 on 2026-08-06; see assets/README.md's History.)
 ;
 ;     42 px = 6 DHGR bytes = 3 aux + 3 main, and 42 is a multiple of 14.
 ;
 ;   That last fact is what makes this renderer cheap. A 14-px multiple keeps
 ;   every file at the SAME bit phase, so a tile is horizontally position
 ;   independent: no pre-shifting, no 8 bit-phase sprite variants, no masking.
-;   The trim is EVEN, so the light squares' 1-on-1-off dither keeps its phase
+;   42 is also EVEN, so the light squares' 1-on-1-off dither keeps its phase
 ;   (the artwork's dither is globally locked to "even absolute x is lit",
 ;   which in DHGR bytes is the constant pair aux=$55, main=$2A).
+;
+;   Columns 0-7 and 35-41 of every square are pure background in ALL 64
+;   squares (measured: zero deviating pixels), which is what lets a tile row
+;   store four of its six byte columns.
 ;
 ;   Board: 8 x 42 = 336 px at x=112 (byte column 8: 14-aligned AND even, so
 ;   the dither phase carries over unchanged), and 8 x 19 = 152 scanlines from

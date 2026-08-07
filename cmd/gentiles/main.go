@@ -1,5 +1,5 @@
 // Command gentiles slices the owner's hand-drawn DazzleDraw chessboard
-// (assets/chess-dazzledraw-save.bin, A2FC: 8 KB aux then 8 KB main) into
+// (assets/chess2-dazzledraw-save.bin, A2FC: 8 KB aux then 8 KB main) into
 // the resident per-square DHGR piece tiles:
 //
 //	internal/tiles/tileblob.bin  — the 24-tile blob (embedded by package tiles)
@@ -29,10 +29,12 @@
 // Exit status:
 //
 //	0  the artwork is clean: it slices and loses nothing — the goal state
-//	1  the artwork slices, but the top trim CLIPS ink (dots are lost)
-//	2  a geometric assumption the tile format rests on is broken (most such
-//	   breaks stop the slice outright; a few, like a pawn drawn differently
-//	   on different files, would ship a blob that no longer matches the art)
+//	2  the artwork loses ink, or a geometric assumption the tile format
+//	   rests on is broken (most such breaks stop the slice outright; a few,
+//	   like a pawn drawn differently on different files, would ship a blob
+//	   that no longer matches the art)
+//
+// Status 1 is retired; see the exit* constants for why.
 //
 // See assets/README.md for the drawing spec the checker enforces.
 package main
@@ -49,19 +51,25 @@ import (
 )
 
 const (
-	defaultArtPath = "assets/chess-dazzledraw-save.bin"
+	defaultArtPath = "assets/chess2-dazzledraw-save.bin"
 	blobPath       = "internal/tiles/tileblob.bin"
 	defsPath       = "asm/tiledefs.inc"
 	incPath        = "asm/tiles.inc"
 )
 
-// Exit statuses. Distinguishing clipped ink from a structural break is the
-// point of the tool: one means "the drawing loses pixels to the trim", the
-// other means "the drawing breaks an assumption the tile format rests on".
+// Exit statuses.
+//
+// Status 1 is RETIRED, and deliberately left unallocated. It used to mean
+// "the drawing slices, but the top trim clips ink" — a middle tier that
+// existed only because the old 44x21 artwork was trimmed into 42x19 tiles.
+// Since the CHESS2 redraw the tile is the whole source square, and the only
+// way to lose a dot is to draw it outside the content window, which is a
+// structural break (2) that also stops Build. Reusing 1 for something else
+// would let an old script that special-cases it silently mis-read a new run;
+// removing it says what happened.
 const (
-	exitOK      = 0
-	exitClipped = 1
-	exitBroken  = 2
+	exitOK     = 0
+	exitBroken = 2
 )
 
 // maxPerKind caps how many findings of one kind a report prints. A single
@@ -80,15 +88,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var (
 		artPath  = fs.String("art", defaultArtPath, "artwork to read (A2FC DazzleDraw save); point this at a work-in-progress redraw")
 		check    = fs.Bool("check", false, "check the artwork and report EVERY problem; write no outputs")
-		pngPath  = fs.String("png", "", "write a PNG of the tiles AFTER slicing (post-trim) to this path")
-		showDots = fs.Bool("dots", false, "in -check, list every clipped dot's coordinates instead of summarising per row")
+		pngPath  = fs.String("png", "", "write a PNG of the tiles AFTER slicing to this path")
+		showDots = fs.Bool("dots", false, "in -check, list every lost dot's coordinates instead of summarising per row")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: gentiles [-check] [-art PATH] [-png PATH]\n\n"+
 			"Slices the hand-drawn DazzleDraw board into the resident DHGR tile blob.\n"+
 			"With -check, writes nothing and reports every broken assumption at once.\n"+
-			"Exit: 0 clean, %d ink clipped by the top trim, %d broken assumption.\n\n",
-			exitClipped, exitBroken)
+			"Exit: 0 clean, %d lost ink or a broken assumption (1 is retired).\n\n",
+			exitBroken)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -152,7 +160,7 @@ func runBuild(art []byte, artPath, pngPath string, stdout, stderr io.Writer) int
 			fmt.Fprintln(stderr, "gentiles:", err)
 			return exitBroken
 		}
-		fmt.Fprintf(stdout, "  wrote %s (the tiles as they will render, post-trim)\n", pngPath)
+		fmt.Fprintf(stdout, "  wrote %s (the tiles as they will render, post-slice)\n", pngPath)
 	}
 	return exitOK
 }
@@ -174,15 +182,12 @@ func runCheck(art []byte, artPath, pngPath string, showDots bool, stdout, stderr
 			return exitBroken
 		} else {
 			fmt.Fprintf(stdout, "\nPNG: %s — the start position drawn FROM THE TILES, so what you see is\n"+
-				"     post-trim: any clipped ink is already gone.\n", pngPath)
+				"     post-slice: any lost ink is already gone.\n", pngPath)
 		}
 	}
 
-	switch {
-	case len(rep.Violations) > 0:
+	if !rep.Clean() {
 		return exitBroken
-	case rep.ClippedTotal > 0:
-		return exitClipped
 	}
 	return exitOK
 }
@@ -202,25 +207,45 @@ func writeTilePNG(path string, blob []byte) error {
 
 func printReport(w io.Writer, rep *tiles.Report, artPath string, showDots bool) {
 	fmt.Fprintf(w, "gentiles -check: %s\n", artPath)
-	fmt.Fprintf(w, "  grid: 8x8 squares of %dx%d dots at origin (%d,%d); tile = %dx%d dots after dropping the top %d row(s)\n\n",
+	fmt.Fprintf(w, "  grid: 8x8 squares of %dx%d dots at origin (%d,%d); tile = %dx%d dots%s\n\n",
 		tiles.SrcSquareW, tiles.SrcSquareH, tiles.SrcOriginX, tiles.SrcOriginY,
-		tiles.TileW, tiles.TileH, tiles.SrcTrimTop)
+		tiles.TileW, tiles.TileH, trimPhrase())
 
-	printClipped(w, rep, showDots)
+	printLost(w, rep, showDots)
+	printGridFit(w, rep)
 	printViolations(w, rep)
 	printExtents(w, rep)
 	printSummary(w, rep)
 }
 
-// printClipped is the headline: ink the top trim throws away.
-func printClipped(w io.Writer, rep *tiles.Report, showDots bool) {
-	fmt.Fprintf(w, "CLIPPED INK (source rows dy 0..%d, dropped by the tile)\n", tiles.SrcTrimTop-1)
-	if rep.ClippedTotal == 0 {
-		fmt.Fprintf(w, "  NONE. Every drawn dot survives the trim. This is the goal state.\n\n")
+// trimPhrase describes the source-to-tile relationship in one clause, so
+// the header does not claim a trim that is not being taken.
+func trimPhrase() string {
+	if tiles.SrcTrimTop == 0 && tiles.TileW == tiles.SrcSquareW && tiles.TileH == tiles.SrcSquareH {
+		return " = the WHOLE source square (no trim)"
+	}
+	return fmt.Sprintf(" after dropping the top %d source row(s)", tiles.SrcTrimTop)
+}
+
+// printLost is the headline: ink that never reaches a tile at all. It
+// replaced a "CLIPPED INK" section that measured only the top trim; with
+// SrcTrimTop at 0 that section could not fail, so the measurement was
+// widened to the whole kept window rather than left in place as a
+// tautology. The row/column split is printed because only ONE half of it
+// can currently fail, and a reader is entitled to know which.
+func printLost(w io.Writer, rep *tiles.Report, showDots bool) {
+	ky0, ky1, kx0, kx1 := tiles.KeptWindow()
+	fmt.Fprintf(w, "LOST INK (drawn outside the kept window: rows dy %d..%d, dots dx %d..%d)\n", ky0, ky1, kx0, kx1)
+	if rep.LostTotal == 0 {
+		fmt.Fprintf(w, "  NONE. Every drawn dot reaches a tile. This is the goal state.\n")
+		fmt.Fprintf(w, "  Live half of this check: the DOT COLUMNS (dx outside %d..%d is dropped by the\n", kx0, kx1)
+		fmt.Fprintf(w, "  4-byte tile row). The ROW half cannot fail while SrcTrimTop=%d and TileH=%d\n", tiles.SrcTrimTop, tiles.TileH)
+		fmt.Fprintf(w, "  cover the whole %d-row square — that half is a tautology today, not a gate.\n\n", tiles.SrcSquareH)
 		return
 	}
-	fmt.Fprintf(w, "  %d pixels of piece ink are LOST, across %d squares:\n\n", rep.ClippedTotal, len(rep.Clipped))
-	for _, sq := range rep.Clipped {
+	fmt.Fprintf(w, "  %d pixels of piece ink are LOST, across %d squares (%d outside the kept rows, %d outside the kept dot columns):\n\n",
+		rep.LostTotal, len(rep.Lost), rep.LostRows, rep.LostCols)
+	for _, sq := range rep.Lost {
 		name := tiles.PieceAt(sq.R, sq.F)
 		if name == "" {
 			name = "no piece transcribed here"
@@ -230,7 +255,29 @@ func printClipped(w io.Writer, rep *tiles.Report, showDots bool) {
 			fmt.Fprintf(w, "        %s\n", line)
 		}
 	}
-	fmt.Fprintf(w, "\n  Fix by moving that ink down: nothing may be drawn above dy %d.\n\n", tiles.SrcTrimTop)
+	fmt.Fprintf(w, "\n  Fix by moving that ink inside dy %d..%d, dx %d..%d.\n\n", ky0, ky1, kx0, kx1)
+}
+
+// printGridFit shows the two measurements the grid rests on: the frame the
+// artist drew, and where the ink actually sits inside its squares. Both
+// are printed with their slack, because a redraw's real question is "how
+// much room have I got left".
+func printGridFit(w io.Writer, rep *tiles.Report) {
+	fmt.Fprintf(w, "GRID FIT (the declared grid must exactly fill the drawn frame)\n")
+	fmt.Fprintf(w, "  frame:  bars x %d..%d and x %d..%d (%d dots each); rules y=%d and y=%d\n",
+		tiles.BoardMinX, tiles.BorderLeft, tiles.BorderRight, tiles.BoardMaxX,
+		tiles.BorderW, tiles.BorderTop, tiles.BorderBot)
+	fmt.Fprintf(w, "  gap:    %d dots either side, %d row(s) top and bottom — asserted DARK\n",
+		tiles.FrameGapX, tiles.FrameGapY)
+	fmt.Fprintf(w, "  grid:   x %d..%d (8 x %d), y %d..%d (8 x %d)\n",
+		tiles.SrcOriginX, tiles.SrcOriginX+8*tiles.SrcSquareW-1, tiles.SrcSquareW,
+		tiles.SrcOriginY, tiles.SrcOriginY+8*tiles.SrcSquareH-1, tiles.SrcSquareH)
+	lo, hi, _ := tiles.StoredDotSpan()
+	fmt.Fprintf(w, "  stored: byte columns %d..%d cover dx %d..%d; declared content window dx %d..%d\n",
+		tiles.FirstCol, tiles.LastCol, lo, hi, tiles.ContentMinDX, tiles.ContentMaxDX)
+	fmt.Fprintf(w, "  ink:    board-wide dx %d..%d (slack %+d/%+d), dy %d..%d (slack %+d/%+d)\n\n",
+		rep.InkMinDX, rep.InkMaxDX, rep.InkMinDX-tiles.ContentMinDX, tiles.ContentMaxDX-rep.InkMaxDX,
+		rep.InkMinDY, rep.InkMaxDY, rep.InkMinDY, tiles.SrcSquareH-1-rep.InkMaxDY)
 }
 
 // dotLines renders a square's clipped dots one line per source row: the
@@ -312,30 +359,32 @@ func printViolations(w io.Writer, rep *tiles.Report) {
 // printExtents is the redraw's working table: where each piece's ink
 // actually sits, and how much slack it has against the trim.
 func printExtents(w io.Writer, rep *tiles.Report) {
+	ky0, ky1, kx0, kx1 := tiles.KeptWindow()
 	fmt.Fprintf(w, "INK EXTENTS (per transcribed square; the drawing spec is dy %d..%d, dx %d..%d)\n",
 		tiles.SrcTrimTop, tiles.SrcSquareH-1, tiles.ContentMinDX, tiles.ContentMaxDX)
-	fmt.Fprintf(w, "  %-3s %-34s %-10s %-10s %6s  %s\n", "sq", "piece", "dy", "dx", "px", "top slack")
+	fmt.Fprintf(w, "  %-3s %-34s %-10s %-10s %6s  %s\n", "sq", "piece", "dy", "dx", "px", "kept?")
 	for _, e := range rep.Extents {
 		if e.Empty {
 			fmt.Fprintf(w, "  %-3s %-34s %-10s %-10s %6d  %s\n",
 				tiles.Square(e.R, e.F), tiles.PieceAt(e.R, e.F), "-", "-", 0, "-")
 			continue
 		}
-		slack := fmt.Sprintf("%+d", e.MinDY-tiles.SrcTrimTop)
-		if e.MinDY < tiles.SrcTrimTop {
-			slack += " CLIPPED"
+		kept := "all"
+		if e.MinDY < ky0 || e.MaxDY > ky1 || e.MinDX < kx0 || e.MaxDX > kx1 {
+			kept = "LOSES INK"
 		}
 		fmt.Fprintf(w, "  %-3s %-34s %-10s %-10s %6d  %s\n",
 			tiles.Square(e.R, e.F), tiles.PieceAt(e.R, e.F),
 			fmt.Sprintf("%d..%d", e.MinDY, e.MaxDY), fmt.Sprintf("%d..%d", e.MinDX, e.MaxDX),
-			e.Count, slack)
+			e.Count, kept)
 	}
 	fmt.Fprintln(w)
 }
 
 func printSummary(w io.Writer, rep *tiles.Report) {
 	fmt.Fprintf(w, "SUMMARY\n")
-	fmt.Fprintf(w, "  trim cost curve (board-wide ink lost): top 1 row = %d, top 2 = %d, top 3 = %d; bottom 1 row = %d\n",
+	fmt.Fprintf(w, "  what-if trim curve (board-wide ink a top trim WOULD cost; SrcTrimTop is %d, so\n", tiles.SrcTrimTop)
+	fmt.Fprintf(w, "  none of it is being paid): top 1 row = %d, top 2 = %d, top 3 = %d; bottom 1 row = %d\n",
 		rep.TrimCosts[1], rep.TrimCosts[2], rep.TrimCosts[3], rep.BottomCost)
 	if rep.Blob == nil {
 		fmt.Fprintf(w, "  blob: WOULD NOT SLICE — fix the geometry findings above\n")
@@ -353,12 +402,9 @@ func printSummary(w io.Writer, rep *tiles.Report) {
 	switch {
 	case rep.Clean():
 		fmt.Fprintf(w, "  RESULT: clean — the artwork slices and loses nothing (exit %d)\n", exitOK)
-	case len(rep.Violations) > 0:
-		fmt.Fprintf(w, "  RESULT: BROKEN — %d geometry finding(s) (exit %d)\n",
-			len(rep.Violations), exitBroken)
 	default:
-		fmt.Fprintf(w, "  RESULT: %d pixels clipped by the top trim; the artwork slices but loses ink (exit %d)\n",
-			rep.ClippedTotal, exitClipped)
+		fmt.Fprintf(w, "  RESULT: BROKEN — %d geometry finding(s), %d lost pixel(s) (exit %d)\n",
+			len(rep.Violations), rep.LostTotal, exitBroken)
 	}
 }
 

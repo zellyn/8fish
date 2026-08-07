@@ -1,6 +1,6 @@
 // Package tiles is the on-device board artwork: 24 per-square DHGR piece
 // bitmaps sliced out of the owner's hand-drawn DazzleDraw board
-// (assets/chess-dazzledraw-save.bin) by cmd/gentiles, laid out EXACTLY as
+// (assets/chess2-dazzledraw-save.bin) by cmd/gentiles, laid out EXACTLY as
 // they will sit resident so the asm renderer is a pure read-side addition
 // (the same discipline internal/book uses for the opening book).
 //
@@ -8,10 +8,15 @@
 // every number here against the actual pixels, so a re-drawn board that
 // breaks an assumption fails the build instead of rendering garbage):
 //
-//   - The drawn board's squares are 44x21 on a grid whose origin is (8,2).
+//   - The drawn board's squares are 42x19 on a grid whose origin is (8,2).
 //     Square (r,f) — r=0 is the TOP row (rank 8), f=0 is the a-file —
-//     covers x = 8+44f .. +43, y = 2+21r .. +20. A square is light iff
+//     covers x = 8+42f .. +41, y = 2+19r .. +18. A square is light iff
 //     (r+f) is even.
+//
+//   - THE DRAWN SQUARE IS THE RENDERED TILE: 42x19 dots, TileW==SrcSquareW
+//     and TileH==SrcSquareH, SrcTrimTop==0. Nothing the artist draws inside
+//     a square is thrown away. 42 is a multiple of 14, so every file lands
+//     on a byte boundary AND keeps the dither phase — no shifting, ever.
 //
 //   - The light-square dither is globally phase-locked to "even absolute x
 //     is lit". In DHGR bytes that is the constant pair aux=$55, main=$2A
@@ -20,21 +25,31 @@
 //     background is $00. Both are synthesised at runtime, which is why the
 //     blob holds no empty-square tiles.
 //
-//   - Content is confined to dx 8..34 of a square: dx 0..7 and 35..43 are
-//     pure background in all 64 squares. So the destination pitch can be
-//     TileW=42 (= 6 DHGR bytes = 3 aux + 3 main) instead of 44 by dropping
-//     the RIGHT two columns. 42 is a multiple of 14, so every file lands on
-//     a byte boundary AND keeps the dither phase — no shifting, ever.
-//
-//   - Dropping the top TWO source rows of every square costs exactly 28
-//     non-background pixels board-wide (three rows costs 80; dropping from
-//     the bottom costs 115 for a single row). Two is the knee, so a tile
-//     keeps source dy 2..20 → TileH=19 rows.
+//   - Content is confined to dx 8..34 of a square: dx 0..7 and 35..41 are
+//     pure background in all 64 squares. That is what lets a tile row store
+//     four of its six byte columns instead of all six.
 //
 //   - Within a tile row's six byte columns [aux0 aux1 aux2 main0 main1
 //     main2], columns 0 and 5 are pure background in all 24 piece tiles.
 //     Only columns 1..4 = [aux1, aux2, main0, main1] are stored: 4 bytes x
 //     19 rows = 76 bytes per tile, 24 tiles = 1824 bytes.
+//
+//   - The drawing carries its own frame, and the frame is what pins the
+//     grid: 4-dot bars down each side, 1-dot rules along the top and
+//     bottom, and a gap of FrameGapX/FrameGapY between the frame and the
+//     8x8 grid. The grid EXACTLY fills what the frame encloses, which is
+//     the assertion that catches a redraw at a different square size.
+//
+// WHY THE ART WAS REDRAWN (2026-08-06). The first artwork (DazzleDraw
+// picture CHESS1) was drawn on a 44x21 grid, but the UI only has 152
+// scanlines for eight ranks, so the slicer dropped the top TWO source rows
+// of every square — silently clipping 28 dots of bishop and king finials,
+// which showed up on screen. The fix was not a better trim: the board was
+// REDRAWN at the engine's own square size (picture CHESS2), so the source
+// grid and the tile are now the same 42x19 and SrcTrimTop is 0. The trim
+// machinery is kept, at zero, because it is what makes "nothing is lost" a
+// measured claim rather than a structural accident — see Check's LOST INK
+// section, which still measures the kept window against the whole square.
 package tiles
 
 import (
@@ -55,29 +70,41 @@ const (
 const (
 	SrcOriginX = 8  // x of square (r,0)'s first column
 	SrcOriginY = 2  // y of square (0,f)'s first row
-	SrcSquareW = 44 // drawn square width in dots
-	SrcSquareH = 21 // drawn square height in dots
-	SrcTrimTop = 2  // source rows dy 0..1 dropped from every tile
+	SrcSquareW = 42 // drawn square width in dots
+	SrcSquareH = 19 // drawn square height in dots
+	SrcTrimTop = 0  // source rows dropped from the TOP of every tile: none
 
 	// Every drawn glyph lives inside dx ContentMinDX..ContentMaxDX; the
 	// dot columns outside it are pure background in all 64 squares.
 	ContentMinDX = 8
 	ContentMaxDX = 34
 
-	// Lit bounding box of the whole drawing, and the border it comes from.
+	// Lit bounding box of the whole drawing, and the frame it comes from.
+	// The frame is 4-dot BARS down the left and right, 1-dot RULES along
+	// the top and bottom, and a gap between the frame and the 8x8 grid.
+	// Everything here is measured; checkGrid asserts the grid exactly fills
+	// what the frame encloses.
 	BoardMinX  = 0
-	BoardMaxX  = 367
+	BoardMaxX  = 351
 	BoardMinY  = 0
-	BoardMaxY  = 171
-	BorderLeft = 3   // columns 0..3 are fully lit
+	BoardMaxY  = 155
+	BorderW    = 4   // width in dots of each side bar
+	BorderLeft = 3   // columns 0..3 are fully lit: last column of the left bar
 	BorderTop  = 0   // row 0 is fully lit
-	BorderBot  = 171 // row 171 is fully lit
+	BorderBot  = 155 // row 155 is fully lit
+	FrameGapX  = 4   // dark dots between a side bar and the grid
+	FrameGapY  = 1   // dark rows between a rule and the grid
 )
+
+// BorderRight is the first column of the right-hand bar, derived rather
+// than written down so moving the drawing cannot leave a stale literal
+// behind (the previous artwork's was 364).
+const BorderRight = BoardMaxX - BorderW + 1
 
 // Destination (tile) geometry.
 const (
 	TileW      = 42                     // dots per tile row = 6 DHGR bytes
-	TileH      = 19                     // rows per tile (source dy 2..20)
+	TileH      = 19                     // rows per tile (the whole source square)
 	TileCols   = TileW / 7              // 6 byte columns: aux0..2 then main0..2
 	FirstCol   = 1                      // stored byte columns: 1..4
 	LastCol    = 4                      //   (0 and 5 are pure background)
@@ -159,6 +186,36 @@ func colPixels(c int) (lo, hi int, aux bool) {
 	return 14*i + 7, 14*i + 13, false
 }
 
+// StoredDotSpan is the square-local dx range the STORED byte columns
+// (FirstCol..LastCol) cover, and whether that coverage is contiguous. The
+// six columns are ordered [aux0 aux1 aux2 main0 main1 main2], so their dot
+// coverage interleaves — columns 1..4 cover 14..20, 28..34, 7..13 and
+// 21..27, whose union is the contiguous span 7..34. Everything outside it
+// is dropped by the 4-byte format, so this is the window a dot has to be
+// inside to survive slicing at all. ContentMinDX..ContentMaxDX is the
+// (slightly tighter) window the drawing spec declares.
+func StoredDotSpan() (lo, hi int, contiguous bool) {
+	covered := map[int]bool{}
+	lo, hi = SrcSquareW, -1
+	for c := FirstCol; c <= LastCol; c++ {
+		cl, ch, _ := colPixels(c)
+		for x := cl; x <= ch; x++ {
+			covered[x] = true
+			lo, hi = min(lo, x), max(hi, x)
+		}
+	}
+	return lo, hi, len(covered) == hi-lo+1
+}
+
+// KeptWindow is the source region of a square that survives slicing: rows
+// SrcTrimTop..SrcSquareH-1 and the dots the stored byte columns cover. Ink
+// outside it is LOST — the measurement Check headlines, and the one that
+// makes "the redraw loses nothing" a fact rather than an assumption.
+func KeptWindow() (y0, y1, x0, x1 int) {
+	lo, hi, _ := StoredDotSpan()
+	return SrcTrimTop, SrcTrimTop + TileH - 1, lo, hi
+}
+
 // ---------------------------------------------------------------------
 // Screen: a decoded monochrome DHGR bitmap.
 // ---------------------------------------------------------------------
@@ -208,8 +265,11 @@ func (s *Screen) At(x, y int) bool {
 
 // srcByte packs the seven source dots that byte column c of square (r,f)
 // covers, taking tile-local row ty (source dy = ty+SrcTrimTop) and tile
-// column tx directly from the source square's dx (the tile drops the two
-// RIGHT dot columns, an even trim that leaves the dither phase alone).
+// column tx directly from the source square's dx. Since the CHESS2 redraw
+// the tile IS the square — TileW==SrcSquareW, TileH==SrcSquareH and
+// SrcTrimTop==0 — so this is an identity in both axes; SrcTrimTop is kept
+// so a future UI that needs shorter ranks has one number to change and one
+// measurement (Check's LOST INK) to consult about what it would cost.
 func srcByte(s *Screen, r, f, ty, c int) byte {
 	lo, _, _ := colPixels(c)
 	x0 := SrcOriginX + SrcSquareW*f + lo

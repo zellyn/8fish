@@ -15,7 +15,7 @@ import (
 // -check writes nothing.
 func artFile(t *testing.T) []byte {
 	t.Helper()
-	abs, err := filepath.Abs(filepath.Join("..", "..", "assets", "chess-dazzledraw-save.bin"))
+	abs, err := filepath.Abs(filepath.Join("..", "..", "assets", "chess2-dazzledraw-save.bin"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,50 +61,89 @@ func runCheckOn(t *testing.T, artPath string) (int, string) {
 	return code, out.String() + errOut.String()
 }
 
-// TestCheckOnCommittedArtwork: the committed artwork breaks no geometric
-// assumption, so -check never reports BROKEN, and its exit status agrees
-// with what it printed. Deliberately NOT pinned to today's 28 clipped
-// dots — that number lives in one place, internal/tiles' TestTrimCosts —
-// so a successful redraw turns this green instead of red.
+// TestCheckOnCommittedArtwork is the GATE, not just a smoke test: `make
+// test` runs it, so a redraw that breaks an assumption the tile format
+// rests on fails here rather than on an Apple IIe.
+//
+// It requires exit 0 exactly. Before the CHESS2 redraw the committed
+// artwork clipped 28 dots and this test had to tolerate exit 1, which
+// meant the tool's own headline could not be asserted. The artwork is now
+// in the goal state, so the gate can demand it — and if a future redraw
+// loses a single dot, this goes red.
 func TestCheckOnCommittedArtwork(t *testing.T) {
 	code, out := runCheckOn(t, writeArt(t, artFile(t)))
-	if code == exitBroken || strings.Contains(out, "RESULT: BROKEN") {
-		t.Errorf("committed artwork reported as broken (exit %d):\n%s", code, out)
+	if code != exitOK {
+		t.Errorf("committed artwork: exit = %d, want %d (clean)\n%s", code, exitOK, out)
 	}
-	for _, want := range []string{"CLIPPED INK", "GEOMETRY CHECKS", "INK EXTENTS", "SUMMARY", "blob: 1824 bytes"} {
+	if strings.Contains(out, "RESULT: BROKEN") {
+		t.Errorf("committed artwork reported as broken:\n%s", out)
+	}
+	for _, want := range []string{
+		"LOST INK", "NONE. Every drawn dot reaches a tile",
+		"GRID FIT", "GEOMETRY CHECKS", "INK EXTENTS", "SUMMARY",
+		"blob: 1824 bytes", "RESULT: clean",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output does not mention %q:\n%s", want, out)
 		}
 	}
-	// Exit status and headline must tell the same story.
-	clean := strings.Contains(out, "NONE. Every drawn dot survives the trim")
-	if want := map[bool]int{true: exitOK, false: exitClipped}[clean]; code != want {
-		t.Errorf("exit = %d but the clipped-ink headline says clean=%v", code, clean)
+	// Every assumption the checker knows about must actually have run and
+	// held — "all N assumptions hold" listing a SHORTER list than
+	// tiles.CheckKinds would be a check quietly dropped.
+	for _, kind := range tiles.CheckKinds {
+		if !strings.Contains(out, kind) {
+			t.Errorf("the report never mentions the %q check:\n%s", kind, out)
+		}
+	}
+	// The committed blob is the blob this artwork slices to: if they had
+	// drifted, `make dsk` and the checker would disagree about the board.
+	if strings.Contains(out, "DIFFER from the committed") {
+		t.Errorf("the committed blob is stale; run `go run ./cmd/gentiles`:\n%s", out)
 	}
 }
 
-// TestCheckCatchesInkInTheTrimmedRows: a dot drawn in source row dy 0 is
-// ink the tile throws away. The checker must exit non-zero and name the
-// square it is on.
-func TestCheckCatchesInkInTheTrimmedRows(t *testing.T) {
-	// a1 is a dark square (all-dark background) whose ink starts at dy 4,
-	// and dx 20 is inside the content window: a pure clip, nothing else.
+// TestCheckCatchesInkInTheFrameGap: ink between the drawn frame and the
+// 8x8 grid means the grid the code declares is not the grid that was
+// drawn. Exit 2, and the report has to say where.
+//
+// This replaced TestCheckCatchesInkInTheTrimmedRows. That test drew into
+// source row dy 0 and expected the tool to call it clipped; with
+// SrcTrimTop at 0, dy 0 is a perfectly good tile row and the test could
+// only have passed by asserting nothing.
+func TestCheckCatchesInkInTheFrameGap(t *testing.T) {
 	art := artFile(t)
-	x, y := tiles.SrcDotPos(7, 0, 0, 20)
+	g := tiles.FrameGaps()[0] // the left gap, between the left bar and file a
+	x, y := (g[0]+g[2])/2, (g[1]+g[3])/2
 	tiles.SetDot(art, x, y)
 
 	code, out := runCheckOn(t, writeArt(t, art))
-	if code == exitOK {
-		t.Fatalf("exit = 0 for artwork with ink in a trimmed row:\n%s", out)
+	if code != exitBroken {
+		t.Errorf("exit = %d, want %d\n%s", code, exitBroken, out)
 	}
-	if code != exitClipped {
-		t.Errorf("exit = %d, want %d (a clip, not a structural break)\n%s", code, exitClipped, out)
+	for _, want := range []string{"[grid]", "left gap", "RESULT: BROKEN"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output does not contain %q:\n%s", want, out)
+		}
 	}
-	if !namesSquareInClipSection(out, "a1") {
-		t.Errorf("the clipped-ink section does not name a1:\n%s", out)
+}
+
+// TestCheckCatchesLostInk: a dot in a square's margin cannot be carried by
+// the 4-byte tile row. The LOST INK headline must name the square, and the
+// tool must exit non-zero.
+func TestCheckCatchesLostInk(t *testing.T) {
+	art := artFile(t)
+	x, y := tiles.SrcDotPos(7, 0, 10, 40) // a1, dx 40: past the stored dot span
+	tiles.SetDot(art, x, y)
+
+	code, out := runCheckOn(t, writeArt(t, art))
+	if code != exitBroken {
+		t.Errorf("exit = %d, want %d\n%s", code, exitBroken, out)
 	}
-	if !strings.Contains(out, "dy=0") {
-		t.Errorf("output does not report the offending row dy=0:\n%s", out)
+	if !namesSquareInLostSection(out, "a1") {
+		t.Errorf("the LOST INK section does not name a1:\n%s", out)
+	}
+	if !strings.Contains(out, "dy=10") {
+		t.Errorf("output does not report the offending row dy=10:\n%s", out)
 	}
 }
 
@@ -198,15 +237,15 @@ func TestCheckWritesThePNG(t *testing.T) {
 	}
 }
 
-// namesSquareInClipSection reports whether the CLIPPED INK section (not
-// some later table) names the square, so a hit in the ink-extent listing
-// cannot make the test pass vacuously.
-func namesSquareInClipSection(out, sq string) bool {
-	start := strings.Index(out, "CLIPPED INK")
+// namesSquareInLostSection reports whether the LOST INK section (not some
+// later table) names the square, so a hit in the ink-extent listing cannot
+// make the test pass vacuously.
+func namesSquareInLostSection(out, sq string) bool {
+	start := strings.Index(out, "LOST INK")
 	if start < 0 {
 		return false
 	}
-	end := strings.Index(out, "GEOMETRY CHECKS")
+	end := strings.Index(out, "GRID FIT")
 	if end < 0 || end < start {
 		end = len(out)
 	}

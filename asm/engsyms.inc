@@ -5,20 +5,20 @@
 ; UI is a SEPARATE link running from Language Card RAM at $E000, so
 ; engine.bin is untouched by the UI's existence (docs/ui-design.md §8).
 
-ENG_PCOSTHI        = $42C1   ; FT2_SOFTCLK per-phase cost table, high bytes
-ENG_PCOSTLO        = $42A8   ; FT2_SOFTCLK per-phase cost table, low bytes
+ENG_PCOSTHI        = $42D0   ; FT2_SOFTCLK per-phase cost table, high bytes
+ENG_PCOSTLO        = $42B7   ; FT2_SOFTCLK per-phase cost table, low bytes
 ENG_LCCODE_LOAD    = $BC61   ; where the aux-bank TT primitives sit in the engine image
 ENG_LCCODE_RUN     = $D000   ; where they must be copied to ($D000)
 ENG_LCCODE_SIZE    = $0064   ; how many bytes to copy
 ENG_adaptaborthi   = $BB7A   ; FT2_ADAPT hard-abort override (ABORTL = 2*CEILMAX)
 ENG_adaptmaybe     = $BB8D   ; FT2_ADAPT post-iteration policy
-ENG_attacked       = $5BF9   ; square-attacked test (the legality half of move validation)
-ENG_bookprobe      = $7A07   ; resident opening-book probe (C=1 on a hit)
-ENG_ccsite         = $42DE   ; the `jsr checkclock` whose operand FT2_SOFTCLK patches
-ENG_checkclocks    = $425F   ; FT2_SOFTCLK accumulating-clock entry point
-ENG_curincheck     = $424D   ; is the side to move in check?
-ENG_evalinit       = $5A22   ; root accumulators, PHASE and HASH0-3 from the board
-ENG_gennodef       = $421A   ; full-width generate + per-ply move-list bookkeeping
+ENG_attacked       = $5C01   ; square-attacked test (the legality half of move validation)
+ENG_bookprobe      = $7A0C   ; resident opening-book probe (C=1 on a hit)
+ENG_ccsite         = $42E9   ; the `jsr checkclock` whose operand FT2_SOFTCLK patches
+ENG_checkclocks    = $4262   ; FT2_SOFTCLK accumulating-clock entry point
+ENG_curincheck     = $4250   ; is the side to move in check?
+ENG_evalinit       = $5A30   ; root accumulators, PHASE and HASH0-3 from the board
+ENG_gennodef       = $421D   ; full-width generate + per-ply move-list bookkeeping
 ENG_iterate        = $4137   ; one full-window search at CURDEPTH (the UI drives ID itself)
-ENG_make           = $5DF1   ; play FROM/TO/MVFLAGS, PLY++
-ENG_unmake         = $63AF   ; undo the move at PLY-1
+ENG_make           = $5DF9   ; play FROM/TO/MVFLAGS, PLY++
+ENG_unmake         = $63B4   ; undo the move at PLY-1

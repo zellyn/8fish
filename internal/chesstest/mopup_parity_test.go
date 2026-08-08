@@ -37,6 +37,13 @@ func callSub(t *testing.T, m *harness.Machine, addr uint16) {
 // POV, tempo, no dither) under FEATURES 0x1f + the given FEATURES2 byte, by
 // invoking evalinit then eval directly and reading SCORE. This is exactly
 // what a search node's stand-pat sees.
+//
+// fgpatch (board.s) runs between poking the feature bytes and eval, because
+// eval's feature gates are constant-folded jmp operands set from FEATURES/
+// FEATURES2 once per iterate (deep opt r6): a driver that bypasses iterate —
+// as this trampoline does — must run the fold itself, exactly as the real
+// drivers do. The engine's OWN routine is called, not a Go re-implementation,
+// so the fold under test is the shipped one.
 func asmStaticEval(t *testing.T, bin []byte, evalinit, evalAddr uint16, fen string, ft2 byte) int {
 	t.Helper()
 	pos, err := ParseFEN(fen)
@@ -51,6 +58,14 @@ func asmStaticEval(t *testing.T, bin []byte, evalinit, evalAddr uint16, fen stri
 	SetFeatures2(m, defs, ft2)
 	m.Mem.Main[defs["SEED"]] = 0 // no dither: deterministic
 	m.Mem.Main[defs["HALFMOVE"]] = pos.Halfmove
+	labels, err := ParseLabelFile("../../asm/engine.lbl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if labels["fgpatch"] == 0 {
+		t.Fatal("fgpatch label missing from engine.lbl")
+	}
+	callSub(t, m, labels["fgpatch"])
 	callSub(t, m, evalinit)
 	callSub(t, m, evalAddr)
 	return int(int16(uint16(m.Mem.Main[defs["SCORE"]]) |

@@ -3,6 +3,144 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-07 — deep optimization review round 6: −0.661% at identical trees, ZERO image bytes, and the fresh profile confirms r5's flatness
+
+Round 6 of the cycle/space review, the first since the evasion filter, pin
+ray, pawn count, check extensions and the aux book landed. Strictly
+tree-identity-preserving: the gate for every applied change is `TestMicroAB`
+— all 18 fingerprints (score, move, search/make/eval/attacked/ttprobe/
+generate) byte-identical — plus the EXACT cycle total over those 18
+fixed-depth searches, per the 2026-07-31 rule that for a tree-identical
+speedup the cycle count outranks any Elo estimate.
+
+**RE-PROFILE FIRST (the brief's order): r5's flatness still holds, slightly
+flatter.** `TestProfileR5` at the shipped config (0x5F, FT2_GENDEFER, 30M
+budget): top-1 label 4.66% (generateq), top-10 22.2%, top-40 48.8% of 139.4M
+cycles — the four near-equal quarters (movegen 26.7% / search 24.4% / board
+23.1% / eval 21.3%) are unchanged in shape. The new code from the structural
+wins is CHEAP: `sdevade` 0.37% (47.0 cyc/entry), `pinray`+`prwalk` 0.53%,
+and the hottest single LINE in the image is eval's per-file pawn recompute
+(`PTFILEC`, 3.24%) — already cache-gated by r4. So this round hunted
+constant-factor waste in per-node plumbing, and found it in two places: the
+per-node ABORT test and the runtime FEATURE-BIT tests.
+
+**Applied (each measured on the exact MicroAB cycle total, fingerprints
+byte-identical at every step):**
+
+| change | cycles before → after | delta |
+|---|---|---|
+| 1. ABORT test folded into the poll site: `checkclock` rearms the divider to 1 once aborting, so search's entry drops its per-node `lda ABORT/beq` (−6 cyc/node) | 3,249,555,705 → 3,243,838,552 | **−5,717,153 (−0.176%)** |
+| 2. `snorep` tests NPAWNS before PHASE (conjunction commutes; nearly every node has a pawn): 8 → 6 cyc common path | 3,243,838,552 → 3,242,098,791 | **−1,739,761 (−0.054%)** |
+| 3. `fgpatch` feature-gate constant folding (below) | 3,242,098,791 → 3,230,743,497 | **−11,355,294 (−0.350%)** |
+| 4. `sgo` cursor bump skips the high-byte +1/store when the 4-byte advance stays in page (63/64) | 3,230,743,497 → 3,228,081,237 | **−2,662,260 (−0.082%)** |
+| 5. checkclocks abort-freeze FIX for change 1 (below; delta is address realignment — the touched path is softclk-only) | 3,228,081,237 → 3,225,425,169 | **−2,656,068 (−0.082%)** |
+| **TOTAL** | **3,249,555,705 → 3,225,425,169** | **−24,130,536 (−0.743%)** |
+
+**★ The headline mechanism: FEATURES/FEATURES2 are per-search CONSTANTS,
+and the engine was re-testing their bits with `lda/and/beq` on hot paths —
+0.51% of all cycles across ten sites** (measured per site by scanning the
+binary for the gate triples and summing their per-PC profile cycles). The
+four hottest — slegal's FT_LMR staging gate (0.130%), eval's FT_PSTRUCT
+term gate (0.118%) and FT2_MOPUP gate (0.191%, a gate for a feature that is
+OFF in every shipped config), and make's FT_PSTRUCT dispatch gate (0.125%)
+— are now single `jmp abs` sites whose operands `fgpatch` folds from the
+live feature bytes once per `iterate`, the one place BOTH drivers (engine.s
+and m8.s uidrive) already pass: the ccsite FT2_SOFTCLK patch precedent,
+generalized. Assembled defaults encode the shipped config. `fgpatch` (81 B)
+lives with mopfin/mopcd in the RATTACK-region alignment hole, so the image
+does not grow a byte; all five ca65 variants and perft still build (the
+PTNOCACHE variant assembles no fgmkps site and its fgpatch skips it).
+
+**TWO GATES FIRED THIS ROUND, and both caught real defects — the round's
+best evidence that the gate lattice is doing its job.**
+
+1. `TestMopupEvalParity` failed immediately after the fold: it drives
+   `eval` by TRAMPOLINE (callSub), never touching `iterate`, so the
+   FT2_MOPUP site still held its shipped-default operand and the mop-up
+   never fired with the bit poked on. That is the exact defect class this
+   project's gates exist for — a second driver that bypasses the arming
+   path — caught in minutes. Fix: `asmStaticEval` now runs the engine's
+   OWN `fgpatch` before eval, exactly what the real drivers do (not a Go
+   re-implementation of the fold).
+2. `TestSoftClockAccuracy` failed in the full battery: change 1's unwind
+   mechanism (once ABORT is set, every node polls) meant that under
+   FT2_SOFTCLK the poll site is `checkclocks`, which charged a **128-node
+   quantum per unwinding node** — pool est/true exploded to **6.843** at
+   1 s budgets, invisible to every tree gate because only the estimated
+   clock feels it. Fix: `checkclocks` tests ABORT first and **freezes the
+   estimate while unwinding**, which is also nearer the truth than the old
+   1-in-128 sampling (an unwinding node costs ~45 cycles against PCOST's
+   ~4,600/node). After the fix the accuracy gate reads pool est/true
+   **1.029** (gate [0.85, 1.25]; 1 s budgets 0.934, 59 s 1.021, against
+   ~1.02 before the round). Note the unwind-accounting semantics CHANGED
+   (frozen instead of 128-sampled): this is clock accounting, gated by the
+   clock instruments, not by tree identity — the same footing as the
+   07-30 SOFTA/SOFTB rescales. TestSoftClockAdherence re-run for the same
+   reason (result below).
+
+**Measured and CLOSED as negligible (the brief's leads #2 and #3):**
+- **checkclocks (softclock accounting)**: the identical R5 workload with
+  FT2_SOFTCLK on costs **+11,052 cycles of 139.4M = +0.0079%** — matching
+  the +0.0073% recorded at the feature's build. Its per-call cost does not
+  need retuning for the new node mix; there is nothing to hunt.
+- **bkfetch's 9-byte aux copies**: ~157 cyc/entry × ~100 entries/probe ≈
+  **16k cycles once per book move** — 0.05% of ONE 30 s move, only while in
+  book (when no search runs at all). Derived, not assumed; no action.
+- **check-extension gating** (lead #4): the sckext FEATURES triple measured
+  0.009% (1,782 execs) — left as a runtime test; the per-child
+  `lda INCHK,y / bne` (5 cyc) is the minimal tree-defining form.
+
+**Tried and REJECTED by the gate — recorded so nobody re-tries it:**
+dropping slegal's `clc` on a carry-known-clear argument. The audit missed
+the third entry path (`beq spinleg` from the king-alignment test), which
+arrives with a data-dependent carry out of `adc #$77`; TestMicroAB caught
+the tree change instantly (LEGALCNT double-stepped, LMR staging shifted).
+The clc now carries a comment saying exactly why it is load-bearing.
+
+**Space: nothing applied beyond free placement; the ledger for next time.**
+- Layout after the round: CODE $4000-$7BC8 (page tail to TABLES: **55 B**),
+  TABLES $7C00-$BC60 (RATTACK-hole slack now **8 B** — fgpatch took 81 of
+  89), LCCODE load $BC61-$BCC4 (28 B under the 128 B copier ceiling), image
+  ends $BCC5: **headroom 811 B, unchanged** — engine.bin 31,941 B all round.
+- A 256 B headroom raise needs CODE's end under $7B01 = **196 B of CODE
+  shrink**; nothing near that was found dead (the r1/r4/audit passes took
+  it). Small pieces exist (ptkapply2's 13-byte branch-range duplicate could
+  fold for +3 cyc on the black-king path) but do not reach the page.
+- **FT2_MOPUP disposition needs a DECISION, not this round's hands**: it is
+  a landed conversion win (2026-07-23, +2 ± 30 self-play, converts KRK/KQK)
+  that is OFF in the harness config AND on the device — every match since
+  2026-07-28, including both +148/+161 headline numbers, played without it.
+  Either it should be ON on-device (zero bytes, its own PHASE gate, but a
+  strength decision), or it is dead weight worth **237 B off the image top**
+  (mopupterm 221 + MOPMAT tables 16, plus 48 B of hole back). Its eval-path
+  gate cost, at least, is now 3 cycles instead of 8.
+
+**Found, NOT applied (tree-identical but needs design work — candidate for
+r7):** a sentinel end-of-move-list byte would replace the 16-bit
+CURPTR/SENDL+SENDH compare in all five pass-scan loops (~8-11 cyc per list
+step; p2loop alone is 0.5%). Interacts with deferred generation's staged
+moves, GLIMIT and the batched emitters; estimated 0.2-0.3% for a wide,
+carefully-gated change.
+
+**Soft-clock staleness, stated per the standing rule**: every structural
+cycle win invalidates the per-node cost table invisibly. This round made a
+node ~0.7% cheaper — well inside the margin fit's slack (the 07-30 entries
+rescaled at 2.7% and 8.4%; the equal-spend band is ±10%) — so SOFTA/SOFTB
+were NOT rescaled, and the next calibration pass should fold this round in.
+TestSoftClockAccuracy post-round: pool est/true 1.029 (was ~1.02).
+
+**Verification**: `TestMicroAB` fingerprints byte-identical after every
+change and at the end; exact totals as tabled. TestTablePacking,
+TestPStructParity, TestPTCacheIdenticalTree, TestPTCacheRandomWalk,
+TestMopupConversion, TestMopupEvalParity, TestSoftClockAccuracy green on
+the final image; all five build variants + perft assemble and link;
+`make test` green across every package; the full `internal/chesstest`
+battery (58 min — including TestFullGameMirrorParity 780/780 plies exact
+on move/score/every counter, TestIDIterationParity, TestTTSequenceParity,
+TestBudgetModeParity, the pin-ray and evasion differentials, and the
+TABLES ceiling guard) green on the final image, plus
+`internal/sprt.TestSoftClockAdherence` for the unwind-accounting change.
+
 ## 2026-08-06 — the board is REDRAWN at 42x19, and the gate that could not fire is replaced
 
 zellyn redrew every piece. The old artwork (DazzleDraw picture **CHESS1**) was

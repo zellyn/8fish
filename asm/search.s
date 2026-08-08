@@ -123,6 +123,16 @@ curincheck:
 ; thousands of samples. Measured error distribution: docs/results.md.
 ; ---------------------------------------------------------------
 checkclocks:
+        lda ABORT               ; unwinding: FREEZE the estimate. Once ABORT
+        bne checkclock          ;  is set, ccarm1 makes EVERY node poll (that
+                                ;  is the unwind mechanism, deep opt r6) — so
+                                ;  charging here would bill a 128-node
+                                ;  quantum PER NODE and explode the estimate
+                                ;  ~128x (TestSoftClockAccuracy caught it,
+                                ;  est/true 6.8 at 1 s budgets). Not charging
+                                ;  is also nearer the truth than the old
+                                ;  1-in-128 sampling: an unwinding node costs
+                                ;  ~45 cycles against PCOST's ~4,600/node.
         lda PHASE               ; clamp: PHASE exceeds 24 after promotions
         cmp #NPCOST
         bcc :+
@@ -157,10 +167,17 @@ checkclocks:
 ; ---------------------------------------------------------------
 ; checkclock: poll the harness clock; set ABORT once cycles reach the
 ; hard limit (2x budget). No-op in fixed-depth mode (budget 0).
+; Once ABORT is set the divider is rearmed to 1 instead of 128, so
+; EVERY subsequent search entry lands back here and takes the dummy-
+; score unwind at ccsite — that is what lets search's per-node entry
+; drop its own ABORT test (deep opt r6: 6 cycles at every node for a
+; flag that is nonzero only while unwinding).
 ; ---------------------------------------------------------------
 checkclock:
         lda #128                ; rearm the poll divider (search counts it
         sta NODECNT             ;  down; 0 -> poll here -> reset to 128)
+        lda ABORT               ; already unwinding: keep every node polling
+        bne ccarm1
         lda BUDGET0
         ora BUDGET1
         ora BUDGET2
@@ -177,6 +194,8 @@ checkclock:
         bcc ccout               ; still under the limit
         lda #1
         sta ABORT
+ccarm1: lda #1                  ; aborting: every node must poll (and unwind)
+        sta NODECNT
 ccout:  rts
 
 ; PCOSTLO/PCOSTHI: what 128 nodes at taper phase X cost, in CLOCK_TRAP's
@@ -211,18 +230,23 @@ PCOSTHI:
 ; ---------------------------------------------------------------
 ; search
 ; ---------------------------------------------------------------
-search:
-        dec NODECNT             ; countdown: poll the clock every 128 nodes
-        bne :+                  ;  (checkclock rearms; first poll after 256)
+; The poll block sits ABOVE the search entry so the entry's beq reaches
+; it and the non-poll path (127 nodes of every 128) falls straight
+; through. ABORT is tested HERE, once per poll, not once per node: while
+; aborting, checkclock rearms the divider to 1, so every node lands here
+; and unwinds — see ccarm1 above (deep opt r6, −6 cyc/node).
 ccsite: jsr checkclock          ; operand patched to checkclocks by the
                                 ;  FT2_SOFTCLK setup in engine.s
-:       lda ABORT
-        beq :+
+        lda ABORT
+        beq sentry
         lda #0                  ; aborting: unwind with a dummy score
         sta SCORE
         sta SCORE+1
         rts
-:       lda PLY
+search:
+        dec NODECNT             ; countdown: poll the clock every 128 nodes
+        beq ccsite              ;  (checkclock rearms; first poll after 256)
+sentry: lda PLY
         beq sdrawend            ; root: no draw checks; a move is required
                                 ;  (and never at the ply cap)
         cmp #MAXPLY-1
@@ -278,12 +302,15 @@ snorep:
         ; and 2.2% of the ENDGAME, where every hit is), which is absurd
         ; for a quantity that changes only when a pawn is captured or
         ; promoted. NPAWNS is maintained on those two cold paths instead
-        ; (see defs.inc), so the test is now one load.
+        ; (see defs.inc), so the test is now one load. NPAWNS is tested
+        ; FIRST (deep opt r6): almost every node has a pawn on the board,
+        ; so the common path is one load + taken branch (6 cyc) instead
+        ; of load + compare + branch (8); the conjunction commutes.
+        lda NPAWNS
+        bne sdrawend            ; a pawn exists: playable
         lda PHASE
         cmp #2
         bcs sdrawend
-        lda NPAWNS
-        bne sdrawend            ; a pawn exists: playable
 sdraw:  lda #0
         sta SCORE
         sta SCORE+1
@@ -1330,9 +1357,10 @@ sgo:    ldy PLY
         sta CURPTR
         sta CURSORLO,y
         lda CURPTR+1
-        adc #0
-        sta CURPTR+1
-        sta CURSORHI,y
+        bcc :+                  ; no page cross (63 of 64): skip the high
+        adc #0                  ;  byte's +1 (C=1 here) and its store
+        sta CURPTR+1            ;  (deep opt r6, −2 cyc on the common path)
+:       sta CURSORHI,y
         ; fall through to sdomove
 sdomove:
         ; The in-check test that used to open the post-make lazy-legality
@@ -1595,7 +1623,10 @@ lvskip:
         ldy PLY                 ; PLY = child here
         dey
         lda LEGALCNT,y
-        clc
+        clc                     ; NOT removable (deep opt r6 tried): the
+                                ;  not-king-aligned entry (`beq spinleg`)
+                                ;  arrives with a data-dependent carry from
+                                ;  the alignment test's `adc #$77`
         adc #1
         sta LEGALCNT,y
         ; ---- child window mode (FT_LMR: PVS + late move reductions):
@@ -1609,9 +1640,12 @@ lvskip:
         lda QSKIND,y
         bne sqgo
         ldx #0
-        lda FEATURES
-        and #FT_LMR
-        beq smset
+fglmr:  jmp fglmron             ; FGSITE (deep opt r6): operand = fglmron
+                                ;  (FT_LMR set) or smset (clear), patched
+                                ;  by fgpatch at every iterate. FEATURES
+                                ;  is a per-search constant; this replaces
+                                ;  a per-legal-move lda/and/beq.
+fglmron:
         lda LEGALCNT,y
         cmp #2
         bcc smset               ; first legal move: the PV move

@@ -742,9 +742,11 @@ ckdone:
         sta PDIRTY
         sta UNDOPD,x
 .else
-        lda FEATURES
-        and #FT_PSTRUCT
-        beq mkptoff
+fgmkps: jmp fgmkpson            ; FGSITE (deep opt r6): operand = fgmkpson
+                                ;  (FT_PSTRUCT set) or mkptoff (clear),
+                                ;  patched by fgpatch at every iterate —
+                                ;  replaces a per-dirty-make lda/and/beq.
+fgmkpson:
         cpy #1
         beq mkkonly
         ; defer: the stale marker is the constant $40 — a bit DIRTYTAB
@@ -1433,4 +1435,69 @@ mopcd:  cmp #4
         eor #$FF
 :       and #$03
         rts
+
+.ifndef NOEVAL
+; ---------------------------------------------------------------
+; fgpatch (deep opt r6): entry-time constant-folding of the four
+; hottest feature-gate tests. FEATURES/FEATURES2 are per-search
+; CONSTANTS (the rig or driver pokes them before entry; nothing writes
+; them mid-search), yet these gates re-tested a bit with lda/and/beq on
+; hot paths — 0.51% of all cycles between them on the R5 workload:
+;   fglmr   search.s  slegal's LMR staging gate      (per legal move)
+;   fgevps  eval.s    pawn-structure term gate       (per taper eval)
+;   fgevmop eval.s    mop-up term gate               (per taper eval)
+;   fgmkps  board.s   make's pstruct dispatch gate   (per dirty make)
+; Each site is now one `jmp abs` whose operand this routine sets from
+; the live feature byte, once per iterate — the single place BOTH
+; drivers (engine.s fixed-depth/idloop and m8.s uidrive) already pass,
+; exactly the ccsite FT2_SOFTCLK patch precedent. The assembled
+; defaults encode the SHIPPED config ($5F, FT2_MOPUP clear), so even a
+; hypothetical caller that never runs iterate executes shipped
+; behaviour. Cold (once per ID iteration); lives with mopfin/mopcd in
+; the RATTACK-region alignment hole, so it costs the image ZERO bytes.
+; .ifndef NOEVAL: perft includes board.s but has no search/eval sites.
+; ---------------------------------------------------------------
+fgpatch:
+        ldx #<fglmron           ; slegal's LMR staging gate
+        ldy #>fglmron
+        lda FEATURES
+        and #FT_LMR
+        bne :+
+        ldx #<smset
+        ldy #>smset
+:       stx fglmr+1
+        sty fglmr+2
+        ldx #<fgevpson          ; eval's pawn-structure term gate
+        ldy #>fgevpson
+        lda FEATURES
+        and #FT_PSTRUCT
+        bne :+
+        ldx #<evrookx
+        ldy #>evrookx
+:       stx fgevps+1
+        sty fgevps+2
+.ifndef PTNOCACHE
+        ; make's pstruct defer/eager dispatch (the PTNOCACHE oracle
+        ; variant assembles its own block there and has no fgmkps site)
+        ldx #<fgmkpson
+        ldy #>fgmkpson
+        lda FEATURES
+        and #FT_PSTRUCT
+        bne :+
+        ldx #<mkptoff
+        ldy #>mkptoff
+:       stx fgmkps+1
+        sty fgmkps+2
+.endif
+        ldx #<fgevmopon         ; eval's mop-up term gate
+        ldy #>fgevmopon
+        lda FEATURES2
+        and #FT2_MOPUP
+        bne :+
+        ldx #<fgevmopoff
+        ldy #>fgevmopoff
+:       stx fgevmop+1
+        sty fgevmop+2
+        rts
+.endif
 .segment "CODE"

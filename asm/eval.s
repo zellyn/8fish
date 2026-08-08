@@ -1283,9 +1283,11 @@ evnosgn:
         ; copy above. Lazy pawnterm: a deferred recompute is consumed
         ; here first (pawntermfull clobbers T0-T3/EVTMP/MULCNT/PSQ*,
         ; all dead at this point; SCORE/MUL are untouched).
-        lda FEATURES
-        and #FT_PSTRUCT
-        beq evrookx
+fgevps: jmp fgevpson            ; FGSITE (deep opt r6): operand = fgevpson
+                                ;  (FT_PSTRUCT set) or evrookx (clear),
+                                ;  patched by fgpatch at every iterate —
+                                ;  replaces a per-eval lda/and/beq.
+fgevpson:
         lda PDIRTY
         beq :+
         jsr pawntermfull
@@ -1303,11 +1305,14 @@ evrookx: ; FT2_MOPUP endgame mop-up term (white POV): drive the losing king
         ; terms. mopupterm (TABLES tail) tests the PHASE gate itself and adds
         ; straight into SCORE; when the bit is clear it never runs and the
         ; eval instruction stream below is unchanged.
-        lda FEATURES2
-        and #FT2_MOPUP
-        beq :+
+fgevmop: jmp fgevmopoff        ; FGSITE (deep opt r6): operand = fgevmopon
+                                ;  (FT2_MOPUP set) or fgevmopoff (clear),
+                                ;  patched by fgpatch at every iterate.
+                                ;  Assembled default = shipped (clear).
+fgevmopon:
         jsr mopupterm
-:       ; side-to-move POV + tempo. Black fuses the negate with the
+fgevmopoff:
+        ; side-to-move POV + tempo. Black fuses the negate with the
         ; tempo add: TEMPO - SCORE == (0 - SCORE) + TEMPO exactly in
         ; 16-bit two's complement (deep opt r4).
         lda SIDE

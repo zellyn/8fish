@@ -3,6 +3,133 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-08 — ★★ THE DEVICE PONDER MEASURED: **+112 ± 30** self-play Elo (8fish-ponder vs 8fish-noponder, both real `m8.s` UIs); predictor hit rate **84%**; and pondering makes the shipped clock spend **1.33x** on its own moves
+
+Every published ponder Elo (~+116 vs Sargon) came from `internal/ucibridge`'s
+SIMULATED ponder, whose predictor is the free-TT walk ("source a"). The device
+(`asm/m8.s m8ponder`) predicts with a depth-3 shallow search ("source b") and
+interrupts through `pkclk`. Nobody had measured the device's actual mechanism.
+This entry does, with a new harness: **`cmd/ponder-match`** runs two REAL
+`m8.s` UIs under the harness emulator (`ui.Boot`, HARNESSKBD) and relays moves
+between them as typed keystrokes — the way `sargon-symmatch` drives the real
+Sargon disk. Side A is the shipped device ponder (`PONDERON=1`); side B is the
+shipped no-ponder behaviour (`PONDERON=0`, the same poke every move-by-move
+gate uses). Per move pair: A plays; A's main loop falls into `m8ponder` and
+parks at the first `pkclk` poll; A's move is typed into B, whose reply costs
+T_B measured cycles; A is then run for a **ponder window of exactly T_B**
+with the keyboard trap disabled (a hardware $C000 read returns "no key" — the
+modelling `ponder_test.go` established); B's move is typed into A, the first
+keystroke interrupting the live ponder through the real `pkclk` path. Both
+sides UI level 5 (4 s/move on the estimated clock, FT2_SOFTCLK + FT2_ADAPT —
+the shipped stack). Referee = `refchess`; every injected move is read back
+from the receiving machine's own history, with a whole-position FEN
+cross-check whenever the machine is not parked mid-ponder. Deterministic per
+`-seed` (replay verified); the per-game PRNG drives the entropy-collector
+pokes that stand in for human key timing, so the shipped dither path is the
+one exercised.
+
+**The instrument was gated before the number was read.**
+
+| gate | result |
+|---|---|
+| control (noponder vs noponder), seed 11, 200 games | +41.9 ± 39.4 |
+| control, seed 12, 200 games | +24.4 ± 40.2 |
+| control, seed 13, 200 games | +24.4 ± 37.2 |
+| pooled control, 600 games | **+30.2 ± 22.4** — uncomfortably one-sided |
+| **`-pairseed` symmetry proof**, 100 games | **exactly 0.0** (27-27-46); all 50 pairs bit-identical mirrors (same plies, same termination, result sign flipped) |
+
+The pooled control LOOKED like an A-bias (z ≈ 2.6), and per the broken-gates
+rule it was not waved off: the `-pairseed` mode reuses one game seed for both
+games of a pair, which (both configs being identical in control mode) makes
+game 2 game 1 with the roles exactly swapped — so ANY plumbing asymmetry
+(scoring, colour assignment, injection, jitter-draw order, adjudication)
+would surface as a nonzero total. It came out exactly zero, game-for-game.
+The harness is symmetric end-to-end; the pooled +30 is a ~1% tail draw over
+dither randomness (three same-sign 200-game controls at z ≈ 1-2 each). Both
+readings of the measurement are quoted below anyway. Zero harness errors in
+all 900 games of this campaign.
+
+**The measurement — 400 games, paired openings, colours swapped:**
+
+| quantity | value |
+|---|---|
+| record (ponder side) | 205 − 80 − 115 |
+| **device-ponder Elo, raw** | **+112.3 ± 29.7** |
+| conservative (pooled control subtracted) | **+82 ± 37** |
+| predictor hit rate | **12173/14460 = 84.2%** of completed predictions |
+| prediction coverage | 14460/19950 = 72.5% of windows (rest: predictor interrupted before finishing, or no legal P) |
+| effective hit rate over ALL windows | 12173/19950 = 61.0% |
+| reply depth after a HIT vs after a MISS | **3.69 vs 3.31** (Δ +0.39) — the warm TT demonstrably warms |
+| overall reply depth, A vs B | 3.40 vs 2.92 |
+| deep search live when the key landed | 16808/19950 = 84% of windows |
+| ponder hit its ~8 s walk-away backstop | 3142/19950 = 15.7% of windows |
+
+**Answer to the question this harness exists for: the DEVICE ponder works,
+and using the opponent's time is worth on the order of +80–110 self-play Elo
+at level 5.** The shallow-search predictor is NOT a weakness: 84% of its
+completed predictions matched the opponent's actual move. (That is far above
+the bridge's 45–47% hit rate vs Sargon, but the questions differ — here the
+predictor guesses what an 8fish will play, and it is itself an 8fish. The
+number does not transfer to human or Sargon opponents; the mechanism's health
+does.) No 1:1 comparison to the +116 is possible — that figure is vs SARGON
+with both sides pondering at B=30M on the harness clock — but nothing in this
+measurement suggests the device mechanism falls short of the simulation: the
+hit rate is high, the TT carryover is real, and the Elo is of the same order
+as what pondering bought in every bridge measurement.
+
+**Spend accounting (the asymmetry is the experiment; it is reported, not
+equalised away):**
+
+| component | ponder side (A) | no-ponder side (B) |
+|---|---|---|
+| own-move think, mean | 6.79M cyc | 5.14M cyc |
+| ponder windows | 102.9G total, mean 5.16M (== B's think, by construction) | — |
+| ponder overhead (interrupt tail + ponder entry) | 34.9G (≈1.75M/move) | — |
+| whole-match total | 274.9G | 103.1G |
+| total ratio | **2.67** | |
+| **own-move ratio** | **1.33** | |
+
+**The second finding, previously unmeasured: pondering makes the shipped
+adaptive clock spend 1.33x on its OWN moves.** Decomposed per prediction
+class (device soft-clock estimate sampled at the end of each reply search,
+next to true cycles):
+
+| A's reply after | n | true mean | est mean | est/true | depth |
+|---|---|---|---|---|---|
+| HIT | 12173 | 6.90M | 6.89M | 0.998 | 3.69 |
+| MISS | 2287 | 4.85M | 4.72M | 0.973 | 3.31 |
+| no prediction | 5490 | 7.49M | 7.76M | 1.036 | 2.84 |
+| first move (never pondered) | 200 | 3.64M | 3.69M | 1.015 | 2.46 |
+| B, all | 20077 | 5.03M | 4.78M | 0.950 | 2.92 |
+
+est/true ≈ 1.0 everywhere: the soft-clock estimator is NOT being fooled by
+the warm TT — the engine **believes** its 6.9M spends and chooses them. The
+mechanism is the shipped FT2_ADAPT interaction: warm early iterations are
+near-free, so iterative deepening reaches depths whose final iteration is
+expensive and whose instability/panic signals engage the 3x/4x ceilings far
+more often than on a cold TT. A's cold first moves (3.64M) behave exactly
+like the control (own ratio there 1.006), pinning the whole own-move
+overspend on ponder-induced TT warmth. On real hardware this is the disk
+thinking LONGER on its own clock after pondering — v1 shipped "a hit spends
+the full budget going deeper" (design §7.2), and this is what that costs at
+level 5. If a future pass wants the own-move spend held at 1.0x, that is the
+deferred ponder-time banking work (§7.3), now with a measured reason to
+exist. Also measured for v2: the fixed ~8 s walk-away backstop truncated
+15.7% of windows at level 5 — scaling it with the level (§11.A deferred)
+would recover free time at the slow levels.
+
+**What this does NOT change: the headline Sargon number.** Design §10 stands:
+the representative product figure is the ponder-enabled symmetric
+`sargon-symmatch` gauntlet, which is a separate (wall-clock-heavy) re-run and
+is not superseded by a self-play number. This entry establishes that the
+device mechanism the disk ships is sound and quantifies what it buys in
+like-vs-like play.
+
+Repro: `go run ./cmd/ponder-match -mode measure -pairs 200 -seed 7` (the
+control: `-mode control -pairs 100 -seed 11..13`; the symmetry proof:
+`-mode control -pairs 50 -seed 21 -pairseed`). Full per-move logs were
+written under `runs/ponder-match/`.
+
 ## 2026-08-07 — device pondering v1 landed (Scheme A): the disk now thinks on the opponent's clock
 
 **This is an IMPLEMENTATION landing, not a gauntlet.** It ships

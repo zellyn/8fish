@@ -92,6 +92,7 @@ func main() {
 		outfile  = flag.String("out", "", "append the full per-move log to this file (stdout gets games + summaries)")
 		maxPlies = flag.Int("max-plies", 220, "adjudicate a draw at this many plies (UI history is byte-capped at 255)")
 		noBuild  = flag.Bool("nobuild", false, "skip rebuilding the asm images (trust what is on disk)")
+		pairSeed = flag.Bool("pairseed", false, "INSTRUMENT SYMMETRY PROOF: both games of a pair share one game seed, so (in -mode control) game 2 is game 1 with the roles exactly swapped — every pair must sum to zero and the session Elo must be exactly 0.0, or the harness favors a side")
 	)
 	flag.Parse()
 
@@ -183,6 +184,9 @@ func main() {
 				defer wg.Done()
 				defer func() { <-sem }()
 				gameSeed := *seed + uint64(gameNo)*0x9E3779B97F4A7C15
+				if *pairSeed {
+					gameSeed = *seed + uint64(p)*0x9E3779B97F4A7C15
+				}
 				out := gameOut{}
 				out.outcome, out.a, out.b, out.plies, out.reason, out.err =
 					playGame(*root, *level, opening, aPonder, aWhite, gameSeed, *maxPlies, gameNo, mv)

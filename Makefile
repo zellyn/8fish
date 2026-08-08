@@ -12,7 +12,21 @@ endif
 
 DISKII := diskii
 
-.PHONY: all hello perft banktest entropytest uitest m8 engine tables tiles check-tiles dsk test test-full test-siblings clean
+.PHONY: all hello perft banktest entropytest uitest m8 engine tables tiles check-tiles pull-art dsk test test-full test-siblings clean
+
+# Pull the CHESS2 board art off a DazzleDraw .po disk image, GEOMETRY-CHECK it,
+# and regenerate the tile blob from it. The art is authored on an 800K ProDOS
+# volume that `diskii` won't open, so cmd/pullart reads it directly.
+#   make pull-art PO=~/Downloads/1652_Dazzle_Draw_v1.2_Apple_IIe.po
+# then `make dsk` to rebuild the disk. `gentiles -check` fails the target if the
+# new art breaks a geometry assumption, so a bad redraw stops HERE, loudly,
+# rather than shipping garbage.
+pull-art:
+	@test -n "$(PO)" || { echo "usage: make pull-art PO=<path-to-DazzleDraw.po>" >&2; exit 2; }
+	go run ./cmd/pullart -po "$(PO)" -name CHESS2 -out assets/chess2-dazzledraw-save.bin
+	go run ./cmd/gentiles -check
+	go run ./cmd/gentiles
+	@echo "art pulled and geometry-checked; tile blob regenerated. Run 'make dsk' to rebuild the disk."
 
 all: hello perft engine test
 

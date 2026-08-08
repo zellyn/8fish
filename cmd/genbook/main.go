@@ -184,6 +184,7 @@ func asmHeader(entryCount, nameCount, blobSize, nameSize int) string {
 	fmt.Fprintf(&b, "BOOK_ENTRIES   = BOOK_BASE+%d   ; first entry\n", book.HeaderSize)
 	fmt.Fprintf(&b, "BOOK_NAMES     = $%04X   ; the name table's resident base (LC bank 2)\n", book.NamesAddr)
 	fmt.Fprintf(&b, "BIGBOOK_BASE   = $%04X   ; the BIG BOOK's aux home: the idle TT window\n", book.BigBase)
+	fmt.Fprintf(&b, "BIGBOOK_WIN    = $%04X   ; the window's size; checksum trailer in its last 2 bytes\n", book.BigWindow)
 	fmt.Fprintf(&b, "BIGBOOK_MAX    = %d    ; its capacity in entries (checksum trailer priced in)\n\n", book.BigMaxEntries)
 	b.WriteString("; entry field offsets (from an entry base):\n")
 	b.WriteString("BOOK_E_KEY     = 0    ; 4 bytes LE == HASH0..3\n")

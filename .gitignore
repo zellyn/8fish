@@ -24,6 +24,8 @@
 # (resident in Language Card bank 2). See package book's doc.
 !internal/book/bookblob.bin
 !internal/book/booknames.bin
+!internal/book/bigbook.bin
+!internal/rwts/rwtsblob.bin
 !internal/tiles/tileblob.bin
 
 # stray binaries from `go build ./cmd/...` in the repo root

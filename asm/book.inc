@@ -25,6 +25,7 @@ BOOK_STRIDE    = 9            ; entry stride in bytes
 BOOK_ENTRIES   = BOOK_BASE+8   ; first entry
 BOOK_NAMES     = $D000   ; the name table's resident base (LC bank 2)
 BIGBOOK_BASE   = $4000   ; the BIG BOOK's aux home: the idle TT window
+BIGBOOK_WIN    = $8000   ; the window's size; checksum trailer in its last 2 bytes
 BIGBOOK_MAX    = 3639    ; its capacity in entries (checksum trailer priced in)
 
 ; entry field offsets (from an entry base):

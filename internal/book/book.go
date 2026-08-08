@@ -182,18 +182,25 @@ func Encode(entries []Entry, names []string) (entriesBlob, namesBlob []byte) {
 
 // EncodeBig builds the BIG BOOK blob: the identical header + sorted entry
 // layout Encode produces (so asm/book.s walks it unchanged from base page
-// $40), followed by a 16-bit checksum trailer over everything before it.
-// asm/m8.s's m8bigbook recomputes that sum over the loaded aux window and
-// refuses to open the BIGBOOKOK latch on a mismatch — which is what turns
-// "the driver returned" into "the load actually happened".
+// $40), zero-padded to the full BigWindow with a 16-bit checksum trailer in
+// the window's LAST TWO bytes. asm/m8.s's m8bigbook recomputes that sum over
+// the loaded aux window and refuses to open the BIGBOOKOK latch on a
+// mismatch — which is what turns "the driver returned" into "the load
+// actually happened". The trailer sits at a FIXED address (aux $BFFE) rather
+// than after the entries so the 6502 verify loop needs no count arithmetic:
+// its bounds are immediates, and the sum covers the count bytes themselves.
 func EncodeBig(entries []Entry, names []string) ([]byte, error) {
 	if len(entries) > BigMaxEntries {
 		return nil, fmt.Errorf("book: %d entries, %d more than the big book's %d-entry capacity",
 			len(entries), len(entries)-BigMaxEntries, BigMaxEntries)
 	}
 	blob, _ := Encode(entries, names)
-	s := Checksum16(blob)
-	return append(blob, byte(s), byte(s>>8)), nil
+	out := make([]byte, BigWindow)
+	copy(out, blob)
+	s := Checksum16(out[:BigWindow-2])
+	out[BigWindow-2] = byte(s)
+	out[BigWindow-1] = byte(s >> 8)
+	return out, nil
 }
 
 // Checksum16 is the big blob's load-verify checksum: a plain 16-bit sum of

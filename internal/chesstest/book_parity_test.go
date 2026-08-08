@@ -266,9 +266,9 @@ func TestBigBookProbeParityASMvsGo(t *testing.T) {
 		t.Fatal(err)
 	}
 	blob := book.DefaultBig()
-	if len(blob) != book.HeaderSize+len(bk.Entries())*book.EntryStride+2 {
-		t.Fatalf("bigbook.bin is %d B, want header + %d entries + 2-byte checksum",
-			len(blob), len(bk.Entries()))
+	if len(blob) != book.BigWindow {
+		t.Fatalf("bigbook.bin is %d B, want the full %d-byte window (zero-padded, "+
+			"checksum trailer in the last two bytes)", len(blob), book.BigWindow)
 	}
 	if s := book.Checksum16(blob[:len(blob)-2]); blob[len(blob)-2] != byte(s) || blob[len(blob)-1] != byte(s>>8) {
 		t.Fatalf("bigbook.bin checksum trailer %02X%02X does not match the recomputed %04X",

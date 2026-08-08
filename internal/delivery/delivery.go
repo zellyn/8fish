@@ -109,9 +109,21 @@ const (
 	// TILE_BLOB_SIZE the same way, so a drift is a failure rather than a
 	// mystery.
 	NamesOrg = 0x1600
+	// RwtsOrg is where stage 2 lands the ProRWTS2 read-only driver blob,
+	// before m8rwtsinit copies it to Language Card bank 1 at RwtsLC. It abuts
+	// the name table's landing zone the same way NamesOrg abuts the tiles —
+	// derived as NamesOrg + ceil(booknames), recomputed by
+	// TestMainMemoryLayout so growth moves both sides or fails.
+	RwtsOrg = 0x1D00
+	// RwtsLC is the driver's resident home: Language Card BANK 1's free tail
+	// (the resting bank — calling it needs no bank switch). Keep equal to
+	// rwts.EntryAddr; TestLanguageCardBank1Layout carries the region.
+	RwtsLC = 0xDC00
 	// BookOrg is where stage 2 lands the opening book's ENTRIES, before the
 	// copier copies them to AUX $0800. It is main hi-res page 1, which the
 	// DHGR renderer needs and which is therefore not the book's home any more.
+	// It is ALSO the big-book load's per-file staging window: after boot,
+	// m8bigbook reads each 8 KB BOOK.n file here and lifts it to aux $4000+.
 	BookOrg = 0x2000
 	// BookAux is the ENTRIES blob's RESIDENT home: auxiliary RAM $0800.
 	//
@@ -277,6 +289,7 @@ func Stage2Pieces() []Piece {
 	return []Piece{
 		{Path: filepath.Join("internal", "tiles", "tileblob.bin"), Org: TilesOrg, RunsAt: TilesLC},
 		{Path: filepath.Join("internal", "book", "booknames.bin"), Org: NamesOrg, RunsAt: NamesLC},
+		{Path: filepath.Join("internal", "rwts", "rwtsblob.bin"), Org: RwtsOrg, RunsAt: RwtsLC},
 		{Path: filepath.Join("internal", "book", "bookblob.bin"), Org: BookOrg, RunsAt: BookAux},
 	}
 }
@@ -362,6 +375,9 @@ type Ledger struct {
 	TotalSectors int
 	// DiskSpare is how many of the disk's 560 sectors are still empty.
 	DiskSpare int
+	// BookRegionSectors is the ProRWTS2-shaped region: the big book's
+	// directory, index and data sectors, written outside both SD stages.
+	BookRegionSectors int
 	// PayloadOrg / PayloadEnd bracket the staged UI payload; PayloadRoom is
 	// how far it could still grow before it collided with the ENGINE at
 	// EngineOrg, which is stage 1's next span.
@@ -382,10 +398,12 @@ type Ledger struct {
 
 func (l Ledger) String() string {
 	return fmt.Sprintf(
-		"stage 1 %d/%d sectors, stage 2 %d/%d sectors, %d of %d disk sectors used "+
+		"stage 1 %d/%d sectors, stage 2 %d/%d sectors, book region %d sectors, "+
+			"%d of %d disk sectors used "+
 			"(staged payload $%04X-$%04X, %d B below the engine)",
 		l.Stage1Sectors, MaxStageSectors, l.Stage2Sectors, MaxStageSectors,
-		l.TotalSectors, SectorsPerDisk, l.PayloadOrg, l.PayloadEnd-1, l.PayloadRoom)
+		l.BookRegionSectors, l.TotalSectors, SectorsPerDisk,
+		l.PayloadOrg, l.PayloadEnd-1, l.PayloadRoom)
 }
 
 // LedgerOf computes the ledger for a pair of stages.
@@ -396,7 +414,8 @@ func LedgerOf(stage1, stage2 Stage) Ledger {
 	}
 	l.Stage1Spare = MaxStageSectors - l.Stage1Sectors
 	l.Stage2Spare = MaxStageSectors - l.Stage2Sectors
-	l.TotalSectors = 1 + l.Stage1Sectors + l.Stage2Sectors
+	l.BookRegionSectors = BookRegionSectors()
+	l.TotalSectors = 1 + l.Stage1Sectors + l.Stage2Sectors + l.BookRegionSectors
 	l.DiskSpare = SectorsPerDisk - l.TotalSectors
 	// The copier is a page-aligned 256-byte slot, so unless it exactly fills
 	// it the payload is its own span; when it does fill it, SpansOf merges the
@@ -516,6 +535,33 @@ func Build(root, imgPath, dskPath string) (Ledger, error) {
 		off := SectorOffset(l.Stage1Sectors + i)
 		copy(dsk[off:off+SectorBytes], s2[i*SectorBytes:(i+1)*SectorBytes])
 	}
+	// The ProRWTS2-shaped BOOK REGION: the big book, laid out as the
+	// directory + index + data blocks the resident driver walks. It lives in
+	// tracks neither SD stage reaches; refuse to build a disk where that
+	// stops being true rather than shipping one that boots and then loads
+	// garbage over itself.
+	bigbook, err := os.ReadFile(filepath.Join(root, "internal", "book", "bigbook.bin"))
+	if err != nil {
+		return l, fmt.Errorf("delivery: %w (run `go run ./cmd/genbook`)", err)
+	}
+	sdUsed := map[int]bool{0: true} // the boot sector
+	for i := range l.Stage1Sectors + l.Stage2Sectors {
+		sdUsed[SectorOffset(i)] = true
+	}
+	regionOffs, err := BookRegionOffsets(bigbook)
+	if err != nil {
+		return l, err
+	}
+	for _, off := range regionOffs {
+		if sdUsed[off] {
+			return l, fmt.Errorf("delivery: the book region and the SD stages both "+
+				"claim the sector at .dsk offset %#x (track %d): move BookDirBlock up",
+				off, off/SectorBytes/SectorsPerTrk)
+		}
+	}
+	if err := writeBookRegion(dsk, bigbook); err != nil {
+		return l, err
+	}
 	if err := os.WriteFile(dskPath, dsk, 0o644); err != nil {
 		return l, err
 	}
@@ -547,6 +593,19 @@ func Build(root, imgPath, dskPath string) (Ledger, error) {
 			return l, fmt.Errorf("delivery: %s does not read back as %s", dskPath, st.Name)
 		}
 		first += st.Sectors()
+	}
+	// ...and the book region reads back file by file, through the same
+	// block->sector arithmetic the driver executes.
+	padded := make([]byte, BookFiles*BookFileBytes)
+	copy(padded, bigbook)
+	for i := range BookFiles {
+		got, err := ExtractBookFile(written, i)
+		if err != nil {
+			return l, err
+		}
+		if want := padded[i*BookFileBytes : (i+1)*BookFileBytes]; !bytes.Equal(got, want) {
+			return l, fmt.Errorf("delivery: %s does not read back from %s", BookFileName(i), dskPath)
+		}
 	}
 	return l, nil
 }

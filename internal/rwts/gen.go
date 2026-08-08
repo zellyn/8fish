@@ -6,8 +6,10 @@ package rwts
 const (
 	EntryAddr = 0xDC00 // opendir: the read-a-file entry point
 	CodeLen   = 495 // driver code bytes
-	BlobLen   = 704 // code + denibble tables ($DC00-$DEBF)
+	BlobLen   = 724 // code + denibble tables + site table ($DC00-$DED3)
 	TrackD1   = 0xDD8F // self-modifying current-track operand (seed with $41 at boot)
+	SlotLoAddr = 0xDEC0 // the site table inside the blob: operand lo bytes...
+	SlotHiAddr = 0xDECA // ...and hi bytes (read by m8rwtsinit from bank 1)
 	DirBufAddr = 0x1300 // 512-byte directory buffer, main-RAM op-time scratch
 
 	// The driver's zero-page window (saved/swapped around every call

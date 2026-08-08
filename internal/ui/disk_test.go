@@ -772,14 +772,26 @@ func TestDiskPlays(t *testing.T) {
 	if got := win.Text(0); !strings.Contains(got, "TO MOVE") {
 		t.Errorf("the window's status row does not say whose move it is: %q", got)
 	}
-	// The think line is depth + score + move, rebuilt by uithinkln between
-	// completed iterations. After a real search it cannot be blank.
-	if got := strings.TrimSpace(win.Text(1)[:40]); got == "" {
+	// The think line is depth + score ONLY, rebuilt by uithinkln between
+	// completed iterations. After a real search it cannot be blank...
+	think := strings.TrimSpace(win.Text(1)[:40])
+	if think == "" {
 		t.Error("the window's think line is blank after a search: uithinkln does not " +
 			"reach the window, so the board screen shows no depth or score")
-	} else {
-		t.Logf("the window's think line reads %q", got)
 	}
+	// ...and it must NOT show the best move. Displaying the move-so-far let the
+	// opponent pre-compute a counter to the engine's intended reply, and its
+	// early settling told them the engine had decided; the move appears only
+	// when PLAYED. A move token is a square coordinate ([a-h][1-8]); the score
+	// ("D 2 -0.05") has none.
+	for i := 0; i+1 < len(think); i++ {
+		if think[i] >= 'a' && think[i] <= 'h' && think[i+1] >= '1' && think[i+1] <= '8' {
+			t.Errorf("the think line %q shows a move coordinate: the best move must NOT "+
+				"be displayed during the search", think)
+			break
+		}
+	}
+	t.Logf("the window's think line reads %q (depth+score, no move)", think)
 }
 
 // TestDiskThinkingClearsInputAndBook drives the SHIPPING disk and checks the

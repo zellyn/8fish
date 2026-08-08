@@ -2866,16 +2866,12 @@ uithinkln:
         sta (SCRPTR),y
         iny
         jsr uiscore
-        lda #$A0
-        sta (SCRPTR),y
-        iny
-        lda BESTFROM
-        cmp #NOSQ
-        beq utlterm
-        jsr uisqout
-        lda BESTTO
-        jsr uisqout
-utlterm:
+        ; The best move so far is DELIBERATELY not shown during the search.
+        ; Displaying it let the opponent pre-compute a counter to the engine's
+        ; intended move, and its EARLY SETTLING told them the engine had
+        ; already decided long before it moved. The line now shows depth +
+        ; score only, as a progress heartbeat; the move appears when it is
+        ; PLAYED -- on the board and in the move list. (2026-08-08)
         lda #0
         sta (SCRPTR),y
         lda #THINKROW

@@ -235,6 +235,86 @@ func TestBookProbeWeightedDistribution(t *testing.T) {
 	}
 }
 
+// TestBigBookProbeParityASMvsGo re-runs the correctness gate over the BIG
+// BOOK at its aux $4000 home (the idle transposition-table window), with the
+// engine's `bookpg` byte poked to $40 exactly as asm/m8.s does while the
+// BIGBOOKOK latch is open. Same sweep discipline as the resident gate: every
+// in-book position, a full residue period of r, plus the wide edges.
+//
+// It also pins the shipped DEFAULT: engine.bin must carry bookpg = $08 (the
+// resident blob), because every bookless and BLOAD path relies on it.
+func TestBigBookProbeParityASMvsGo(t *testing.T) {
+	bin := loadEngine(t)
+	labels, err := ParseLabelFile(filepath.Join("..", "..", "asm", "engine.lbl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bookentry, ok := labels["bookentry"]
+	if !ok {
+		t.Fatal("bookentry label not found in engine.lbl")
+	}
+	bookpg, ok := labels["bookpg"]
+	if !ok {
+		t.Fatal("bookpg label not found in engine.lbl (the probe's base-page byte)")
+	}
+	if got := bin[bookpg-0x4000]; got != byte(BookBase>>8) {
+		t.Fatalf("engine.bin ships bookpg = $%02X, want $%02X (the resident blob's page)",
+			got, BookBase>>8)
+	}
+	bk, err := book.DefaultBigBook()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := book.DefaultBig()
+	if len(blob) != book.HeaderSize+len(bk.Entries())*book.EntryStride+2 {
+		t.Fatalf("bigbook.bin is %d B, want header + %d entries + 2-byte checksum",
+			len(blob), len(bk.Entries()))
+	}
+	if s := book.Checksum16(blob[:len(blob)-2]); blob[len(blob)-2] != byte(s) || blob[len(blob)-1] != byte(s>>8) {
+		t.Fatalf("bigbook.bin checksum trailer %02X%02X does not match the recomputed %04X",
+			blob[len(blob)-1], blob[len(blob)-2], s)
+	}
+
+	positions := enumerateBookPositions(t, bk)
+	if len(positions) < 40 {
+		t.Fatalf("enumerated only %d big-book positions", len(positions))
+	}
+	extraR := []uint32{0, 1, 255, 12345, 0x80000000, 0xFFFFFFFF}
+	probes := 0
+	for _, p := range positions {
+		pos, err := ParseFEN(p.fen)
+		if err != nil {
+			t.Fatalf("parse %q: %v", p.fen, err)
+		}
+		rs := make([]uint32, 0, int(p.total)+len(extraR))
+		for r := uint32(0); r < p.total; r++ {
+			rs = append(rs, r)
+		}
+		rs = append(rs, extraR...)
+		for _, r := range rs {
+			wantE, _, wantOK := bk.Probe(p.key, r)
+			got, err := AsmBookProbeAt(bin, defs, bookentry, bookpg, book.BigBase, blob, pos, r)
+			if err != nil {
+				t.Fatalf("asm big-book probe fen=%q r=%d: %v", p.fen, r, err)
+			}
+			probes++
+			if got.Hit != wantOK {
+				t.Fatalf("fen=%q r=%d: hit asm=%v go=%v", p.fen, r, got.Hit, wantOK)
+			}
+			if !wantOK {
+				continue
+			}
+			if got.From != wantE.From || got.To != wantE.To || got.Flags != wantE.Flags ||
+				got.NameID != wantE.NameID {
+				t.Fatalf("fen=%q r=%d: asm=(%d,%d,%d,n%d) go=(%d,%d,%d,n%d)", p.fen, r,
+					got.From, got.To, got.Flags, got.NameID,
+					wantE.From, wantE.To, wantE.Flags, wantE.NameID)
+			}
+		}
+	}
+	t.Logf("big-book parity OK at aux $%04X: %d positions, %d probes", book.BigBase, len(positions), probes)
+}
+
 // TestBookProbeOutOfBook: positions never in the book miss on the asm probe
 // (BOOKHIT=0), matching Go.
 func TestBookProbeOutOfBook(t *testing.T) {

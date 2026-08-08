@@ -84,6 +84,20 @@ BKHDR     = $03DF       ; 8 bytes ($03DF-$03E6): the blob header, from aux
 BOOK_HDR_SIZE = BOOK_ENTRIES - BOOK_BASE
 
 ; --------------------------------------------------------------------------
+; bookpg: the base PAGE the whole probe reads through — the ONE engine-image
+; change the big book needs (docs/prorwts2-design.md §3.3). Defaults to the
+; resident blob's page (aux $0800); the UI stores $40 here while its
+; BIGBOOKOK latch is open, so the identical binary search / run walk /
+; weighted pick reads the BIG BOOK in the idle transposition-table window
+; instead. Both blobs share the page-aligned base and the 8-byte header, so
+; the page byte is the entire difference. The engine never writes it, and a
+; bookless run never reads it (the probe is reached only via bookentry), so
+; every no-book tree — TestMicroAB above all — is byte-identical.
+; --------------------------------------------------------------------------
+        .export bookpg
+bookpg: .byte >BOOK_BASE
+
+; --------------------------------------------------------------------------
 ; bookentry: harness/bridge entry for a standalone probe pass. Computes the
 ; root hash exactly as the search entry does (jsr evalinit), probes the
 ; book, and reports the outcome in BOOKHIT (1 = book move in BESTFROM/TO/
@@ -291,9 +305,11 @@ selfound:
         rts
 
 ; --------------------------------------------------------------------------
-; midptr: ENTPTR = BOOK_ENTRIES + BK_MID*9 (an AUX address; mid in
-; 0..count-1, so mid*9 < 5,697 and +$0808 stays inside the blob), then copy
-; that entry into BKENT. Clobbers A,Y. Preserves BK_MID.
+; midptr: ENTPTR = (bookpg:00 + 8) + BK_MID*9 (an AUX address; mid in
+; 0..count-1, and both blobs cap count so base + 8 + mid*9 stays inside the
+; blob — 5,705 B resident, 32,761 B big), then copy that entry into BKENT.
+; The base page comes from bookpg; the header offset (+8) and the low base
+; byte (0) are common to both blobs. Clobbers A,Y. Preserves BK_MID.
 ; --------------------------------------------------------------------------
 midptr:
         lda BK_MID
@@ -313,12 +329,12 @@ midptr:
         lda ENTPTR+1
         adc BK_MID+1
         sta ENTPTR+1
-        clc                     ; + base of the entry array
-        lda ENTPTR
-        adc #<BOOK_ENTRIES
+        clc                     ; + base of the entry array: low byte is the
+        lda ENTPTR              ;  8-byte header (both blobs), high byte is
+        adc #<BOOK_ENTRIES      ;  the probe's base page
         sta ENTPTR
         lda ENTPTR+1
-        adc #>BOOK_ENTRIES
+        adc bookpg
         sta ENTPTR+1
         jmp bkfetch             ; BKENT = the entry, copied out of aux
                                 ;  (a tail call: bkfetch's rts returns to
@@ -437,11 +453,20 @@ bkf1:   lda (ENTPTR),y
         sta $C002               ; RAMRD off
         rts
 
-; bkhdr: BKHDR = the blob's 8-byte header at aux BOOK_BASE. Clobbers A,Y.
+; bkhdr: BKHDR = the blob's 8-byte header at aux bookpg:00. Clobbers A,Y —
+; and ENTPTR, which it borrows as the aux pointer. That is new (the old body
+; read the assembled-in BOOK_BASE absolute) and safe: its one caller,
+; bookprobe, calls it FIRST, before the binary search gives ENTPTR a value.
+; bookpg is read from MAIN (the engine image) BEFORE RAMRD goes on — with
+; RAMRD on, a $4xxx read would fetch the transposition table instead.
 bkhdr:
+        lda bookpg
+        sta ENTPTR+1
+        lda #0
+        sta ENTPTR
         sta $C003               ; RAMRD on
         ldy #BOOK_HDR_SIZE-1
-bkh1:   lda BOOK_BASE,y
+bkh1:   lda (ENTPTR),y
         sta BKHDR,y
         dey
         bpl bkh1

@@ -3,6 +3,101 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-07 — ADAPTATION ROUND: cheap quiet-history ORDERING is the one survivor (+19 ± 12 at asm cost); IIR/razoring/null-R/TT-replacement all DROP; history recovers LMP from −140 to +15 but does not beat standalone history
+
+The modern-technique round asked: **what ordering signal can the 6502
+afford, and what does it unlock?** Six candidate families were built in
+`internal/mirror` behind zero-value-off toggles (qhist.go, iir.go,
+razor.go, ttrepl.go), each charged its asm-realistic cycles, and screened
+at the configuration that predicted the LMP failure — **mask 0x1f
+(TT+killers+two-tier MVV, NO SEE, NO history), recap2 QS, check
+extensions on both sides, cbudget 143M** (the 30 s operating point).
+Feature-off is byte-identical to the current engine (`TestAdaptOffIsNoop`,
+and the asm↔mirror parity gates `TestSearchMirrorParity` /
+`TestBudgetModeParity` / `TestCheckExtMirrorParity` stay green).
+
+### Verdict table
+
+| technique / form | Elo ± err | asm cost charged | port bytes | verdict |
+|---|---|---|---|---|
+| **quiet-history partition, form 1 `[side][to]`, thr 8** | **+19 ± 12** (2000 g) | probe 23c, update 30c, aging 8c/byte (**0.46–0.58% of budget**) | **256 B table** + ~120 B code | **PORT** |
+| quiet-history partition, form 2 `[ptype][to]`, thr 16 | +15 ± 14 (1500 g) | same rates | 768 B table | confirmatory (form 1 wins on bytes) |
+| quiet-history LMR-gate (no partition) | +10 ± 26 (500 g) | same | — | weaker than partition alone |
+| quiet-history partition + LMR-gate | +24 ± 25 (500 g) | same | — | ≈ partition alone; LMR gate adds nothing |
+| history-gated LMP (`LMPThresh`, exempts high-history quiets) | +15 ± 25 (500 g)† | + LMP compare | — | DROP (recovers LMP, loses to partition) |
+| TT replacement (depth-pref + age bit) | +11 (500 g), promo pending | 15c/store | 0 B (spare depthBound bit 7) | BORDERLINE — promo running |
+| IIR (reduce 1 at TT-miss), rem≥4 / rem≥3 / any-window | −28 / −17 / −51 ± 25 | 10c/full-width node | ~10 B | DROP |
+| razoring, rem≤2 (300 / 400 / 200+400 margins) | −47 / −40 / −17 ± 25 | 10c/test | ~15 B | DROP |
+| adaptive null-move R (R=3 at rem≥6 / rem≥8) | −31 / −23 ± 25 | ~0 (below model res.) | ~6 B | DROP |
+| **LMP alone, 3+2d Dmax3 (control)** | **−140 ± 29** | pure count compare | — | confirms LMP dead at 0x1f |
+
+†history-gated LMP is measured vs a **no-LMP** baseline: it turns LMP's
+−140 into +15. Partition-only + LMP **without** the history exemption is
+−90 — so the exemption is real, but it still loses to standalone history
+partition (+19).
+
+### The strategic question, answered
+
+**LMP alone at 0x1f re-measured −140 ± 29** — fully consistent with the
+prior −85/−105 verdicts; the enabler was genuinely missing. **Cheap
+quiet history is a real ordering signal the 6502 can afford** (256 B, LC
+bank 1, <0.6% of the cycle budget), and it converts to **+19 ± 12** on
+its own by front-loading the quiet cutoffs (a one-pass partition, NOT a
+sort — the O(n²) selection the 6502 cannot pay). It also **unlocks LMP
+from catastrophe to neutral** (−140 → +15 when late quiets with history
+survive the count prune). But the prize the round was chasing — LMP's
++39 "potential" — **does not materialize**: history-gated LMP (+15) is
+*worse* than the standalone history ordering (+19) it rides on. The win
+is the ordering signal itself, not the pruning it was supposed to enable.
+This matches every prior compression event: the field screen (+33) was
+the usual upward fluke, and 2000 games regressed it to +19, all four
+seeds positive (+30/+15/+19/+13).
+
+Everything value-side that isn't ordering **died at asm cost**: IIR,
+razoring, and deep null-R all trade shallow-node accuracy the 0x1f search
+cannot spare, exactly as fixed-depth theory predicts for aggressive
+reductions under coarse ordering. TT depth-preferred replacement is the
+only other flicker (+11 field), promotion in flight.
+
+### Port plan (fits the 811-byte ceiling)
+
+Port **quiet-history form 1 only**: a 256-byte `[side][to]` byte table in
+**LC bank 1 $DBE8-$DFFF** (1,048 B free, zero switch cost — the table
+never competes for the 811 B main budget). Code: a saturating `CLC/ADC/
+BCS`-to-$FF bump on the quiet beta-cutoff (~30 c), an `LSR`-sweep aging
+pass in the per-root-move reset (256×~8 c ≈ 2 K c/move, negligible), and
+one extra tier-filtered rescan pass in `moveLoop` that emits quiets whose
+counter ≥ threshold before the generation-order quiets (the asm form is a
+move-stack tier-bit rewrite, like the SEE deferred pass — so the final
+quiet pass pays no second probe). Estimated **~120 B of `search.s` code**,
+well under the ceiling with the table off in main RAM. Threshold 8 is the
+screened value; the counter histogram (`TestQHistDiag`) shows ~15% of
+counters clear it mid-game, a healthy partition fraction. **Do NOT port**
+IIR, razoring, null-R, or LMP; TT replacement awaits its promotion number.
+
+**Skipped, with reasons:** *singular extensions* — needs a TT-move
+exclusion re-search per node, which doubles the search at candidate nodes;
+unaffordable at 1 MHz and the asm has no verified-exclusion path.
+*Continuation history* — a second (piece,to)×(piece,to) plane is ≥1.5 KB
+and its update is a two-key write per cutoff; the single-ply table already
+captures most of the quiet-refutation signal the countermove screen found,
+and countermove itself was neutral (+4 ± 9).
+
+Prior art: the March `task41-history-heuristic` branch (f54e84b) SPRT'd
+its `[side][ptype][to]` counting-sort at **−16 ± 30** — this form differs
+on every axis the compression story flagged: persistent + aged across
+moves (not zeroed each move), rem² bump (not linear), and an O(n)
+partition (not a 256-bucket counting sort). The partition-not-sort choice
+is the whole point: it is the only history USE the 6502 can afford, and
+it is the one that carried.
+
+Instruments: `internal/mirror/qhist.go` (+ iir/razor/ttrepl.go), CLI
+`-aqh/-aiir/-arazor/-anullr/-attrepl` with cost knobs, gates in
+`adapt_test.go` (`TestAdaptOffIsNoop`, `TestAdaptChangesTree`,
+`TestAdaptDeterminism`, `TestAdaptMateSound`, `TestQHistPartitionExhaustive`,
+`TestQHistDiag`/`TestQHistTaxDiag` behind `QHIST_DIAG=1`), run scripts
+`runs/adapt-{triage,triage2,stage2,stage3}.sh`.
+
 ## 2026-08-06 — the board is REDRAWN at 42x19, and the gate that could not fire is replaced
 
 zellyn redrew every piece. The old artwork (DazzleDraw picture **CHESS1**) was

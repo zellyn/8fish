@@ -782,6 +782,134 @@ func TestDiskPlays(t *testing.T) {
 	}
 }
 
+// TestDiskThinkingClearsInputAndBook drives the SHIPPING disk and checks the
+// moment a player actually watches: right after their move is accepted and the
+// engine starts thinking. Two things must already be gone THERE, not merely
+// after the engine has replied:
+//
+//   - the typed move on the input row (row 23 / the window's bottom row), and
+//   - the opening name on the book row (row 16 / the window's second row),
+//     once the move has taken the game OFF book.
+//
+// Both are invisible at the next keyboard-quiescent point -- uiread resets the
+// input buffer before it blocks, and the engine's own reply resets the book
+// line -- so this test STOPS INSIDE the search (RunUntilPC at uidrive, reached
+// only after the book miss and its repaint) and reads the screen there. That
+// is the only place the "clear on entering thinking" behaviour is observable.
+//
+// It also checks the book HIT half (present-when-in-book): e2e4 is answered
+// from the resident book, and the opening name must be showing before the
+// off-book move is played.
+func TestDiskThinkingClearsInputAndBook(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: boots a disk and searches")
+	}
+	dsk := dskPath(t)
+	m, err := ui.NewDiskMachine(dsk, ui.RomDir())
+	if err != nil {
+		t.Skipf("SKIP: no Apple II machine available: %v", err)
+	}
+	if ok, err := m.RunToKeyboard(600_000_000); err != nil || !ok {
+		t.Fatalf("boot: ok=%v err=%v (PC $%04X)", ok, err, m.CPU.PC())
+	}
+
+	// uidrive is the UI's search driver, entered from mesearch AFTER the book
+	// miss and the book-row repaint. Stopping there is stopping "just as the
+	// engine begins to think", with the clears already done.
+	lbl, err := ui.ParseLbl(filepath.Join(root, "asm", "m8.lbl"))
+	if err != nil {
+		t.Fatalf("reading asm/m8.lbl: %v", err)
+	}
+	uidrive, ok := lbl["uidrive"]
+	if !ok {
+		t.Fatal("asm/m8.lbl has no uidrive label: the search driver was renamed")
+	}
+
+	const keyBudget = 1_500_000_000 // ~1,470 emulated seconds
+
+	// Level 1 (fixed depth 2) keeps the search short.
+	if err := m.Enter("l", keyBudget); err != nil {
+		t.Fatalf("l: %v\n%v", err, m.Screen())
+	}
+	if err := m.Key('1', keyBudget); err != nil {
+		t.Fatalf("level 1: %v", err)
+	}
+
+	// ---- book HIT: e2e4 is answered from the book; the name must be up -----
+	if err := m.Enter("e2e4", keyBudget); err != nil {
+		t.Fatalf("typing e2e4: %v\n%v", err, m.Screen())
+	}
+	if got := m.Window().Text(1); !strings.Contains(got, "BOOK:") {
+		t.Fatalf("after the book reply the window's second row does not name the "+
+			"opening: %q\n%v", strings.TrimSpace(got), m.Window())
+	}
+	if got := m.Screen().Text(16); !strings.Contains(got, "BOOK:") {
+		t.Fatalf("after the book reply the 40-column book row (16) does not name "+
+			"the opening: %q\n%v", strings.TrimSpace(got), m.Screen())
+	}
+	t.Logf("in book: window row 1 = %q", strings.TrimSpace(m.Window().Text(1)[40:]))
+
+	// ---- book MISS: play Ke2, a legal move no opening book contains, and
+	//      stop the instant the engine begins to think ----------------------
+	//
+	// e1e2 is legal after 1.e4 whatever Black replied (e2 was vacated by the
+	// pawn and no first Black move can attack it), and it is off book, so the
+	// engine must search -- i.e. it must reach uidrive.
+	for _, c := range []byte("e1e2") {
+		if err := m.Key(c, keyBudget); err != nil {
+			t.Fatalf("typing %q of e1e2: %v\n%v", c, err, m.Screen())
+		}
+	}
+	// The RETURN is submitted WITHOUT running to the next keyboard poll: the
+	// engine will not poll until it has replied, and by then the transient
+	// thinking state is long gone. Stop at uidrive instead.
+	m.SendKey(0x0D)
+	if ok, err := m.RunUntilPC(uidrive, keyBudget); err != nil || !ok {
+		t.Fatalf("e1e2 never reached uidrive (ok=%v err=%v PC $%04X): the move was "+
+			"either rejected or answered from book\n%v", ok, err, m.CPU.PC(), m.Screen())
+	}
+
+	s := m.Screen()
+	win := m.Window()
+	t.Logf("stopped at uidrive ($%04X), engine thinking:\n%v\n%v", uidrive, s, win)
+
+	// Sanity: we really are in the thinking state, not stopped somewhere else.
+	if got := s.Text(CHKROW); !strings.Contains(got, "THINKING") {
+		t.Errorf("row %d does not show THINKING at uidrive: %q -- the stop point is "+
+			"not the thinking transition", CHKROW, strings.TrimSpace(got))
+	}
+
+	// (1) THE INPUT ECHO IS GONE, on both screens. The prompt row may show the
+	//     bare prompt and cursor, but never the move the human just typed.
+	if got := s.Text(PROMPTROW); strings.Contains(strings.ToLower(got), "e1e2") {
+		t.Errorf("40-column input row %d still echoes the played move: %q",
+			PROMPTROW, strings.TrimSpace(got))
+	}
+	if got := win.Text(3); strings.Contains(strings.ToLower(got), "e1e2") {
+		t.Errorf("the window's bottom row still echoes the played move: %q",
+			strings.TrimSpace(got))
+	}
+
+	// (2) THE BOOK LINE IS GONE, on both screens: we left book, so the stale
+	//     opening name must not ride through the whole search.
+	if got := s.Text(BOOKROW); strings.Contains(got, "BOOK:") {
+		t.Errorf("40-column book row %d still names the opening after leaving book: %q",
+			BOOKROW, strings.TrimSpace(got))
+	}
+	if got := win.Text(1); strings.Contains(got, "BOOK:") {
+		t.Errorf("the window's second row still names the opening after leaving book: %q",
+			strings.TrimSpace(got))
+	}
+}
+
+// CHKROW, BOOKROW and PROMPTROW mirror asm/ui.s's text-page layout, named here
+// so TestDiskThinkingClearsInputAndBook reads like the screen it checks.
+const (
+	CHKROW    = 13
+	BOOKROW   = 16
+	PROMPTROW = 23
+)
+
 // TestDiskQuitReboots: Q QUITS.
 //
 // On an Apple II with no resident operating system there is nowhere to quit

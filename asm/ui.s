@@ -187,7 +187,15 @@ RES_ERR    = 7
 ; No carry propagation is needed: the largest row-base low byte is
 ; $D0 (row 23) and $D0 + 39 = $F7, so base+col never leaves the
 ; base's page. Callers MUST keep X <= 47.
+;
+; uigoto0 is uigotorc at column 0 — much the most common call, so
+; the `ldx #0` lives here once instead of at fifteen call sites.
+; The UI is COLD code (it runs between moves, at human speed), so
+; a jsr that saves bytes is a win even where it costs cycles.
 ; ---------------------------------------------------------------
+uigoto0:
+        ldx #0
+        ; fall through
 uigotorc:
         tay
         txa
@@ -237,7 +245,13 @@ upsx:   rts
 ; uistatic: paint a layout table at A/X (lo/hi). Each entry is four
 ; bytes — row, column, string lo, string hi — and the table ends with
 ; row = $FF. Clobbers A, X, Y and the borrowed ZP.
+;
+; UITESTBUILD only: the shipping UI (asm/m8.s) paints every row with
+; direct uigotorc/uiputs calls and never references this routine, so
+; carrying it in the payload was 50 dead bytes of the $E000-$F6FF
+; code budget. asm/uitest.s still drives it.
 ; ---------------------------------------------------------------
+.ifdef UITESTBUILD
 uistatic:
         sta LAYPTR
         stx LAYPTR+1
@@ -269,6 +283,7 @@ ustl:   ldy UITMP
         sta UITMP
         bne ustl
 ustx:   rts
+.endif
 
 
 ; ---------------------------------------------------------------
@@ -280,8 +295,7 @@ ustx:   rts
 uicls:  ldx #23
         stx UIROW
 ucls1:  lda UIROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         ldy #39
         lda #$A0                ; normal space
 ucls2:  sta (SCRPTR),y

@@ -433,17 +433,19 @@ m8main:
         ;
         ; 80COL-off matters because ProDOS on a IIe boots into 80 columns:
         ; with the 80-column hardware live, this 40-column screen is shown
-        ; one column out of two. TEXT / NOMIX / PAGE1 are three bytes each
-        ; and remove the remaining assumptions about the state a BRUN
-        ; inherits. PAGE1 is what makes the 80STORE store above complete:
-        ; 80STORE off puts $0400-$07FF back under RAMRD/RAMWRT, PAGE1 makes
-        ; the DISPLAY read main page 1.
-        sta CLR80STORE
-        sta SET80COLOFF
-        sta SETALTCHAR
-        sta TXTSET
-        sta MIXCLR
-        sta TXTPAGE1
+        ; one column out of two. TEXT / NOMIX / PAGE1 remove the remaining
+        ; assumptions about the state a BRUN inherits. PAGE1 is what makes
+        ; the 80STORE store above complete: 80STORE off puts $0400-$07FF
+        ; back under RAMRD/RAMWRT, PAGE1 makes the DISPLAY read main page 1.
+        ;
+        ; The stores live in uidhoff, which takes the display back to
+        ; exactly this state after every board->text swap; calling it here
+        ; is 3 bytes where the unshared stores were 18. Its one addition
+        ; over the original boot list is CLRDHIRES (AN3 back high), which
+        ; is the IIe's own reset state and, in text mode, does not reach
+        ; the screen at all (DHIRES needs 80COL on) — it just removes one
+        ; more hostile-BRUN state instead of leaving it latched.
+        jsr uidhoff
         bit KBDSTROBE           ; a key held down while the disk loads is
                                 ;  latched before the UI ever polls, and
                                 ;  would arrive as the first character typed
@@ -1083,8 +1085,7 @@ usyx:   rts
 
 m8engine:
         lda #CHKROW             ; a static "thinking" marker; the live one is
-        ldx #0                  ;  the between-iterations readout on row 14
-        jsr uigotorc
+        jsr uigoto0             ;  the between-iterations readout on row 14
         lda #<s_thinking
         ldx #>s_thinking
         jsr uiputs
@@ -2250,22 +2251,19 @@ uipaint40:
         jsr uistatrow
         jsr uichkrow
         lda #THINKROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<UITHINK
         ldx #>UITHINK
         jsr uiputs
         jsr uipaintbook
         jsr uipaintmsg
         lda #HELPROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<s_help1
         ldx #>s_help1
         jsr uiputs
         lda #HELPROW+1
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<s_help2
         ldx #>s_help2
         jmp uiputs
@@ -2288,8 +2286,7 @@ uipaint40:
 ; and buys the guarantee that no future caller can forget.
 uipaintmsg:
         lda #MSGROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<UIMSGB
         ldx #>UIMSGB
         jsr uiputs
@@ -2300,8 +2297,7 @@ uipmx:  rts
 
 uipaintbook:
         lda #BOOKROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<UIBOOKB
         ldx #>UIBOOKB
         jmp uiputs
@@ -2318,8 +2314,7 @@ uiclrbook:
         lda #0
         sta UIBOOKB
         lda #BOOKROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #$A0                ; normal space
         ldy #39
 uclbl:  sta (SCRPTR),y
@@ -2334,8 +2329,7 @@ uclbx:  rts
 ; colour poked into the fixed template.
 uititle:
         lda #0
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<s_title
         ldx #>s_title
         jsr uiputs
@@ -2375,8 +2369,7 @@ usrres: lda reslo,x
         lda reshi,x
 usrput: sta UICNT2
         lda #STATROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda UITMPB
         ldx UICNT2
         jsr uiputs
@@ -2420,8 +2413,7 @@ uichkrow:
         lda UICHK
         beq ucrx
         lda #CHKROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<s_check
         ldx #>s_check
         jmp uiputs
@@ -2465,8 +2457,7 @@ uprcur: lda #$20                ; inverse space: the cursor
         sta UI80BUF,x
         ; --- the 40-column screen's row 23 ---
         lda #PROMPTROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         ldy #39
 uprc:   lda UI80BUF,y
         sta (SCRPTR),y
@@ -2556,8 +2547,7 @@ u80c:   sta UI80BUF,y
 ; source row of 21 would render the previous frame's interleave as text.
 ui80get:
         stx UITMPB
-        ldx #0
-        jsr uigotorc            ; SCRPTR = the row base, column 0
+        jsr uigoto0            ; SCRPTR = the row base, column 0
         ldy #0
         ldx UITMPB
 u80g:   lda (SCRPTR),y
@@ -2597,8 +2587,7 @@ u80px:  rts
 ; RAMRD/RAMWRT like any other address. With 80STORE on it would follow PAGE2
 ; instead and every "aux" byte would land in main, on top of the odd columns.
 ui80row:
-        ldx #0
-        jsr uigotorc            ; SCRPTR = the row base; both banks share it
+        jsr uigoto0            ; SCRPTR = the row base; both banks share it
         sta RAMWRTON            ; --- even columns: aux ---
         ldx #0
         ldy #0
@@ -2834,8 +2823,7 @@ utlterm:
         lda #0
         sta (SCRPTR),y
         lda #THINKROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<UITHINK
         ldx #>UITHINK
         jsr uiputs

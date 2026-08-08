@@ -165,6 +165,8 @@ func TestUIByteBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	code := int(lbl["__UICODE_SIZE__"])
+	data2 := int(lbl["__UIDATA2_SIZE__"])
+	data2run := int(lbl["__UIDATA2_RUN__"])
 	bootBin, err := os.ReadFile(filepath.Join(root, "asm", "m8boot.bin"))
 	if err != nil {
 		t.Fatal(err)
@@ -174,6 +176,7 @@ func TestUIByteBudget(t *testing.T) {
 		dataVars = 0x100           // $F700 page: variables + screen buffers
 		dataHist = 3 * 0x100       // UIHFROM / UIHTO / UIHFLAG
 		dataHash = 4 * 0x100       // UIHASH0-3, the game's repetition history
+		bank2Top = 0xE000          // the D2 area ends where common LC begins
 	)
 	total := code + dataVars + dataHist + dataHash
 	t.Logf("LANGUAGE CARD BUDGET ($E000-$FFEF, %d B)", lcTotal)
@@ -184,9 +187,22 @@ func TestUIByteBudget(t *testing.T) {
 	t.Logf("  TOTAL:                                        %5d B (%.0f%% of %d)",
 		total, 100*float64(total)/lcTotal, lcTotal)
 	t.Logf("  FREE:                                         %5d B", lcTotal-total)
+	t.Logf("  code-region headroom ($E000-$F6FF):           %5d B", 0x1700-code)
+	t.Logf("LC BANK 2 (UIDATA2: strings + cold tables, read via bank window):")
+	t.Logf("  resident $%04X-$%04X:                         %5d B (%d B of bank-2 room left)",
+		data2run, data2run+data2-1, data2, bank2Top-data2run-data2)
 	t.Logf("MAIN cost: %d B, transient ($0800 copier, overwritten by PIECESQ)", len(bootBin))
 	if total > lcTotal {
 		t.Errorf("UI does not fit: %d B of %d B", total, lcTotal)
+	}
+	// The BLOAD delivery contract: m8.bin (UICODE + UIDATA2, one file) is
+	// BLOADed at $0900 and must end below the resident opening book at
+	// $2000, or the BLOAD path silently truncates the book. The disk path
+	// is roomier (its staging cap is the engine at $4000; see
+	// TestDiskLedger), so this is the binding total-size ceiling.
+	if end := ui.PayloadOrg + code + data2; end > 0x2000 {
+		t.Errorf("m8.bin is %d B: BLOADed at $%04X it ends at $%04X, %d B into the "+
+			"resident opening book at $2000", code+data2, ui.PayloadOrg, end, end-0x2000)
 	}
 
 	// Component sizes, from label deltas between the top-level section
@@ -207,7 +223,7 @@ func TestUIByteBudget(t *testing.T) {
 		{"cmd_new", "commands: new/takeback/resign/draw/level/sides/quit/help"},
 		{"uipaint", "painting: title, status, prompt, messages, opening name"},
 		{"uithinkln", "think line + signed centipawn formatting"},
-		{"STSQ", "tables and strings (start position, levels, KTAB, all text)"},
+		{"promoltr", "tables kept in UICODE (promotion letters, rts-dispatch, string pointers)"},
 		{"dhclear", "asm/dhgr.s: the double-hi-res board renderer"},
 		{"TILEIDX", "generated tile dispatch tables (cmd/gentiles)"},
 	}

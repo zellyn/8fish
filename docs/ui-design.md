@@ -2037,3 +2037,133 @@ bytes of DHGR page 1 from a cold `$C600` boot), `TestDiskBoots`, the five
 `TestMicroAB` vs `microABGolden`, `TestBookProbeParityASMvsGo` (264 positions /
 4,194 probes). A decoded PNG of the board **as the shipping disk boots it** is
 written by `TestDiskBoardParity` to `$TMPDIR/8fish-disk-board.png`.
+
+---
+
+## 18. ARROW-KEY MOVE ENTRY (2026-08-08)
+
+**§5.1's "a joystick/cursor mode is a clean later addition on top of the same
+validator" is now cashed in.** The UI has a second input mode: a cursor-driven
+square picker, layered on the existing line editor, sharing every byte of its
+validation. Typed entry is unchanged, keystroke for keystroke.
+
+### 18.1 What the player gets
+
+- **The first arrow press pops a cursor** — a box drawn on a board square. It
+  starts on the **last-moved piece's destination** if a game is underway
+  (where the eye already is), else on e2. The mode announces its keys on the
+  message row (`ARROWS MOVE. SPACE SELECTS. ESC CANCELS`) — the cmd_swap
+  lesson (§16.3): a mode a single key puts you in must name itself.
+- **Arrows move it** (IIe codes: left `$08`, right `$15`, up `$0B`, down
+  `$0A`); the board edge clamps.
+- **SPACE latches the FROM square** (highlighted distinctly — see 18.2), a
+  second SPACE on the same square unlatches it (a mis-pick must not cost a
+  trip through `ILLEGAL MOVE`), and SPACE anywhere else submits from-to.
+- **ESC cancels the whole interaction** — latch and all, nothing played. With
+  no cursor up, ESC still swaps screens exactly as before.
+- **Any letter falls back to typed entry**: the cursor drops, the character
+  lands in the line editor. RETURN, DELETE and mid-line left-arrow behave
+  exactly as they always did; an arrow can only pop the cursor at an *empty*
+  prompt, which was the one state it used to be a no-op in.
+
+### 18.2 One validator, two highlights
+
+A selection is **synthesized into `UIBUF` as the 4-character typed line**
+(`cursq2buf`, the inverse of `upsq`) and submitted through `uidispatch` — so
+`uifind`/`uitrylegal`/`uiapply` validate and play it, a missing promotion
+piece routes through the existing `uiaskpromo` prompt, and an illegal from/to
+gets the existing `m_illegal` message **with the cursor kept for another
+try**. The cursor contains zero chess rules.
+
+The DHGR renderer grew the one thing it lacked — a highlight path — as three
+small primitives in `asm/dhgr.s`:
+
+- `dhsetsq` (A = square → `DHCOL`/`DHROWI`) plus `dhsq1`, the per-square body
+  factored out of `dhboard`, make **one square** repaintable: a cursor step
+  re-blits exactly two squares (~6 ms) instead of the 190 ms whole-board
+  repaint, which would be visible lag on every arrow press. `dhboard` itself
+  now just loops over `dhsq1` — full repaints re-derive everything, as ever.
+- **The latched FROM square is painted in its opposite shade** (`DHFLIP`):
+  the artwork already carries every piece on both square colours, so a
+  "video-inverted" square is simply the other tile over the other background
+  — dramatic, and nearly free (a one-byte EOR in `dhsq1`'s shade test).
+- **The cursor is a contrast box** (`dhcursor`): two-scanline rules top and
+  bottom, two-dot bars down the sides, **dark on a light square, lit on a
+  dark one**, keyed off the *displayed* shade so it stays contrast-correct on
+  a flipped (latched) square. The side bars live in byte columns 0 and 5 —
+  pure background in every tile — so the box only ever covers piece pixels in
+  its top/bottom rules. Trade-off, measured on screen: on dark squares the
+  box is a bright white frame; on a light square it is a dark inset frame,
+  which reads as "this square is framed/shrunken" — clear in motion, subtler
+  than the dark-square case. If it ever bothers a player, a two-tone box
+  (dark outline + lit inline) costs ~30 B more.
+
+The 40-column text board (one ESC away) carries the same states for a few
+bytes: the cursor cell flips to its opposite video shade, the latch adds a
+`*` in the blank half-cell. Full repaints stay byte-identical to what they
+always painted whenever the cursor is down: both board loops paint plain and
+`uipaint` overlays the highlights afterwards (`uicursor`), so every existing
+screen gate still gates the same bytes.
+
+### 18.3 What it cost, and the tripwire it fired
+
+**658 B of UICODE** (measured, `TestUIByteBudget`): 440 B for the input
+machine and the two-screen square painter (`curpop`…`uicursor`), 157 B in
+`asm/dhgr.s` (`dhsetsq`/`dhcursor`/the `dhsq1` refactor), and ~60 B of
+dispatch/retirement touches. Plus 40 B of bank-2 string (`m_cursor`) and five
+bytes of `$F700`-page state (`CURACT`/`CURSQ`/`CURFROM`/`DHFLIP`/`CURTSQ`).
+UICODE headroom: 1,075 B → **417 B**.
+
+That growth fired `TestUIByteBudget`'s BLOAD tripwire — `m8.bin` staged at
+`$0900` now ends at `$226C`, 620 B past the `$2000` line where a pre-BLOADed
+opening book stages — which is the decision the tripwire exists to force,
+and the call went to the disk:
+
+- **The shipping disk is unaffected**, by construction: its chain load has
+  always lifted the payload to `$E000` *before* stage 2 lands the book at
+  `$2000` (§13), so the two use that RAM at different times. Ledger: stage 1
+  is now 152/176 sectors (was 148), the staged payload ends at `$27FF`,
+  6,144 B below the engine.
+- **BLOAD-with-a-book-preloaded is retired.** It was a dev convenience; an
+  on-device BLOAD user simply has no resident book (the probe misses
+  cleanly, and the machine plays on). The harness's `Machine.stageBook` now
+  reproduces the disk's ordering — run the copier to `$E000`, then land the
+  book — so every harness gate rehearses the sequence the disk actually
+  performs, rather than one no delivery uses.
+- The tripwire was **re-aimed, not deleted**: the BLOAD ceiling that still
+  binds is the engine at `$4000`, and the test asserts it (and logs the
+  distance past `$2000` so the retirement stays a visible fact).
+
+### 18.4 Gates
+
+All driven through the **shipping disk** (`NewDiskMachine`, cold `$C600`
+boot, modelled IIe keyboard), with the highlight asserted the way
+`TestDiskBoardParity` reads the board — all 16,384 DHGR bytes against an
+independent Go model of the overlays (`cursor_test.go`):
+
+- `TestDiskCursorAppearsAndMoves` — first arrow pops the box on e2,
+  byte-identical to model; arrows move it; the edge clamps; the announcement
+  is on both screens.
+- `TestDiskCursorPlaysMove` — SPACE-SPACE plays e2e4; mid-selection state
+  (latch flipped, box on the destination) byte-identical to model; board
+  changed and matches; move panel agrees; the next pop starts on e4.
+- `TestDiskCursorIllegalKeepsCursor` — a1a3 → `ILLEGAL MOVE`, nothing
+  played, the cursor survives on a3, latch cleared.
+- `TestDiskCursorEscapeCancels` — ESC mid-selection: nothing played, board
+  byte-identical to plain, announcement down; ESC still swaps screens after;
+  typed entry plays.
+- `TestDiskCursorTypedFallback` — a letter drops the cursor and the typed
+  move plays.
+- `TestDiskCursorPromotion` — a cursor-picked a7xb8 routes through
+  `uiaskpromo` (`PROMOTE TO` asserted) and delivers the queen.
+- `TestDiskCursorTextScreen` — the 40-column board flips the cell, stars the
+  latch, restores on cancel.
+- Everything that already existed: `TestDiskBoots`, `TestDiskBoardParity`,
+  `TestDiskPlays`, `TestDiskEscapeSwapsScreens`, the shipping screen-parity
+  pair, the ponder gates, `TestBank2DataResident`,
+  `TestBookNameRestoresBank1`, the videoscan gates — green, unchanged.
+  `engine.bin` untouched (md5 `7ddc6a22…`).
+
+Screenshots: `TestDiskCursorScreenshots` writes
+`$TMPDIR/8fish-cursor.png` (the box on e2) and
+`$TMPDIR/8fish-cursor-latched.png` (e2 latched/flipped, box on e4).

@@ -96,12 +96,14 @@ dhblnk    = DHROWH + 152
 ;   m8sd.cfg           copier $0C00, payload $0D00   (Standard Delivery disk;
 ;                                                     see cmd/mkdsk)
 ;
-; For the BLOAD layout, $0900-$1FFF is 5,888 bytes of engine RAM (the per-ply
-; undo/search arrays, then MOVESTACK) that holds nothing but garbage until the
-; first search — and 5,888 is exactly the code budget m8.cfg caps the UI at,
-; so the payload can never grow into the resident opening book at $2000. The
-; disk layout has less staging room than code budget, which is why
-; internal/ui's TestDiskLedger asserts the payload still ends below $2000.
+; Both staging areas are engine RAM (the per-ply undo/search arrays, then
+; MOVESTACK) that holds nothing but garbage until the first search. Since
+; 2026-08-08 the staged payload may legally run PAST $2000: the disk's chain
+; load lifts it to $E000 before stage 2 lands the opening book there, and
+; the BLOAD path simply no longer supports pre-loading a book at $2000 (a
+; dev convenience, deliberately retired — see internal/ui TestUIByteBudget
+; and docs/ui-design.md §18). The ceiling that binds both stagings is the
+; ENGINE at $4000 (TestDiskLedger / TestUIByteBudget price it).
         .import UIPAYLOAD
 
 ; Levels 1-4 are fixed depth (BUDGET = 0, the period-honest "search N plies"
@@ -800,6 +802,9 @@ m8new:  jsr uistartpos
         sta UITHINK
         sta UILSC0
         sta UILSC1
+        sta CURACT              ; no cursor survives into a new game
+        lda #NOSQ
+        sta CURFROM
         jmp uipushhash          ; the start position is hash-history entry 0
 
 ; uipushhash: record HASH0-3 as the hash of the position before ply UIHCNT.
@@ -1772,22 +1777,56 @@ pprsp:  lda PPPIECE,y
 ; accumulator — that collector is the shipped engine's only source of
 ; randomness on a machine with no clock, and a plain keyboard poll here
 ; would silently destroy it.
+;
+; ★ TWO INPUT MODES, ONE READER (docs/ui-design.md §18). Typed entry is
+; unchanged: letters compose a line, RETURN submits it, left-arrow/DELETE
+; backspace, ESC swaps screens. The ARROW-KEY CURSOR is layered on top with
+; three rules that keep the modes from ever fighting:
+;
+;   1. an arrow at an EMPTY prompt pops the cursor (curpop) — the only state
+;      an arrow used to be a no-op in. Mid-line, left-arrow keeps its
+;      backspace meaning and the other arrows stay ignored, exactly as
+;      before, so typing works keystroke-for-keystroke as it always did.
+;   2. while the cursor is up, SPACE selects (from, then to — urdsel), ESC
+;      cancels the whole interaction, and the arrows move the cursor.
+;      Everything else the cursor submits goes through uidispatch as a
+;      synthesized typed line, so there is ONE validator and one promotion
+;      prompt (uiaskpromo) for both modes.
+;   3. a typeable character falls back to typed entry: the cursor is
+;      dropped first (curoff), then the character is handled exactly as if
+;      the cursor had never been up.
 uiread: lda #0
         sta UIBLEN
 urdl:   jsr uiprompt
         jsr entkey
         cmp #$0D                ; RETURN
         beq urdx
-        cmp #$08                ; left arrow
-        beq urdbs
-        cmp #$7F                ; DELETE
-        beq urdbs
-        cmp #$1B                ; ESC: swap board screen <-> text screen
+        cmp #$1B                ; ESC: cancel the cursor, or swap screens
         beq urdesc
-        cmp #$20
+        cmp #$7F                ; DELETE: always a backspace
+        beq urdbs
+        cmp #$08                ; the four arrows (IIe key codes)
+        beq urdlft
+        cmp #$15
+        beq urdrgt
+        cmp #$0B
+        beq urdup
+        cmp #$0A
+        beq urddn
+        ldx CURACT
+        beq urdch
+        cmp #$20                ; SPACE while the cursor is up: select
+        bne urdch
+        jmp urdsel
+urdch:  cmp #$20
         bcc urdl                ; other control keys: ignore
         cmp #$7B
         bcs urdl
+        pha                     ; a typeable character falls back to TYPED
+        lda CURACT              ;  entry: drop the cursor first, so the two
+        beq urdch2              ;  modes never show on the board at once
+        jsr curoff
+urdch2: pla
         jsr uilower
         ldx UIBLEN
         cpx #UIBUFMAX
@@ -1799,9 +1838,269 @@ urdbs:  lda UIBLEN
         beq urdl
         dec UIBLEN
         jmp urdl
-urdesc: jsr uiswap
+urdesc: lda CURACT
+        bne urdcan
+        jsr uiswap              ; no cursor: ESC swaps the screens, as ever
         jmp urdl
+urdcan: jsr curoff              ; ESC cancels the WHOLE cursor interaction —
+        jmp urdl                ;  latch and all — and nothing is played
 urdx:   rts
+
+; ---- the four arrows: Y = the 0x88 step ----
+urdlft: lda CURACT
+        bne urdlf2
+        lda UIBLEN              ; no cursor: left-arrow keeps its backspace
+        bne urdbs               ;  meaning while the line has characters
+urdlf2: ldy #$FF                ; file - 1
+        bne urdarr              ; always: Y is never zero here
+urdrgt: ldy #$01                ; file + 1
+        bne urdarr
+urdup:  ldy #$10                ; rank + 1 (toward rank 8, the top row)
+        bne urdarr
+urddn:  ldy #$F0                ; rank - 1
+        ; fall through
+urdarr: lda CURACT
+        bne urdmv
+        lda UIBLEN              ; an arrow mid-line stays ignored, exactly
+        bne urdlj               ;  as before...
+        jmp curpop              ; ...and pops the cursor at an empty prompt
+urdmv:  tya
+        clc
+        adc CURSQ
+        sta UITMPB
+        and #$88                ; stepped off the 0x88 board: stay put
+        bne urdlj
+        lda CURSQ
+        pha
+        lda UITMPB
+        sta CURSQ
+        pla
+        jsr cursqdraw           ; repaint the square the cursor left...
+        lda CURSQ
+        jsr cursqdraw           ; ...and highlight the new one
+urdlj:  jmp urdl
+
+; SPACE while the cursor is up. The first press LATCHES the from square, a
+; second press on the same square unlatches it (a mis-pick must not force a
+; trip through ILLEGAL MOVE), and a press anywhere else submits from-to as a
+; synthesized typed line — uidispatch validates and plays it, so the cursor
+; never grows its own move logic. The latch is consumed either way; the
+; CURSOR itself stays up, so a rejected move keeps it for another try
+; (uidispatch's m_illegal path repaints it via uipaint's uicursor hook).
+urdsel: lda CURFROM
+        cmp #NOSQ
+        beq urlat
+        cmp CURSQ
+        bne urgo
+        lda #NOSQ               ; SPACE on the latched square: unlatch
+        sta CURFROM
+        lda CURSQ
+        jsr cursqdraw
+        jmp urdl
+urlat:  lda CURSQ               ; latch FROM and highlight it
+        sta CURFROM
+        jsr cursqdraw
+        jmp urdl
+urgo:   lda CURFROM
+        ldx #0
+        jsr cursq2buf
+        lda CURSQ
+        jsr cursq2buf
+        lda #4
+        sta UIBLEN
+        lda #NOSQ
+        sta CURFROM
+        rts                     ; submit: the caller runs uidispatch on it
+
+; curpop: the first arrow press — pop the cursor onto the board. It starts
+; on the LAST-MOVED PIECE'S DESTINATION square if a game is underway (that
+; is where the eye already is), else on e2. The mode announces itself on the
+; message row — the S-key lesson (§16.3): a mode a key puts you in must say
+; so, or it cannot be discovered from the keyboard.
+curpop: lda #1
+        sta CURACT
+        lda #NOSQ
+        sta CURFROM
+        lda #$14                ; e2, before any move has been played
+        ldx UIHCNT
+        beq curpp
+        dex
+        lda UIHTO,x             ; the last-moved piece's destination
+curpp:  sta CURSQ
+        jsr cursqdraw           ; A = CURSQ (sta preserves A)
+        lda #<m_cursor
+        ldx #>m_cursor
+        jsr uisetmsg
+        jsr uipaintmsg
+        jmp urdl
+
+; curoff: the cursor interaction is over (ESC, or a typed character taking
+; back the keyboard): drop the latch and the cursor, erase both highlights,
+; and take the mode announcement down with the mode. Clobbers A, X, Y.
+curoff: lda #0
+        sta CURACT
+        jsr uiclrmsg
+        lda #MSGROW             ; blank the announcement NOW: no full repaint
+        jsr uigoto0             ;  runs between here and the next keystroke
+        ldy #39
+        lda #$A0
+curof1: sta (SCRPTR),y
+        dey
+        bpl curof1
+        lda UIDHGR
+        beq curof2
+        jsr ui80msg             ; ...and the window's third row with it
+curof2: ldx CURFROM
+        lda #NOSQ
+        sta CURFROM
+        cpx #NOSQ
+        beq curof3
+        txa
+        jsr cursqdraw           ; erase the latch highlight
+curof3: lda CURSQ
+        jmp cursqdraw           ; erase the cursor highlight
+
+; cursq2buf: A = 0x88 square -> two typed-entry characters ("e2") at
+; UIBUF,x, advancing X by 2. The inverse of upsq, so a cursor selection is
+; EXACTLY a typed line by the time uidispatch sees it.
+cursq2buf:
+        pha
+        and #$0F
+        clc
+        adc #'a'
+        sta UIBUF,x
+        inx
+        pla
+        lsr
+        lsr
+        lsr
+        lsr
+        clc
+        adc #'1'
+        sta UIBUF,x
+        inx
+        rts
+
+; ---------------------------------------------------------------------------
+; cursqdraw: repaint ONE square (A = 0x88) on both screens, applying
+; whatever highlight it carries:
+;
+;   the CURSOR      text: the cell in its OPPOSITE video shade
+;                   board: dhcursor's contrast box over the square
+;   latched FROM    text: opposite shade AND '*' in the blank half-cell
+;                   board: the square painted in its opposite shade (the
+;                          artwork carries every piece on both shades, so
+;                          dhsq1's DHFLIP flip is free)
+;
+; With CURACT clear it repaints the square PLAIN, which is how highlights
+; are erased — one routine, called for every square that changes state, on
+; both screens, so the two can never disagree about where the cursor is.
+; The 40-column cell is always painted (that screen is always kept current);
+; the DHGR square only when the board is up. Clobbers A, X, Y, UITMPB and
+; the renderers' borrowed ZP.
+; ---------------------------------------------------------------------------
+cursqdraw:
+        sta CURTSQ
+        ; --- the square's natural shade, as PIECECH's dark bit ($10): dark
+        ; iff rank and file agree in parity (dhsq1's own test) ---
+        lsr
+        lsr
+        lsr
+        lsr
+        eor CURTSQ
+        and #1
+        eor #1
+        asl
+        asl
+        asl
+        asl
+        sta UITMPB
+        ; --- flip it under the cursor or the latch ---
+        lda CURACT
+        beq csqsh
+        lda CURTSQ
+        cmp CURSQ
+        beq csqfl
+        cmp CURFROM
+        bne csqsh
+csqfl:  lda UITMPB
+        eor #$10
+        sta UITMPB
+csqsh:
+        ; --- the 40-column cell ---
+        lda CURTSQ
+        and #$07
+        asl                     ; two characters per cell (C clear: file <= 7)
+        adc #BRDCOL
+        tax
+        lda CURTSQ
+        lsr
+        lsr
+        lsr
+        lsr
+        eor #$07                ; 7 - rank: rank 8 is the top row
+        clc
+        adc #BRDROW0
+        jsr uigotorc
+        ldx CURTSQ
+        lda BOARD,x             ; zp,x: BOARD = $40, sq <= $77
+        and #$0F
+        ora UITMPB
+        tax
+        lda PIECECH,x
+        ldy #0
+        sta (SCRPTR),y
+        ldy #1
+        ldx UITMPB
+        lda PIECECH,x           ; the blank half-cell, same shade
+        sta (SCRPTR),y
+        lda CURTSQ              ; ...or the latch marker. No CURACT gate
+        cmp CURFROM             ;  needed: CURFROM is NOSQ ($FF) whenever no
+        bne csqdh               ;  latch exists, and no 0x88 square is $FF
+        lda #'*'|$80
+        ldx UITMPB
+        beq csqst
+        lda #'*'&$3F            ; inverse '*' on a dark cell
+csqst:  sta (SCRPTR),y
+csqdh:
+        ; --- the DHGR square, when the board is up ---
+        lda UIDHGR
+        beq csqx
+        lda CURTSQ
+        jsr dhsetsq
+        ldx #0
+        lda CURTSQ
+        cmp CURFROM
+        bne csqnf
+        inx                     ; the latch paints in the opposite shade
+csqnf:  stx DHFLIP
+        jsr dhsq1
+        ldx #0
+        stx DHFLIP              ; never leave the flip latched
+        lda CURACT
+        beq csqx
+        lda CURTSQ
+        cmp CURSQ
+        bne csqx
+        jsr dhcursor            ; the box, over whatever shade dhsq1 painted
+csqx:   rts
+
+; uicursor: re-apply the cursor highlights after a FULL board repaint
+; (uipaint calls it after dhboard/uiboard have painted every square plain).
+; Painting plain-then-overlay, rather than teaching the board loops about
+; the cursor, keeps both full repaints byte-identical to what they always
+; painted whenever the cursor is down — which is every state the existing
+; screen gates assert.
+uicursor:
+        lda CURACT
+        beq uicux
+        lda CURFROM
+        cmp #NOSQ
+        beq uicuc
+        jsr cursqdraw
+uicuc:  lda CURSQ
+        jmp cursqdraw
+uicux:  rts
 
 ; ---------------------------------------------------------------------------
 ; uiswap / uidhon / uidhoff: the board ships in MIXED MODE -- the double-hi-res
@@ -1967,7 +2266,11 @@ udpmove:
         jsr uiapply
         lda #0                  ; the human's move is played; drop its echo so
         sta UIBLEN              ;  the prompt row is clean the instant the
-        jmp uiclrmsg            ;  engine takes over, not after it replies
+        sta CURACT              ;  engine takes over, not after it replies.
+                                ;  A played move also RETIRES the cursor: the
+                                ;  next arrow press pops it afresh on the new
+                                ;  last-moved destination (curpop)
+        jmp uiclrmsg
 udpill: lda #<m_illegal
         ldx #>m_illegal
         jmp uisetmsg
@@ -2279,10 +2582,12 @@ uipaint:
         lda UIDHGR
         beq uipx
         jsr dhboard
+        jsr uicursor            ; the arrow-cursor highlights go OVER the
+                                ;  plain repaint (see uicursor)
         jmp uidhtext            ; ...and the text window, whose MAIN half
                                 ;  uipaint40 has just overwritten with rows
                                 ;  20-23 of the 40-column screen
-uipx:   rts
+uipx:   jmp uicursor            ; text screen only: same overlay, 40 columns
 
 uipaint40:
         jsr uicls
@@ -3116,6 +3421,10 @@ m_needsiie: SCRSTR "8FISH NEEDS A 128K APPLE IIE"
 m_sidew:    SCRSTR "YOU PLAY WHITE. S NEXT: TWO PLAYERS"
 m_sideb:    SCRSTR "YOU PLAY BLACK. S NEXT: YOU PLAY WHITE"
 m_side2:    SCRSTR "TWO PLAYERS. S NEXT: YOU PLAY BLACK"
+; The arrow-cursor's announcement (curpop): the mode names its keys the
+; moment it appears — the same discoverability rule cmd_swap learned the
+; hard way (§16.3). 39 characters is the message row's limit (uisetmsg).
+m_cursor:   SCRSTR "ARROWS MOVE. SPACE SELECTS. ESC CANCELS"
 
         .segment "UICODE"
 

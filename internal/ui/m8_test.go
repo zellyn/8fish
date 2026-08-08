@@ -195,14 +195,27 @@ func TestUIByteBudget(t *testing.T) {
 	if total > lcTotal {
 		t.Errorf("UI does not fit: %d B of %d B", total, lcTotal)
 	}
-	// The BLOAD delivery contract: m8.bin (UICODE + UIDATA2, one file) is
-	// BLOADed at $0900 and must end below the resident opening book at
-	// $2000, or the BLOAD path silently truncates the book. The disk path
-	// is roomier (its staging cap is the engine at $4000; see
-	// TestDiskLedger), so this is the binding total-size ceiling.
-	if end := ui.PayloadOrg + code + data2; end > 0x2000 {
+	// THE BLOAD CONTRACT, revised 2026-08-08. m8.bin (UICODE + UIDATA2, one
+	// file) BLOADs at $0900; it used to be required to end below $2000, where
+	// a pre-BLOADed opening book stages, and the arrow-key cursor entry blew
+	// that ceiling (the tripwire fired, as it was built to). The DELIBERATE
+	// call, priced in docs/ui-design.md §18: the SHIPPING PATH IS THE DISK,
+	// whose two-stage chain load lifts the payload to $E000 BEFORE stage 2
+	// lands the book at $2000 — the disk never depended on this ceiling and
+	// is unaffected (TestDiskLedger prices it; its staging cap is the
+	// engine). What is retired is BLOAD-with-a-book-preloaded, a dev
+	// convenience: the harness now stages the book after the copier runs,
+	// mirroring the disk's ordering (Machine.stageBook), and an on-device
+	// BLOAD user simply has no resident book (the probe misses cleanly).
+	// The ceiling that still binds a BLOAD is the ENGINE at $4000.
+	if end := ui.PayloadOrg + code + data2; end > ui.EngineOrg {
 		t.Errorf("m8.bin is %d B: BLOADed at $%04X it ends at $%04X, %d B into the "+
-			"resident opening book at $2000", code+data2, ui.PayloadOrg, end, end-0x2000)
+			"engine image at $%04X", code+data2, ui.PayloadOrg, end,
+			end-ui.EngineOrg, ui.EngineOrg)
+	} else if end > 0x2000 {
+		t.Logf("m8.bin BLOADs $%04X-$%04X: %d B past the old book-staging ceiling at "+
+			"$2000 (BLOAD-with-book retired 2026-08-08; the disk is the shipping path)",
+			ui.PayloadOrg, end-1, end-0x2000)
 	}
 
 	// Component sizes, from label deltas between the top-level section
@@ -219,7 +232,9 @@ func TestUIByteBudget(t *testing.T) {
 		{"m8engine", "the engine's turn: entropy seed, book probe, apply"},
 		{"uilimits", "level table + the FT2_SOFTCLK safety-margin rule"},
 		{"uidrive", "the UI's own iterative-deepening driver"},
-		{"uiread", "line editor, move parsing, promotion prompt"},
+		{"uiread", "line editor (typed entry)"},
+		{"urdlft", "arrow-key cursor entry: arrows, select, highlights on both screens"},
+		{"uiswap", "screen swap, command dispatch, move parsing, promotion prompt"},
 		{"cmd_new", "commands: new/takeback/resign/draw/level/sides/quit/help"},
 		{"uipaint", "painting: title, status, prompt, messages, opening name"},
 		{"uithinkln", "think line + signed centipawn formatting"},

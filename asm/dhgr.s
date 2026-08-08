@@ -84,6 +84,17 @@ DHA2      = PSP0+1      ;  RAMWRT flip
 DHM0      = PSP1
 DHM1      = PSP1+1
 
+; DHFLIP: $01 = paint the NEXT dhsq1 square in its OPPOSITE shade (the same
+; artwork carries every piece on both square colours, so a "video-inverted"
+; square is just the other tile over the other background). It is how the
+; arrow-cursor's latched FROM square is highlighted (asm/m8.s cursqdraw).
+; NOT borrowed zero page: it must survive across dhsetsq/dhsq1 calls, so it
+; is one byte of the UI's $F700 variable page. A RAW address, not an
+; M8VARS+$xx equate, because dhgr.s also links standalone under
+; asm/dhgrtest.s, which does not include asm/ui.s; ui.s's variable map
+; accounts for $F7B9 by name so the two cannot collide silently.
+DHFLIP    = $F7B9
+
 ; --------------------------------------------------------------------------
 ; dhclear: blank DHGR page 1 in BOTH banks -- 16,384 bytes, once, before the
 ; screen is ever shown.
@@ -204,9 +215,17 @@ dhq40:  .byte 0, 40, 80
 ; A whole-board repaint every move (rather than incremental updates) is the
 ; discipline the 40-column renderer already uses, and for the same reason: at
 ; a fraction of a percent of one move's thinking time it is far too cheap to
-; be worth a bug class.
+; be worth a bug class. (The arrow-key cursor is the one thing that repaints
+; NARROWER than this: a cursor step re-blits exactly two squares through
+; dhsetsq/dhsq1 below, because 190 ms of full repaint per arrow press is
+; visible lag where 6 ms is not. Correctness is unaffected: every full
+; repaint still goes through here and re-derives everything.)
 ; --------------------------------------------------------------------------
 dhboard:
+        lda #0
+        sta DHFLIP              ; a full repaint paints every square in its
+                                ;  own shade; the flip is per-call state and
+                                ;  m8.s reapplies its highlights afterwards
         lda #$70                ; 0x88 square of a8 — rank 8 is the top row
         sta DHSQ
         lda #0
@@ -215,6 +234,41 @@ dhrank:
         lda #DHCOL0
         sta DHCOL
 dhfile:
+        jsr dhsq1
+        ; --- next file ---
+        clc
+        lda DHCOL
+        adc #3
+        sta DHCOL
+        inc DHSQ
+        lda DHSQ
+        and #$07
+        bne dhfile              ; 8 files done?
+        ; --- next rank (0x88: down one rank is -$10; we are +8 into this
+        ; one, so step back $18) ---
+        clc
+        lda DHROWI
+        adc #DHROWS
+        sta DHROWI
+        cmp #DHBOARDH
+        bcs dhdone
+        lda DHSQ
+        sec
+        sbc #$18
+        sta DHSQ
+        jmp dhrank
+dhdone:
+        rts
+
+; --------------------------------------------------------------------------
+; dhsq1: paint ONE square. In: DHSQ (0x88 square), DHCOL (its first byte
+; column) and DHROWI (its first board-scanline index) — either maintained
+; incrementally by dhboard's loop or computed from the square by dhsetsq.
+; DHFLIP = $01 paints the square in its OPPOSITE shade (see its comment).
+; Out: DHDARK/DHBGA/DHBGM describe the shade actually painted, which is the
+; precondition dhcursor documents. Clobbers A, X, Y and the borrowed ZP.
+; --------------------------------------------------------------------------
+dhsq1:
         ; --- square colour: dark iff (rank88 + file) is even ---
         lda DHSQ
         lsr
@@ -223,6 +277,7 @@ dhfile:
         lsr                     ; rank88
         eor DHSQ                ; bit0 = parity(rank88) ^ parity(file)
         and #1
+        eor DHFLIP              ; $01: the highlighted square swaps shades
         beq dhdk
         lda #$00                ; odd sum => LIGHT
         sta DHDARK
@@ -331,31 +386,111 @@ dhrow:
 dhr2:   inx
         cpx DHTMP
         bne dhrow
+        rts
 
-        ; --- next file ---
-        clc
-        lda DHCOL
-        adc #3
-        sta DHCOL
-        inc DHSQ
-        lda DHSQ
-        and #$07
-        beq dhnrank             ; 8 files done
-        jmp dhfile              ; (out of branch range)
-dhnrank:
-
-        ; --- next rank (0x88: down one rank is -$10; we are +8 into this
-        ; one, so step back $18) ---
-        clc
-        lda DHROWI
-        adc #DHROWS
-        sta DHROWI
-        cmp #DHBOARDH
-        bcs dhdone
-        lda DHSQ
-        sec
-        sbc #$18
+; --------------------------------------------------------------------------
+; dhsetsq: A = 0x88 square -> DHSQ, DHCOL, DHROWI, so dhsq1 (and dhcursor)
+; can address ONE square without walking the board. Clobbers A, Y, DHTMP.
+; --------------------------------------------------------------------------
+dhsetsq:
         sta DHSQ
-        jmp dhrank
-dhdone:
+        and #$07                ; file
+        sta DHTMP
+        asl                     ; 2*file (file <= 7, so C is clear)
+        adc DHTMP               ; 3*file: a square is 3 byte columns per bank
+        adc #DHCOL0
+        sta DHCOL
+        lda DHSQ
+        lsr
+        lsr
+        lsr
+        lsr                     ; rank88 0..7
+        tay
+        lda dhrkrow,y
+        sta DHROWI
+        rts
+
+; First board-scanline index of each 0x88 rank: rank 8 (index 7) is the TOP
+; row of the screen, so the table is (7 - rank) * DHROWS.
+dhrkrow:
+        .repeat 8, I
+        .byte (7-I)*DHROWS
+        .endrepeat
+
+; --------------------------------------------------------------------------
+; dhcursor: draw the arrow-cursor's box on the square dhsq1 JUST painted — a
+; two-scanline rule along the top and bottom and a two-dot bar down each
+; side, in the CONTRAST colour (dark on a light square, lit on a dark one),
+; so it is equally visible on both shades and over any piece.
+;
+; PRECONDITION: dhsq1 has run for this square, so DHCOL/DHROWI address it
+; and DHDARK is the shade actually on screen (including a DHFLIP swap) — the
+; box's contrast colour keys off the DISPLAYED shade, not the natural one.
+;
+; The side bars live in byte columns 0 (aux) and 5 (main), which are pure
+; background in every tile (that fact is what lets the blob store only four
+; of six columns), so the box never overwrites piece pixels except in its
+; top and bottom rules. Clobbers A, X, Y, DHPTR and DHA1/DHA2/DHM0.
+; --------------------------------------------------------------------------
+DHCURTH = 2             ; rule thickness in scanlines / bar width in dots
+dhcursor:
+        lda DHDARK
+        beq dhcul
+        lda #$7F                ; dark square: a LIT box
+        sta DHA1                ;   full rule byte (all 7 dots)
+        lda #$03
+        sta DHA2                ;   left bar: aux bits 0-1 over bg $00
+        lda #$60
+        sta DHM0                ;   right bar: main bits 5-6 over bg $00
+        bne dhcug               ; always ($60 is nonzero)
+dhcul:  lda #$00                ; light square: a DARK box
+        sta DHA1                ;   full rule byte (all 7 dots dark)
+        lda #DHBGL_A & $7C
+        sta DHA2                ;   left bar: dither with bits 0-1 cleared
+        lda #DHBGL_M & $1F
+        sta DHM0                ;   right bar: dither with bits 5-6 cleared
+dhcug:  ldx #0                  ; row 0..DHROWS-1 within the square
+dhcrow: txa
+        clc
+        adc DHROWI
+        tay
+        lda DHROWL,y
+        sta DHPTR
+        lda DHROWH,y
+        sta DHPTR+1
+        cpx #DHCURTH
+        bcc dhcfull             ; the top rule
+        cpx #DHROWS-DHCURTH
+        bcs dhcfull             ; the bottom rule
+        sta DHRAMWRTON          ; --- side bars only: aux col 0... ---
+        ldy DHCOL
+        lda DHA2
+        sta (DHPTR),y
+        sta DHRAMWRTOFF         ; --- ...and main col 2 ---
+        ldy DHCOL
+        iny
+        iny
+        lda DHM0
+        sta (DHPTR),y
+        jmp dhcnxt
+dhcfull:
+        sta DHRAMWRTON          ; --- a full rule: all three aux bytes... ---
+        ldy DHCOL
+        lda DHA1
+        sta (DHPTR),y
+        iny
+        sta (DHPTR),y
+        iny
+        sta (DHPTR),y
+        sta DHRAMWRTOFF         ; --- ...and all three main bytes ---
+        ldy DHCOL
+        lda DHA1
+        sta (DHPTR),y
+        iny
+        sta (DHPTR),y
+        iny
+        sta (DHPTR),y
+dhcnxt: inx
+        cpx #DHROWS
+        bne dhcrow
         rts

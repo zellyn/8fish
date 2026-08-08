@@ -53,6 +53,33 @@ type PlayerCfg struct {
 	// in CycleBudget mode. Zeros leave it untaxed (node-budget behavior).
 	SEECosts [3]float64
 
+	// QHist enables the cheap quiet-history heuristic (zero value = off).
+	// Pair it with QHistCosts {probe, update, age-per-byte} so cycle-
+	// budgeted screens pay its real per-operation 6502 tax (qhist.go).
+	QHist      QHistParams
+	QHistCosts [3]float64
+
+	// IIR enables internal iterative reduction (zero value = off). IIRCost
+	// is the per-full-width-node test cost charged in CycleBudget mode.
+	IIR     IIRParams
+	IIRCost float64
+
+	// Razor enables razoring at remaining 1-2 (zero value = off).
+	// RazorCost is the per-test cost charged in CycleBudget mode.
+	Razor     RazorParams
+	RazorCost float64
+
+	// NullR enables the adaptive null-move reduction (zero value = the
+	// shipped fixed R=2). Its 6502 cost — one CMP choosing a constant in
+	// the null prep — is below the cost model's resolution; no knob.
+	NullR NullRParams
+
+	// TTRepl enables the depth-preferred + age TT replacement policy (zero
+	// value = the shipped always-replace). TTReplCost is the per-store
+	// policy cost charged in CycleBudget mode.
+	TTRepl     TTReplParams
+	TTReplCost float64
+
 	// Improving enables the improving heuristic (zero value = off). The
 	// full-signal design (Mode==2) forces an extra eval() at every full-width
 	// node that lacks one; that eval's real cost (Costs.Eval) is charged
@@ -168,6 +195,22 @@ func (c *PlayerCfg) engine() *Engine {
 	e.SEE = c.SEE
 	e.Costs.SEEGate, e.Costs.SEE, e.Costs.SEERescan = c.SEECosts[0], c.SEECosts[1], c.SEECosts[2]
 	e.Improving = c.Improving
+	e.QHist = c.QHist
+	e.Costs.QHistProbe, e.Costs.QHistUpdate, e.Costs.QHistAge =
+		c.QHistCosts[0], c.QHistCosts[1], c.QHistCosts[2]
+	e.IIR = c.IIR
+	if c.IIRCost != 0 {
+		e.Costs.IIR = c.IIRCost
+	}
+	e.Razor = c.Razor
+	if c.RazorCost != 0 {
+		e.Costs.Razor = c.RazorCost
+	}
+	e.NullR = c.NullR
+	e.TTRepl = c.TTRepl
+	if c.TTReplCost != 0 {
+		e.Costs.TTRepl = c.TTReplCost
+	}
 	return e
 }
 

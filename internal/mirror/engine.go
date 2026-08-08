@@ -106,6 +106,39 @@ type Engine struct {
 	// uses [pieceType][to]. Cleared per root move (or kept, per CM.Persist).
 	counter [8][128]Move
 
+	// QHist configures the cheap quiet-history heuristic in the five-pass
+	// moveLoop (zero value = off: a byte-identical no-op). See qhist.go.
+	// qhist is the byte-counter table, allocated on first use; the planes
+	// actually read depend on QHist.Form (256 B / 768 B / 1,536 B on the
+	// 6502).
+	QHist QHistParams
+	qhist *[2][6][128]uint8
+	// qhPart8 records, per ply, the quiets the partition pass (pass 8)
+	// searched, so the final quiet pass skips EXACTLY those — the counters
+	// are live during the node's own child searches, so re-probing in pass
+	// 4 could disagree with the pass-8 verdict and drop (or double) a move.
+	// The asm form is a move-stack tier-bit rewrite (as in the SEE deferred
+	// pass), which is also why pass 4 pays no second probe.
+	qhPart8 [MaxPly][]Move
+
+	// IIR configures internal iterative reduction (zero value = off: a
+	// byte-identical no-op). See iir.go.
+	IIR IIRParams
+
+	// Razor configures razoring at remaining 1-2 (zero value = off: a
+	// byte-identical no-op). See razor.go.
+	Razor RazorParams
+
+	// NullR configures the adaptive null-move reduction (zero value = the
+	// shipped fixed R=2: a byte-identical no-op). See razor.go.
+	NullR NullRParams
+
+	// TTRepl configures the TT replacement policy (zero value = the shipped
+	// always-replace: a byte-identical no-op). ttAge is the generation bit
+	// (0 or 0x80), flipped per root move while enabled. See ttrepl.go.
+	TTRepl TTReplParams
+	ttAge  byte
+
 	// Asp configures aspiration windows at the iterative-deepening root
 	// (zero value = off: every ID iteration searches the full window, a
 	// byte-identical no-op).

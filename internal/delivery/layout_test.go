@@ -179,14 +179,26 @@ func TestMainMemoryLayout(t *testing.T) {
 			NamesOrg, tileblob, TilesOrg, want)
 	}
 
-	t.Log("BLOAD layout (asm/m8.cfg):")
+	// The BLOAD layout carries NO staged opening book any more (2026-08-08):
+	// the arrow-key cursor entry pushed the payload past $2000, and the
+	// deliberate resolution (internal/ui TestUIByteBudget, docs/ui-design.md
+	// §18.3) was to retire BLOAD-with-a-book-preloaded — a dev convenience —
+	// rather than hold the UI under a ceiling only that convenience needed.
+	// The harness stages the book AFTER the copier runs (ui.Machine.stageBook),
+	// mirroring the disk's stage-2 ordering; an on-device BLOAD simply has no
+	// resident book, and the probe misses cleanly.
+	t.Log("BLOAD layout (asm/m8.cfg; no staged book — see the comment):")
 	bloadBase := readCfgSymbol(t, "asm/m8.cfg", "UIPAYLOAD")
 	disjoint(t, "BLOAD layout", []region{
 		{"copier (m8boot.bin)", 0x0800, 0x0800 + bloadBoot},
 		{"staged UI payload (m8.bin)", bloadBase, bloadBase + m8},
-		{"staged opening book", BookOrg, BookOrg + book},
 		{"engine image", EngineOrg, EngineOrg + engine},
 	})
+	if end := bloadBase + m8; end > BookOrg {
+		t.Logf("BLOAD layout: the staged payload ends at $%04X, %d B past the book "+
+			"staging area at $%04X — which is WHY the BLOAD layout has no staged book",
+			end, end-BookOrg, BookOrg)
+	}
 
 	// The book must fit its landing zone at $2000, and -- the constraint that
 	// actually binds now -- its RESIDENT home in aux $0800, below the DHGR aux

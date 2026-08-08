@@ -136,12 +136,20 @@ PPSIDE    = M8VARS+$B2  ; root+M snapshot: SIDE
 PPCASTLE  = M8VARS+$B3  ; root+M snapshot: CASTLE
 PPEPSQ    = M8VARS+$B4  ; root+M snapshot: EPSQ
 PPHALF    = M8VARS+$B5  ; root+M snapshot: HALFMOVE
+; ---- Arrow-key cursor entry (asm/m8.s curpop and friends). $F7B9 is
+; DHFLIP, defined as a raw address in asm/dhgr.s because that file also
+; links standalone (asm/dhgrtest.s) without this one — named here so the
+; map stays the single account of the page.
+CURACT    = M8VARS+$B6  ; nonzero: the cursor is up on the board
+CURSQ     = M8VARS+$B7  ; the cursor's 0x88 square
+CURFROM   = M8VARS+$B8  ; latched FROM square (NOSQ = none)
+CURTSQ    = M8VARS+$BA  ; cursqdraw scratch: the square being repainted
 UIBUF     = M8VARS+$20  ; input line (UIBUFMAX bytes)
 UITHINK   = M8VARS+$30  ; think line: depth / score / best move
 UIMSGB    = M8VARS+$50  ; message row (40 B + terminator)
 UIBOOKB   = M8VARS+$80  ; opening-name row (40 B + terminator)
                         ; UIHFULL is $F7AA, UIDHGR $F7AB; PP* run $F7AC-$F7B5;
-                        ; $F7B6-$F7FF free
+                        ; CUR*/DHFLIP $F7B6-$F7BA; $F7BB-$F7FF free
 
 ; The game history is three PARALLEL 256-byte arrays so a ply index fits in
 ; X with no multiply: 256 plies = 128 full moves (Sargon III's own move list

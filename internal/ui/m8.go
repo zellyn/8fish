@@ -238,8 +238,11 @@ func ParseLbl(path string) (map[string]uint16, error) {
 // always installed (in Language Card bank 2), because it is embedded and
 // costs nothing; see load.
 func Boot(root string, book []byte) (*Machine, error) {
-	u, err := load(root, "m8tboot", "m8t", book, false)
+	u, err := load(root, "m8tboot", "m8t", false)
 	if err != nil {
+		return nil, err
+	}
+	if err := u.stageBook(book); err != nil {
 		return nil, err
 	}
 	if err := u.RunToInput(); err != nil {
@@ -247,6 +250,39 @@ func Boot(root string, book []byte) (*Machine, error) {
 	}
 	u.disableHarnessPonder()
 	return u, nil
+}
+
+// stageBook lands the opening book's ENTRIES blob at main $2000 — where
+// stage 2 of the disk's chain load puts it — AFTER running the boot far
+// enough for the copier to have lifted the UI payload to $E000 (the
+// payload's entry point, the copier's final jump target).
+//
+// It used to be a load-time copy, back when the staged payload was
+// guaranteed to end below $2000. The arrow-key cursor entry (2026-08-08)
+// pushed m8.bin past that line, and the DELIBERATE resolution (see
+// TestUIByteBudget) was to let it: the shipping DISK was never exposed —
+// its chain load has always lifted the payload BEFORE stage 2 lands the
+// book at $2000 — and this method makes the harness reproduce that exact
+// ordering instead of an ordering no delivery uses any more. What was
+// retired is only the on-device convenience of BLOADing a book at $2000
+// and THEN BRUNning the copier over a payload that overlaps it.
+func (u *Machine) stageBook(book []byte) error {
+	if book == nil {
+		return nil
+	}
+	const budget = 10_000_000 // the copier costs ~100k cycles; 10 s of margin
+	start := u.M.Cycles
+	for u.M.CPU.PC() != LCOrg {
+		if err := u.M.CPU.Step(); err != nil {
+			return err
+		}
+		if u.M.Cycles-start > budget {
+			return fmt.Errorf("the copier never reached the payload entry at $%04X "+
+				"(PC $%04X after %d cycles)", LCOrg, u.M.CPU.PC(), u.M.Cycles-start)
+		}
+	}
+	copy(u.M.Mem.Main[0x2000:], book)
+	return nil
 }
 
 // disableHarnessPonder records the shipped PONDERON default and turns
@@ -269,8 +305,11 @@ func (u *Machine) disableHarnessPonder() {
 // This is the build that goes on the disk. Everything the HARNESSKBD gates
 // prove about the UI, this one has to prove about the artefact.
 func BootShipping(root string, book []byte) (*Machine, error) {
-	u, err := load(root, "m8boot", "m8", book, true)
+	u, err := load(root, "m8boot", "m8", true)
 	if err != nil {
+		return nil, err
+	}
+	if err := u.stageBook(book); err != nil {
 		return nil, err
 	}
 	if err := u.RunToInput(); err != nil {
@@ -284,8 +323,9 @@ func BootShipping(root string, book []byte) (*Machine, error) {
 // realKbd selects the keyboard the image will read: the shipping build goes
 // through the modelled IIe keyboard at $C000/$C010 and the harness input
 // traps are left unwired, because wiring them for an image that never reads
-// them would be a lie.
-func load(root, bootName, payloadName string, book []byte, realKbd bool) (*Machine, error) {
+// them would be a lie. The opening book is NOT placed here — the staged
+// payload may legally overlap $2000 now — see stageBook.
+func load(root, bootName, payloadName string, realKbd bool) (*Machine, error) {
 	engine, err := os.ReadFile(filepath.Join(root, "asm", "engine.bin"))
 	if err != nil {
 		return nil, err
@@ -327,14 +367,6 @@ func load(root, bootName, payloadName string, book []byte, realKbd bool) (*Machi
 	}
 	copy(m.Mem.Main[BootOrg:], boot)
 	copy(m.Mem.Main[PayloadOrg:], payload)
-	if book != nil {
-		// The ENTRIES blob LANDS at main $2000 -- from a BLOAD here, from stage
-		// 2 of the chain load on the disk -- and m8bookaux lifts it to its
-		// resident home in aux $0800 once m8machine has proved the aux
-		// switches are real. Poking it where the disk puts it, rather than
-		// where it ends up, keeps this path a rehearsal of the real one.
-		copy(m.Mem.Main[0x2000:], book)
-	}
 	// The DHGR artwork, where the disk's copier leaves it: Language Card
 	// bank 1, which in goapple2's model is Main[$D000-$DFFF]. Without this
 	// the BLOAD path would paint the board out of whatever happened to be
@@ -476,6 +508,10 @@ const (
 	PPFROM    = 0xF7AF
 	PPTO      = 0xF7B0
 	PPFLAGS   = 0xF7B1
+	// Arrow-key cursor entry (asm/m8.s curpop and friends).
+	CURACT  = 0xF7B6 // nonzero: the cursor is up on the board
+	CURSQ   = 0xF7B7 // the cursor's 0x88 square
+	CURFROM = 0xF7B8 // latched FROM square ($FF = none)
 	UITHINK   = 0xF730 // think line ($00 = blank; a ponder must never paint it)
 	UIHFROM   = 0xF800
 	UIHTO     = 0xF900

@@ -1097,8 +1097,11 @@ m8engine:
         sta UITHINK             ; a book move did no searching: the previous
         jmp meapply             ;  move's depth/score readout would be a lie
 mesearch:
-        lda #0
-        sta UIBOOKB             ; out of book: drop the opening line
+        jsr uiclrbook           ; out of book: drop the opening line AND repaint
+                                ;  it blank NOW, on both screens, so the stale
+                                ;  opening name is gone the instant the engine
+                                ;  starts thinking -- not carried on row 16 into
+                                ;  every ui80think for the whole search
         jsr uilimits
         jsr uidrive
         lda SCORE
@@ -1688,7 +1691,9 @@ udpmove:
         jsr uitrylegal
         bcc udpill
         jsr uiapply
-        jmp uiclrmsg
+        lda #0                  ; the human's move is played; drop its echo so
+        sta UIBLEN              ;  the prompt row is clean the instant the
+        jmp uiclrmsg            ;  engine takes over, not after it replies
 udpill: lda #<m_illegal
         ldx #>m_illegal
         jmp uisetmsg
@@ -2069,6 +2074,30 @@ uipaintbook:
         lda #<UIBOOKB
         ldx #>UIBOOKB
         jmp uiputs
+
+; uiclrbook: the game just left book. Empty the opening-name buffer AND blank
+; its row on both screens RIGHT NOW. The buffer clear alone is not enough: a
+; full repaint blanks first (uicls) and then re-prints, but no full repaint
+; happens during a search, so uipaintbook of an empty string would leave the
+; stale name on row 16 -- and ui80think would keep copying it into the window
+; every iteration. So this writes the spaces itself, then rebuilds the window's
+; second row (think line + opening name) from the now-blank row 16. Called only
+; from mesearch, the one place the game transitions off book.
+uiclrbook:
+        lda #0
+        sta UIBOOKB
+        lda #BOOKROW
+        ldx #0
+        jsr uigotorc
+        lda #$A0                ; normal space
+        ldy #39
+uclbl:  sta (SCRPTR),y
+        dey
+        bpl uclbl
+        lda UIDHGR              ; on the board screen the window's second row is
+        beq uclbx               ;  the same bytes; rebuild it from the blank row
+        jmp ui80think
+uclbx:  rts
 
 ; uititle: the inverse status bar, with the level digit and the human's
 ; colour poked into the fixed template.

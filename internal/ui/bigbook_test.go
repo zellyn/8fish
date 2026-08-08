@@ -98,6 +98,13 @@ func TestDiskBigBook(t *testing.T) {
 	bootToBoard := m.Cycles // the board painted just before the load began
 	var zpBefore [256]byte
 	copy(zpBefore[:], m.Mem.Main[:256])
+	// ...and the two regions the reader must never touch: the ENGINE IMAGE
+	// (main $4000-$BBFF) and the UI's own code ($E000-$F6FF; one byte is the
+	// documented exception, the poked digit of f_book). The driver's writes
+	// are dirbuf ($1300), the staging window ($2000-$3FFF), its zp window and
+	// aux — anything else here is corruption.
+	engBefore := append([]byte(nil), m.Mem.Main[0x4000:0xBC00]...)
+	uiBefore := append([]byte(nil), m.Mem.Main[0xE000:0xF700]...)
 	ok, err = m.RunUntilPC(mloop, budget)
 	if err != nil || !ok {
 		t.Fatalf("m8bigbook never returned to mloop (ok=%v err=%v PC $%04X)", ok, err, m.CPU.PC())
@@ -119,9 +126,32 @@ func TestDiskBigBook(t *testing.T) {
 				i, zpBefore[i], m.Mem.Main[i])
 		}
 	}
+	for i, b := range m.Mem.Main[0x4000:0xBC00] {
+		if b == engBefore[i] {
+			continue
+		}
+		if 0x4000+i == int(bookpg) {
+			continue // the ONE byte the latch writes: the probe's base page
+		}
+		t.Fatalf("the load MODIFIED THE ENGINE IMAGE at main $%04X: $%02X -> $%02X",
+			0x4000+i, engBefore[i], b)
+	}
+	if got := m.Mem.Main[bookpg]; got != byte(book.BigBase>>8) {
+		t.Fatalf("bookpg = $%02X right after the load, want $%02X", got, book.BigBase>>8)
+	}
+	lbl, err := ui.ParseLbl(filepath.Join(root, "asm", "m8.lbl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fbookDigit := int(lbl["f_book"]) + 5 - 0xE000
+	for i, b := range m.Mem.Main[0xE000:0xF700] {
+		if b != uiBefore[i] && i != fbookDigit {
+			t.Fatalf("the load MODIFIED UICODE at $%04X: $%02X -> $%02X", 0xE000+i, uiBefore[i], b)
+		}
+	}
 	t.Logf("zp protocol: all non-scratch zero page equal across the load "+
-		"(board rows $40-$67 included); board painted at %.2f s, big book loaded "+
-		"+%.2f s (first input at ~%.2f s)",
+		"(board rows $40-$67 included); engine image and UICODE untouched; "+
+		"board painted at %.2f s, big book loaded +%.2f s (first input at ~%.2f s)",
 		float64(bootToBoard)/1_020_484, float64(loadDone-bootToBoard)/1_020_484,
 		float64(loadDone)/1_020_484)
 

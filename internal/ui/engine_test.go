@@ -278,6 +278,12 @@ func TestSoftClockLimits(t *testing.T) {
 			if err != nil || !exited {
 				t.Fatalf("running uilimits: exited=%v err=%v", exited, err)
 			}
+			// uilimits reads the level tables and KTAB through a Language
+			// Card bank-2 window (they live in UIDATA2); it must come back
+			// on bank 1 or the next TT probe jsrs into a message string.
+			if u.M.Mem.LCBank2 {
+				t.Fatalf("uilimits returned with Language Card bank 2 still selected")
+			}
 
 			read24 := func(sym string) uint64 {
 				a := u.Defs[sym]

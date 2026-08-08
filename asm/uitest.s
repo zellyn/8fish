@@ -48,6 +48,10 @@ ldloop: lda (ZPTR),y
 
         ; ui.s first: it defines the SCRSTR/INVSTR macros this file uses,
         ; and ca65 macros must be defined before they are invoked.
+        ; UITESTBUILD keeps uistatic, which only this driver still calls;
+        ; the shipping payload (asm/m8.s) does not define it and saves
+        ; the 50 bytes.
+UITESTBUILD = 1
         .include "ui.s"
 
 ; ---------------------------------------------------------------

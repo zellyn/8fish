@@ -3,6 +3,65 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-08 — UI code-region reclamation: $E000-$F6FF headroom 52 B -> 1,056 B
+
+**Size-only, behavior-identical** (all internal/ui gates green unchanged,
+`engine.bin` byte-identical to main, disk boots in the same 7.16 s / 149
+stage-1 sectors). Two levers, in order of preference and landed as two
+commits:
+
+**1. Densification of cold code (-93 B of UICODE).** The UI runs between
+moves at human speed, so unlike the engine it trades cycles for bytes freely:
+`uistatic` (50 B) was DEAD in the shipping payload — only `asm/uitest.s`
+calls it; it is now assembled only under the new `UITESTBUILD` define.
+`uigoto0` (uigotorc at column 0, the overwhelmingly common call) folded
+fifteen `ldx #0` sites into one. `m8main`'s take-the-display block was
+`uidhoff` minus one store and now calls it.
+
+**2. Read-only data relocation to LANGUAGE CARD BANK 2 (-997 B of UICODE,
++~120 B of window/copier code).** The new `UIDATA2` segment at $D700 — above
+the book's name table, in the 2,394 B that were free there — holds EVERY
+string (873 B incl. WHOOFF), the start position (STSQ/STPC, 64 B), the level
+tables (36 B) and KTAB (24 B). The copier lifts it at boot with the same
+whole-page loop that lifts UICODE ($C083 window, bank 1 restored; m8boot.bin
+61 -> 94 B, still transient). The readers — `uiputs`, `ui80puts`, `uisetmsg`,
+`uititle`'s who-field, `uiscore`'s mate label, `uistartpos`, `uilimits`
+(spanning `uimargin`'s KTAB read) — open a bank-2 window and restore bank 1
+on every exit, the discipline `uibookname` established. All of them are cold:
+nothing inside the search pays a bank switch (the only paint during a search,
+`uithinkln`, runs between ID iterations).
+
+**Measured result** (ld65 sizes, `TestUIByteBudget`): UICODE 5,836 -> 4,832 B
+of the 5,888 B $E000-$F6FF cap = **1,056 B headroom** (was 52). UIDATA2:
+997 B at bank-2 $D700-$DAE4, 1,307 B of bank-2 room left above it. m8.bin
+total 5,829 B (was 5,836).
+
+**New gates.** `TestBank2DataResident` (the whole segment reads back from
+bank 2 byte-identical to the file, and boot ends on bank 1),
+`TestUI80PutsRestoresBank1` (the one banked reader a text boot never runs),
+a bank-1 assert in `TestSoftClockLimits`, two link-time asserts (the name
+table's page-rounded copy must stay below $D700; UIDATA2 caps at $E000), and
+a BLOAD-ledger check in `TestUIByteBudget` (below).
+
+**The next binding ceiling is the BLOAD contract, not $E000.** m8.bin is one
+file (UICODE + UIDATA2 back to back) BLOADed at $0900, and it must end below
+the resident book at $2000: that leaves **59 B of total-file growth** on the
+BLOAD path, against 6,912 B of staging room below the engine on the DISK
+path (the shipping artifact). A future feature bigger than that faces a
+delivery-contract decision — split the payload, restage, or accept a
+bookless BLOAD (the probe's magic check fails closed) — and the new
+TestUIByteBudget check makes it a deliberate one. A ~300-400 B feature like
+arrow-key move entry fits the $E000 budget six times over, but needs that
+call made first.
+
+**Tile-blob redundancy, measured for the record** (zellyn's sprite ideas —
+they compress LC BANK 1, which already has 1,048 B free, so they do not help
+the $E000 budget and were not pursued): of the 24 tiles' 456 stored 4-byte
+rows, only **173 are unique** (283 duplicates, 62%). A per-row 1-byte index
+would cut the blob 1,824 -> 1,148 B (456 B index + 692 B unique rows), a
+676 B ceiling if bank-1 space is ever short. Unique rows by row-index run
+13..22 at the crowns down to 2 at the bases.
+
 ## 2026-08-07 — device pondering v1 landed (Scheme A): the disk now thinks on the opponent's clock
 
 **This is an IMPLEMENTATION landing, not a gauntlet.** It ships

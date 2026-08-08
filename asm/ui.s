@@ -21,6 +21,19 @@
 ; so both the checker pattern and the piece colour survive under a piece.
 ; ---------------------------------------------------------------------------
 
+; ---- Language Card bank selection ----
+; READ these (never store): two consecutive reads of an odd $C08x enable
+; writing to LC RAM, which everything here needs — $E000-$FFFF is where the
+; UI's own variables live. Bank 1 is the RESTING STATE (LCCODE at $D000 and
+; the DHTILES artwork at $D300 are bank 1); bank 2 holds the opening book's
+; name table and, above it at $D700, the UI's own read-only strings and cold
+; tables (the UIDATA2 segment). Every routine that selects bank 2 restores
+; bank 1 before returning — internal/ui's bank gates fail if one stops.
+; Defined here, not in asm/m8.s, because uiputs below needs them and ui.s is
+; also linked standalone by asm/uitest.s.
+LCBANK1RW = $C08B       ; r x2: LC bank 1, read RAM + write RAM
+LCBANK2RW = $C083       ; r x2: LC bank 2, read RAM + write RAM
+
 ; ---- Screen geometry (40x24 text page 1) ----
 BRDROW0   = 2           ; screen row holding rank 8
 BRDCOL    = 3           ; screen column of the a-file cell's left character
@@ -53,8 +66,12 @@ LAYPTR    = PSP0        ; $D2-$D3  16-bit layout-table pointer
 ; $C08B latched, so this is ordinary directly-executable RAM costing the
 ; engine ZERO MAIN bytes):
 ;
-;   $E000-$F6FF  UICODE segment: code + static data (5,888 B; the link
-;                config caps it here, so an overflow is a link error)
+;   $E000-$F6FF  UICODE segment: code + the static data a bank window
+;                cannot afford (5,888 B; the link config caps it here, so
+;                an overflow is a link error). The read-only strings and
+;                cold tables are NOT here: they are the UIDATA2 segment in
+;                LANGUAGE CARD BANK 2 at $D700, read through uiputs's
+;                bank-2 window and its siblings.
 ;   $F700-$F7FF  UI variables and screen-string buffers (this block)
 ;   $F800-$FAFF  game history: from / to / flags, one page each
 ;   $FB00-$FEFF  game hash history: HASH0-3, one page each
@@ -187,7 +204,15 @@ RES_ERR    = 7
 ; No carry propagation is needed: the largest row-base low byte is
 ; $D0 (row 23) and $D0 + 39 = $F7, so base+col never leaves the
 ; base's page. Callers MUST keep X <= 47.
+;
+; uigoto0 is uigotorc at column 0 — much the most common call, so
+; the `ldx #0` lives here once instead of at fifteen call sites.
+; The UI is COLD code (it runs between moves, at human speed), so
+; a jsr that saves bytes is a win even where it costs cycles.
 ; ---------------------------------------------------------------
+uigoto0:
+        ldx #0
+        ; fall through
 uigotorc:
         tay
         txa
@@ -202,17 +227,30 @@ uigotorc:
 ; uiputs: write the $00-terminated string at A/X (lo/hi) starting at
 ; SCRPTR. String bytes are stored RAW, so the data carries its own
 ; video attribute (see the encoding note above). Clobbers A, Y.
+;
+; It reads through a LANGUAGE CARD BANK 2 window, because that is
+; where the static strings live (the UIDATA2 segment at $D700 — see
+; asm/m8.cfg). The window is harmless for every other source uiputs
+; is handed: the screen-string buffers are at $F7xx and bank
+; switching only re-maps $D000-$DFFF. Its own code, SCRPTR's target
+; (the main-RAM text page) and the stack are all unaffected too, and
+; bank 1 — LCCODE, the artwork — is restored before returning, on
+; the same discipline uibookname established.
 ; ---------------------------------------------------------------
 uiputs:
         sta STRPTR
         stx STRPTR+1
+        lda LCBANK2RW
+        lda LCBANK2RW
         ldy #0
 upsl:   lda (STRPTR),y
         beq upsx
         sta (SCRPTR),y
         iny
         bne upsl
-upsx:   rts
+upsx:   lda LCBANK1RW
+        lda LCBANK1RW
+        rts
 
 ; ---------------------------------------------------------------
 ; SCRSTR/INVSTR: assemble a $00-terminated screen string in normal
@@ -237,7 +275,13 @@ upsx:   rts
 ; uistatic: paint a layout table at A/X (lo/hi). Each entry is four
 ; bytes — row, column, string lo, string hi — and the table ends with
 ; row = $FF. Clobbers A, X, Y and the borrowed ZP.
+;
+; UITESTBUILD only: the shipping UI (asm/m8.s) paints every row with
+; direct uigotorc/uiputs calls and never references this routine, so
+; carrying it in the payload was 50 dead bytes of the $E000-$F6FF
+; code budget. asm/uitest.s still drives it.
 ; ---------------------------------------------------------------
+.ifdef UITESTBUILD
 uistatic:
         sta LAYPTR
         stx LAYPTR+1
@@ -269,6 +313,7 @@ ustl:   ldy UITMP
         sta UITMP
         bne ustl
 ustx:   rts
+.endif
 
 
 ; ---------------------------------------------------------------
@@ -280,8 +325,7 @@ ustx:   rts
 uicls:  ldx #23
         stx UIROW
 ucls1:  lda UIROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         ldy #39
         lda #$A0                ; normal space
 ucls2:  sta (SCRPTR),y

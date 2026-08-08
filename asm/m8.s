@@ -149,6 +149,7 @@ NLEVELS = 9
         .segment "BOOT"
 
         .import __UICODE_SIZE__
+        .import __UIDATA2_RUN__, __UIDATA2_SIZE__
 
 boot:
 .ifdef SDCHAIN
@@ -178,6 +179,33 @@ btlc:   lda ENG_LCCODE_LOAD,y
         sta ENG_LCCODE_RUN,y
         dey
         bpl btlc
+
+        ; The UI's BANK-2 static data -- the UIDATA2 segment: every message
+        ; string and the cold tables (start position, levels, KTAB). It sits
+        ; immediately after UICODE in the payload file, and lives in LANGUAGE
+        ; CARD BANK 2 above the opening book's name table, where it costs the
+        ; $E000-$F6FF code budget nothing (asm/ui.s's uiputs and friends read
+        ; it through a bank-2 window and restore bank 1 before returning).
+        ;
+        ; $C083 twice: LC bank 2, read RAM + WRITE RAM -- the write half is
+        ; what the double read enables, exactly as with $C08B above. copyp
+        ; rounds up to whole pages; the destination overrun stays inside
+        ; bank 2 (the D2 memory area caps the segment so page-rounding never
+        ; reaches $E000) and the source overrun reads dead staging RAM.
+        lda $C083
+        lda $C083
+        lda #<(UIPAYLOAD + __UICODE_SIZE__)
+        sta ZPTR
+        lda #>(UIPAYLOAD + __UICODE_SIZE__)
+        sta ZPTR+1
+        lda #<__UIDATA2_RUN__
+        sta TTPTR
+        lda #>__UIDATA2_RUN__
+        sta TTPTR+1
+        ldx #>(__UIDATA2_SIZE__ + 255)
+        jsr copyp
+        lda $C08B               ; back to bank 1 -- the resting state, and
+        lda $C08B               ;  the bank the SDCHAIN block below assumes
 
 .ifdef SDCHAIN
         ; ---- STAGE 2: re-enter the loader with a fresh page table ----------
@@ -308,6 +336,10 @@ SD2BOOKN  = (BOOK_BLOB_SIZE + 255) / 256
 ; lands at BOOK_NAMES ($D000) and $E000-$FFFF is NOT banked -- it is the UI's
 ; own code -- so an overrun would write the copier's payload over itself.
 .assert BOOK_NAMES + SD2NAMEN * 256 <= $E000, error, "the book's name table does not fit Language Card bank 2 ($D000-$DFFF); see cmd/genbook's budget check"
+; ...and it must stay below the UI's own bank-2 data (the UIDATA2 segment at
+; $D700): the copier writes the name table in WHOLE PAGES, so a table that
+; merely reaches page $D7 would overwrite the UI's strings.
+.assert BOOK_NAMES + SD2NAMEN * 256 <= __UIDATA2_RUN__, error, "the book's name table (page-rounded) reaches the UI's bank-2 data at UIDATA2; move UIDATA2 up (asm/m8.cfg D2) or shrink the names (cmd/genbook)"
 
 .ifdef SDCHAIN
 ; Stage 2's page table, generated from the three blob sizes so that it cannot
@@ -376,18 +408,17 @@ SETDHIRES   = $C05E     ; AN3 LOW: double resolution, with 80COL on
 CLRDHIRES   = $C05F     ; AN3 HIGH: single resolution
 HIRESSET    = $C057     ; hi-res, not lo-res
 
-; Language Card bank selection. READ these (never store): two consecutive
-; reads of an odd $C08x is what enables writing to LC RAM, and every use here
-; needs LC RAM writable -- $E000-$FFFF is where the UI's own variables live,
-; and write-protecting the card protects all of $D000-$FFFF, not just the
-; banked $D000-$DFFF window.
+; Language Card bank selection: LCBANK1RW/LCBANK2RW now live in asm/ui.s
+; (uiputs needs them, and ui.s also links standalone under asm/uitest.s).
 ;
 ; Bank 1 is the RESTING STATE and everything assumes it: LCCODE ($D000: the
 ; engine's ttfetch and the book's bkfetch/bkhdr) and DHTILES ($D300: the board
-; artwork) are both bank 1. Bank 2 holds exactly one thing -- the opening
-; book's name table -- and exactly one routine ever selects it (uibookname).
-LCBANK1RW   = $C08B     ; r x2: LC bank 1, read RAM + write RAM
-LCBANK2RW   = $C083     ; r x2: LC bank 2, read RAM + write RAM
+; artwork) are both bank 1. Bank 2 holds the opening book's name table and,
+; at $D700, the UI's own read-only strings and cold tables (UIDATA2). The
+; routines that may select bank 2 are exactly the readers of those two
+; things -- uibookname, uiputs/ui80puts/uisetmsg, uititle's who-field loop,
+; uiscore's mate label, uistartpos's start-position copy and uilimits'
+; level-table reads -- and every one restores bank 1 before returning.
 
 ; Autostart's power-up byte (docs/ui-design.md §11 risk 3). The reset
 ; handler takes the WARM path — jmp ($03F2) — only when $03F4 equals
@@ -433,17 +464,19 @@ m8main:
         ;
         ; 80COL-off matters because ProDOS on a IIe boots into 80 columns:
         ; with the 80-column hardware live, this 40-column screen is shown
-        ; one column out of two. TEXT / NOMIX / PAGE1 are three bytes each
-        ; and remove the remaining assumptions about the state a BRUN
-        ; inherits. PAGE1 is what makes the 80STORE store above complete:
-        ; 80STORE off puts $0400-$07FF back under RAMRD/RAMWRT, PAGE1 makes
-        ; the DISPLAY read main page 1.
-        sta CLR80STORE
-        sta SET80COLOFF
-        sta SETALTCHAR
-        sta TXTSET
-        sta MIXCLR
-        sta TXTPAGE1
+        ; one column out of two. TEXT / NOMIX / PAGE1 remove the remaining
+        ; assumptions about the state a BRUN inherits. PAGE1 is what makes
+        ; the 80STORE store above complete: 80STORE off puts $0400-$07FF
+        ; back under RAMRD/RAMWRT, PAGE1 makes the DISPLAY read main page 1.
+        ;
+        ; The stores live in uidhoff, which takes the display back to
+        ; exactly this state after every board->text swap; calling it here
+        ; is 3 bytes where the unshared stores were 18. Its one addition
+        ; over the original boot list is CLRDHIRES (AN3 back high), which
+        ; is the IIe's own reset state and, in text mode, does not reach
+        ; the screen at all (DHIRES needs 80COL on) — it just removes one
+        ; more hostile-BRUN state instead of leaving it latched.
+        jsr uidhoff
         bit KBDSTROBE           ; a key held down while the disk loads is
                                 ;  latched before the UI ever polls, and
                                 ;  would arrive as the first character typed
@@ -732,13 +765,17 @@ uspc:   sta BOARD,x             ; zp,x: BOARD = $40, so $40..$BF
         dex
         bpl uspc
         ldx #31
-uspp:   lda STSQ,x
+        lda LCBANK2RW           ; STSQ/STPC live in bank 2 (UIDATA2); the
+        lda LCBANK2RW           ;  copy's targets (zero page, PIECESQ in
+uspp:   lda STSQ,x              ;  main) are unbanked
         sta PIECESQ,x
         tay
         lda STPC,x
         sta a:BOARD,y
         dex
         bpl uspp
+        lda LCBANK1RW           ; bank 1 back BEFORE evalinit, which may
+        lda LCBANK1RW           ;  reach LCCODE
         lda #0
         sta SIDE
         sta HALFMOVE
@@ -1083,8 +1120,7 @@ usyx:   rts
 
 m8engine:
         lda #CHKROW             ; a static "thinking" marker; the live one is
-        ldx #0                  ;  the between-iterations readout on row 14
-        jsr uigotorc
+        jsr uigoto0             ;  the between-iterations readout on row 14
         lda #<s_thinking
         ldx #>s_thinking
         jsr uiputs
@@ -1204,6 +1240,11 @@ uibookrnd:
 ; a looser margin and quietly widen the adaptive ceiling.
 ; ---------------------------------------------------------------------------
 uilimits:
+        lda LCBANK2RW           ; the level tables and KTAB live in bank 2
+        lda LCBANK2RW           ;  (UIDATA2); everything written here is
+                                ;  engine state in main RAM or zero page.
+                                ;  The window spans uimargin too, and both
+                                ;  exits leave through ulxit below.
         ldx UILEVEL
         dex
         cpx #NLEVELS
@@ -1225,7 +1266,7 @@ uilimits:
         lda FEATURES2           ; fixed-depth level: no clock is read at all
         and #255-FT2_ADAPT      ; single bit, so this is ~FT2_ADAPT
         sta FEATURES2
-        rts
+        jmp ulxit
 ultimed:
         ; CEILMAX = 4*base, UNSTCEIL = 3*base, MINSPEND = base/4, all from
         ; the scaled base (mirroring chesstest.SetAdaptive with no bank).
@@ -1272,6 +1313,8 @@ ultimed:
         lda FEATURES2
         ora #FT2_ADAPT
         sta FEATURES2
+ulxit:  lda LCBANK1RW           ; bank 1 back: uilimits' one bank-2 window
+        lda LCBANK1RW           ;  ends here on both exit paths
         rts
 
 ; uimargin: BUDGET *= KTAB[octave(BUDGET)] / 128, in place.
@@ -2250,22 +2293,19 @@ uipaint40:
         jsr uistatrow
         jsr uichkrow
         lda #THINKROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<UITHINK
         ldx #>UITHINK
         jsr uiputs
         jsr uipaintbook
         jsr uipaintmsg
         lda #HELPROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<s_help1
         ldx #>s_help1
         jsr uiputs
         lda #HELPROW+1
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<s_help2
         ldx #>s_help2
         jmp uiputs
@@ -2288,8 +2328,7 @@ uipaint40:
 ; and buys the guarantee that no future caller can forget.
 uipaintmsg:
         lda #MSGROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<UIMSGB
         ldx #>UIMSGB
         jsr uiputs
@@ -2300,8 +2339,7 @@ uipmx:  rts
 
 uipaintbook:
         lda #BOOKROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<UIBOOKB
         ldx #>UIBOOKB
         jmp uiputs
@@ -2318,8 +2356,7 @@ uiclrbook:
         lda #0
         sta UIBOOKB
         lda #BOOKROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #$A0                ; normal space
         ldy #39
 uclbl:  sta (SCRPTR),y
@@ -2334,8 +2371,7 @@ uclbx:  rts
 ; colour poked into the fixed template.
 uititle:
         lda #0
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<s_title
         ldx #>s_title
         jsr uiputs
@@ -2347,6 +2383,8 @@ uititle:
         sta (SCRPTR),y
         jsr uiwhoidx
         tax
+        lda LCBANK2RW           ; WHOOFF and s_who live in bank 2 (UIDATA2);
+        lda LCBANK2RW           ;  the screen writes below are main RAM
         lda WHOOFF,x
         tax
         ldy #TITLEWHO
@@ -2356,6 +2394,8 @@ utcl:   lda s_who,x
         iny
         cpy #TITLEWHO+13
         bcc utcl
+        lda LCBANK1RW
+        lda LCBANK1RW
         rts
 
 ; uistatrow: row 12, left column — side to move, or how the game ended.
@@ -2375,8 +2415,7 @@ usrres: lda reslo,x
         lda reshi,x
 usrput: sta UICNT2
         lda #STATROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda UITMPB
         ldx UICNT2
         jsr uiputs
@@ -2420,8 +2459,7 @@ uichkrow:
         lda UICHK
         beq ucrx
         lda #CHKROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<s_check
         ldx #>s_check
         jmp uiputs
@@ -2465,8 +2503,7 @@ uprcur: lda #$20                ; inverse space: the cursor
         sta UI80BUF,x
         ; --- the 40-column screen's row 23 ---
         lda #PROMPTROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         ldy #39
 uprc:   lda UI80BUF,y
         sta (SCRPTR),y
@@ -2556,8 +2593,7 @@ u80c:   sta UI80BUF,y
 ; source row of 21 would render the previous frame's interleave as text.
 ui80get:
         stx UITMPB
-        ldx #0
-        jsr uigotorc            ; SCRPTR = the row base, column 0
+        jsr uigoto0            ; SCRPTR = the row base, column 0
         ldy #0
         ldx UITMPB
 u80g:   lda (SCRPTR),y
@@ -2572,11 +2608,14 @@ u80gx:  rts
 
 ; ui80puts: copy the $00-terminated string at A/X into the staging line
 ; starting at column Y, stopping at column 80. Clobbers A,X,Y, STRPTR and
-; UITMPB.
+; UITMPB. Reads through a bank-2 window exactly as uiputs does (the static
+; strings live in UIDATA2; UI80BUF at $FF00 is unbanked either way).
 ui80puts:
         sta STRPTR
         stx STRPTR+1
         sty UITMPB
+        lda LCBANK2RW
+        lda LCBANK2RW
         ldy #0
         ldx UITMPB
 u80p:   lda (STRPTR),y
@@ -2587,7 +2626,9 @@ u80p:   lda (STRPTR),y
         bcs u80px
         iny
         bne u80p
-u80px:  rts
+u80px:  lda LCBANK1RW
+        lda LCBANK1RW
+        rts
 
 ; ui80row: blit the staging line to 80-column text row A -- even columns to
 ; AUX, odd columns to MAIN. Clobbers A,X,Y and SCRPTR.
@@ -2597,8 +2638,7 @@ u80px:  rts
 ; RAMRD/RAMWRT like any other address. With 80STORE on it would follow PAGE2
 ; instead and every "aux" byte would land in main, on top of the odd columns.
 ui80row:
-        ldx #0
-        jsr uigotorc            ; SCRPTR = the row base; both banks share it
+        jsr uigoto0            ; SCRPTR = the row base; both banks share it
         sta RAMWRTON            ; --- even columns: aux ---
         ldx #0
         ldy #0
@@ -2689,10 +2729,13 @@ ui80msg:
         jmp ui80row
 
 ; uisetmsg / uiclrmsg: the message row's contents live in LC RAM so a full
-; repaint restores them.
+; repaint restores them. The source string is read through a bank-2 window
+; (the m_* messages live in UIDATA2); UIMSGB at $F750 is unbanked.
 uisetmsg:
         sta STRPTR
         stx STRPTR+1
+        lda LCBANK2RW
+        lda LCBANK2RW
         ldy #0
 usml:   lda (STRPTR),y
         sta UIMSGB,y
@@ -2702,7 +2745,9 @@ usml:   lda (STRPTR),y
         bcc usml
         lda #0
         sta UIMSGB,y
-usmx:   rts
+usmx:   lda LCBANK1RW
+        lda LCBANK1RW
+        rts
 
 uiclrmsg:
         lda #0
@@ -2834,8 +2879,7 @@ utlterm:
         lda #0
         sta (SCRPTR),y
         lda #THINKROW
-        ldx #0
-        jsr uigotorc
+        jsr uigoto0
         lda #<UITHINK
         ldx #>UITHINK
         jsr uiputs
@@ -2869,13 +2913,17 @@ uscsgn: sta (SCRPTR),y
         cmp #MATEZONEHI
         bcc uscnum
         ldx #0
+        lda LCBANK2RW           ; s_mate lives in bank 2 (UIDATA2); SCRPTR
+        lda LCBANK2RW           ;  points at the UITHINK buffer, unbanked
 uscml:  lda s_mate,x
         beq uscmx
         sta (SCRPTR),y
         iny
         inx
         bne uscml
-uscmx:  rts
+uscmx:  lda LCBANK1RW
+        lda LCBANK1RW
+        rts
 
 ; uscnum: UISCR1:UISCR0 (0..32767 centipawns) -> "d.dd" / "dd.dd" / "ddd.dd".
 uscnum: lda #0
@@ -2942,7 +2990,19 @@ usddot: lda #'.'|$80
 
 ; ===========================================================================
 ; Tables and strings
+;
+; Split across TWO segments since 2026-08-08. UICODE keeps what a bank-2
+; window cannot afford or does not pay for: the rts-dispatch tables (the
+; dispatcher pushes an address and returns through it) and the small pointer
+; tables whose relocation would cost more window code than it saves. UIDATA2
+; -- Language Card BANK 2 at $D700, above the book's name table -- holds
+; everything read only through the banked readers: the start position, the
+; level tables, KTAB, and EVERY string. That is ~1,000 bytes off the
+; $E000-$F6FF code budget; the copier lifts the segment at boot and
+; internal/ui's TestBank2DataResident asserts it reads back byte-identical.
 ; ===========================================================================
+
+        .segment "UIDATA2"
 
 ; The standard starting position as 32 (square, piece byte) pairs, in the
 ; engine's slot order: slot 0 is each side's king, white slots 0-15 and
@@ -2986,6 +3046,8 @@ KTAB:   .byte 101, 101, 101, 101, 101, 101, 101, 101
         .byte 101, 101, 101, 101, 101, 101, 113, 139
         .byte 139, 139, 139, 139, 139, 139, 139, 139
 
+        .segment "UICODE"
+
 promoltr: .byte 'n', 'b', 'r', 'q'
 
 NCMDS = 8
@@ -3010,6 +3072,8 @@ sidehi: .byte >m_sidew, >m_sideb, >m_side2
 TITLELVL  = 20          ; column of the level digit in s_title
 TITLEWHO  = 26          ; column of the 13-character "who plays what" field
 PROMPTLEN = 11          ; length of s_movq / s_cmdq
+
+        .segment "UIDATA2"
 
 s_title:   INVSTR " 8FISH 1.0    LEVEL 4     YOU ARE WHITE "
 s_who:     INVSTR "YOU ARE WHITE"
@@ -3056,6 +3120,8 @@ m_needsiie: SCRSTR "8FISH NEEDS A 128K APPLE IIE"
 m_sidew:    SCRSTR "YOU PLAY WHITE. S NEXT: TWO PLAYERS"
 m_sideb:    SCRSTR "YOU PLAY BLACK. S NEXT: YOU PLAY WHITE"
 m_side2:    SCRSTR "TWO PLAYERS. S NEXT: YOU PLAY BLACK"
+
+        .segment "UICODE"
 
 ; ---------------------------------------------------------------------------
 ; The double-hi-res board renderer, and the generated tile dispatch tables it

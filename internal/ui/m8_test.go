@@ -56,6 +56,8 @@ func boot(t *testing.T) *ui.Machine {
 	if err != nil {
 		t.Fatalf("boot: %v", err)
 	}
+	// ui.Boot already turned pondering off for the harness (Machine.PonderDefault
+	// records the shipped default). The ponder gate re-enables it explicitly.
 	return u
 }
 

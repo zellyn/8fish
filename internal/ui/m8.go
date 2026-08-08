@@ -74,6 +74,17 @@ type Machine struct {
 	// slowest level (60 s = 6.1e7 cycles), so the default leaves a 30x
 	// margin and still fails within about a minute of wall time.
 	StepLimit uint64
+
+	// PonderDefault is the value m8main left in PONDERON at boot — 1 on the
+	// shipped image, which PONDERS. Boot captures it and then pokes PONDERON
+	// off, because the harness CANNOT run pondering: it breaks Run the instant
+	// the program reads the keyboard-status trap with no key pending
+	// (harness/trapmemory.go), which is exactly what pkclk's non-blocking
+	// ponder poll does, so a ponder would park the machine mid-search on every
+	// human turn. Real hardware just reads $C000 and keeps searching. The
+	// pondering feature is exercised by internal/ui/ponder_test.go, which
+	// re-enables PONDERON and drives it with the poll trap disabled.
+	PonderDefault byte
 }
 
 // DefaultStepLimit is Machine.StepLimit's default: ~2,000 emulated seconds.
@@ -234,7 +245,18 @@ func Boot(root string, book []byte) (*Machine, error) {
 	if err := u.RunToInput(); err != nil {
 		return nil, err
 	}
+	u.disableHarnessPonder()
 	return u, nil
+}
+
+// disableHarnessPonder records the shipped PONDERON default and turns
+// pondering off for the harness (see the PonderDefault field). At boot the
+// game has not started (UIHCNT=0, so m8ponder took its first-move skip and the
+// machine is parked at the prompt), which is the one clean point to read the
+// default before it matters.
+func (u *Machine) disableHarnessPonder() {
+	u.PonderDefault = u.Peek(PONDERON)
+	u.Poke(PONDERON, 0)
 }
 
 // BootShipping loads the SHIPPING image — the build that reads the real
@@ -254,6 +276,7 @@ func BootShipping(root string, book []byte) (*Machine, error) {
 	if err := u.RunToInput(); err != nil {
 		return nil, err
 	}
+	u.disableHarnessPonder()
 	return u, nil
 }
 
@@ -441,10 +464,23 @@ const (
 	UINLEGAL = 0xF704
 	UICHK    = 0xF705
 	UIHFULL  = 0xF7AA
-	UIHFROM  = 0xF800
-	UIHTO    = 0xF900
-	UIHFLAG  = 0xFA00
-	UIHASH0  = 0xFB00
+	// Pondering state (asm/ui.s). PONDERON is the shipped enable flag
+	// (m8main defaults it to 1); the move-by-move test harness pokes it to 0
+	// because it does not model opponent think-time, so a ponder would run to
+	// its walk-away backstop every turn. The dedicated ponder gate re-enables
+	// it. PPFROM/PPTO are the device's predicted reply P (for cross-checking
+	// against the Go predictor).
+	PONDERON  = 0xF7AC
+	PONDERING = 0xF7AD
+	PONDERKEY = 0xF7AE
+	PPFROM    = 0xF7AF
+	PPTO      = 0xF7B0
+	PPFLAGS   = 0xF7B1
+	UITHINK   = 0xF730 // think line ($00 = blank; a ponder must never paint it)
+	UIHFROM   = 0xF800
+	UIHTO     = 0xF900
+	UIHFLAG   = 0xFA00
+	UIHASH0   = 0xFB00
 )
 
 // Game-over codes (RES_* in asm/ui.s). There is deliberately no "too long"

@@ -59,7 +59,8 @@ LAYPTR    = PSP0        ; $D2-$D3  16-bit layout-table pointer
 ;   $F800-$FAFF  game history: from / to / flags, one page each
 ;   $FB00-$FEFF  game hash history: HASH0-3, one page each
 ;   $FF00-$FF4F  UI80BUF: the mixed-mode window's 80-column staging line
-;   $FF50-$FFEF  free (160 B)
+;   $FF50-$FFEF  PPBOARD/PPPIECE: the ponder position snapshot (160 B, live
+;                only while pondering — see below and asm/m8.s m8ponder)
 ;   $FFF0-$FFFF  6502 vectors (RAM once LC read is enabled; m8.s writes them)
 M8VARS    = $F700
 UIHCNT    = M8VARS+$00  ; plies played so far
@@ -100,11 +101,30 @@ UIHFULL   = M8VARS+$AA  ; nonzero: the 256-ply history arrays filled up and
 UIDHGR    = M8VARS+$AB  ; nonzero: the DOUBLE HI-RES board is the screen being
                         ;  shown (ESC toggles; the 40-column text screen is
                         ;  painted either way, so the swap is instantaneous)
+; ---- Pondering state (docs/ponder-design.md §11.A). Driver-only, all in LC
+; RAM; the engine never reads any of it. PONDERON is the UI-only enable flag
+; (design §9.1); PONDERING selects the keyboard-poll ccsite target inside
+; uidrive and suppresses the think-line paint; PONDERKEY says "a keypress
+; ended the ponder search, DISCARD it" and gates uidrive's abort recovery off
+; (design §4.3, the round-6 recovery trap). PP* hold the predicted reply P and
+; the root+M snapshot's scalars (the board/piece-list snapshot lives in the
+; $FF50 block below).
+PONDERON  = M8VARS+$AC  ; nonzero: pondering enabled (m8main defaults it on)
+PONDERING = M8VARS+$AD  ; nonzero while a ponder search runs (uidrive gates)
+PONDERKEY = M8VARS+$AE  ; nonzero: a key ended the ponder search -> discard
+PPFROM    = M8VARS+$AF  ; predicted reply P: from-square
+PPTO      = M8VARS+$B0  ; predicted reply P: to-square
+PPFLAGS   = M8VARS+$B1  ; predicted reply P: generator flags
+PPSIDE    = M8VARS+$B2  ; root+M snapshot: SIDE
+PPCASTLE  = M8VARS+$B3  ; root+M snapshot: CASTLE
+PPEPSQ    = M8VARS+$B4  ; root+M snapshot: EPSQ
+PPHALF    = M8VARS+$B5  ; root+M snapshot: HALFMOVE
 UIBUF     = M8VARS+$20  ; input line (UIBUFMAX bytes)
 UITHINK   = M8VARS+$30  ; think line: depth / score / best move
 UIMSGB    = M8VARS+$50  ; message row (40 B + terminator)
 UIBOOKB   = M8VARS+$80  ; opening-name row (40 B + terminator)
-                        ; UIHFULL is $F7AA, UIDHGR $F7AB; $F7AC-$F7FF free
+                        ; UIHFULL is $F7AA, UIDHGR $F7AB; PP* run $F7AC-$F7B5;
+                        ; $F7B6-$F7FF free
 
 ; The game history is three PARALLEL 256-byte arrays so a ply index fits in
 ; X with no multiply: 256 plies = 128 full moves (Sargon III's own move list
@@ -137,6 +157,16 @@ UIHASH3   = $FE00
 ; 20-23 of the 40-column text page, so a row composed in place would be
 ; overwriting its own source. See the window's comment block in asm/m8.s.
 UI80BUF   = $FF00       ; 80 bytes, $FF00-$FF4F
+
+; PPBOARD/PPPIECE: the root+M position snapshot m8ponder takes before it makes
+; the predicted reply P onto the board. The ponder search roots at ply 0, whose
+; undo slots it overwrites, so P cannot be unmade afterward (engine.s iterate
+; forces PLY=0); m8ponder restores root+M by copying this snapshot back and
+; re-running ENG_evalinit. BOARD is 128 bytes ($40-$BF), PIECESQ 32, so the two
+; fill the last free run below the 6502 vectors exactly ($FF50-$FFEF, 160 B).
+; Only live during a ponder; nothing else touches this region.
+PPBOARD   = $FF50       ; 128-byte snapshot of BOARD, $FF50-$FFCF
+PPPIECE   = $FFD0       ; 32-byte snapshot of PIECESQ, $FFD0-$FFEF
 
 UIBUFMAX  = 8           ; longest accepted input line ("e7e8q" + slack)
 

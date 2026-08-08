@@ -3,6 +3,64 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-07 — device pondering v1 landed (Scheme A): the disk now thinks on the opponent's clock
+
+**This is an IMPLEMENTATION landing, not a gauntlet.** It ships
+`docs/ponder-design.md` §11.A on device (`asm/m8.s` `m8ponder`/`pkclk`,
+`asm/ui.s` state). While the human is on move, the engine predicts his reply P
+with a shallow search, makes P, and searches root+M+P as deeply as his clock
+allows, warming the aux TT for exactly the line a hit reaches. Hit vs miss
+collapses (the TT self-verifies); the rule is "never wipe the TT, never commit
+the guess." `PONDERON` defaults on — the disk ponders.
+
+**Own-move search is byte-identical.** The keyboard poll joins the search at
+`ccsite` via a runtime operand patch to an LC-resident `pkclk`, live ONLY while
+pondering — exactly the `FT2_SOFTCLK` precedent. `engine.bin` is unchanged
+(SHA identical to the previous commit); `TestMicroAB` is green by
+construction. Mutation-checked both new correctness points: breaking the
+own-move ccsite isolation makes the own-move search poll the keyboard (device
+`TestEngineParity` catches it — "the engine did not move"); removing the
+`PONDERKEY` discard guard lets a ponder abort fall into the round-6 own-move
+recovery and paint the think line (the new interrupt gate catches it,
+`UITHINK=0xc4`).
+
+**Cost.** +326 B of Language Card code (5,477 → 5,803 of the 5,888 B UICODE
+cap; ~85 B headroom), ~10 B LC RAM + a 160 B board snapshot in the
+previously-free `$FF50-$FFEF`. Zero main-image bytes, zero `engine.bin` bytes,
+zero measured own-move hot-path cycles. Cold boot unchanged at ~463 ms. The
+ponder walk-away backstop is a fixed ~8 s of estimated clock (the human's
+keystroke is the normal terminator); scaling it to the level is deferred.
+
+**Why P is restored by snapshot, not unmake.** `iterate` roots the search at
+ply 0 and overwrites P's undo slot, so `ENG_unmake(P)` cannot recover root+M
+(the ~20 B the design budgeted). `m8ponder` snapshots BOARD/PIECESQ + the four
+position scalars before making P and rebuilds the rest with `ENG_evalinit` —
+~50 B, the bulk of the overage over the design's ~230 B estimate.
+
+**Gates** (`internal/ui/ponder_test.go`, device image under HARNESSKBD): the
+disk ponders by default; a ponder restores the board exactly, commits nothing,
+predicts the same reply as the Go `runEngine` shallow search, and leaves the
+aux TT warm for root+M+P; a hit reaches greater reply depth (cold 2 → warm 4
+at two of three test positions); a miss's reply is bit-identical to a
+no-ponder reply; a real keystroke interrupt discards the guess, keeps the key
+for `entkey`, and advances `ENTROPY`. The move-by-move gates disable pondering
+in `boot()` — the harness breaks `Run` on any non-blocking keyboard poll, so a
+ponder would park mid-search there; the ponder gate drives it with the poll
+trap disabled, modelling the hardware.
+
+**★ MEASUREMENT CONSEQUENCE — the headline Sargon number now needs re-picking
+(design §10).** The +161 [+126, +199] device number (below) was a *no-ponder*
+gauntlet, chosen because "the disk actually runs" without pondering. The disk
+now ponders. The representative number becomes the *ponder-enabled, symmetric*
+`sargon-symmatch` match (both sides pondering, Hard Mode), and the no-ponder
++161 reverts to the artificial control it always was. That gauntlet has NOT
+been re-run here — this entry lands the mechanism and its gates; the
+re-measurement (and the device's own shallow-predictor hit-rate, which may
+differ from the harness's free-TT predictor) is the next step.
+
+**Deferred** (design §11.B): free-TT prediction (needs the trivial
+`ENG_ttprobe` export) and ponder-time banking under `FT2_ADAPT`.
+
 ## 2026-08-07 — ★ ADAPTATION ROUND: the PRUNING CLUSTER pays once its enabler exists — cheap quiet-history ordering + history-gated LMP = **+31 ± 11** at asm cost; ordering alone +19 ± 12; IIR/razoring/null-R/TT-replacement all DROP
 
 The modern-technique round asked: **what ordering signal can the 6502

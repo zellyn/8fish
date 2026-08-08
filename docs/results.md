@@ -61,6 +61,55 @@ differ from the harness's free-TT predictor) is the next step.
 **Deferred** (design §11.B): free-TT prediction (needs the trivial
 `ENG_ttprobe` export) and ponder-time banking under `FT2_ADAPT`.
 
+## 2026-08-08 — ★ VERDICT: history + gated-LMP DO NOT PORT — mirror +31 → asm SPRT **−23 ± 19** at device depth. The pruning cluster dies at asm a SECOND time.
+
+The 08-07 adaptation screen made `[ptype][to]` history partition + history-gated
+LMP the prize at **+31 ± 11** (mirror, asm-matched cost/ordering) and flagged it
+for an asm port gated on the SPRT — because this exact class (LMP) screened +39
+in the mirror and died at −85 in asm. It was ported (FT_QHIST, the freed
+FT_ROOKX bit) and the SPRT was run. **It died again.**
+
+**The measurement (feature ON, 0x7f, vs the shipped engine, 0x5f):**
+
+| budget | games | Elo | llr(0,10) | note |
+|---|---|---|---|---|
+| 5 s/move | 300 | +6 ± 30 | 0.03 | underpowered + shallow; did not clear |
+| **30 s/move (device depth)** | **800** | **−23 ± 19** | **−3.03 REJECT** | the arbiter |
+
+**Depth is the tell: +6 at 5 s → −23 at 30 s. The regression GROWS with depth**,
+the signature of LMP pruning away lines that matter more the deeper you look —
+the same mechanism behind the original −85. Spend is clean: the qhist arm spent
+**5.94% LESS** total compute (adherence 0.7498 vs 0.7966), so the −23 is not a
+compute confound — the feature searches less AND scores worse. A ~6% compute
+refund could not rescue a −23.
+
+**Why the mirror was wrong, precisely** (the port's most useful finding): for a
+history-based ordering/pruning feature the mirror is a **predictor, not a
+bit-exact spec**. The asm↔mirror base parity already tolerates ±1 make at
+score-tied cutoffs (independent generators); when the tied cutter is a QUIET,
+the two engines bump DIFFERENT `[ptype][to]` slots, and the partition (reorder)
+and LMP (prune) AMPLIFY that into node-count and, rarely, score divergence. So
+the mirror systematically over-credits history techniques. The +31 was a false
+positive of the same family as LMP's +39.
+
+**Disposition: NOT MERGED.** Feature-OFF was verified byte-identical
+(`TestMicroAB` fingerprints + `TestFullGameMirrorParity` 780/780, re-checked
+here on the main-vs-worktree engines), so the shipped engine is provably
+untouched. But the port costs **+399 B of CODE** (headroom 912 → 370 B) even
+gated off, for a −23 feature — so it does NOT go into the image (the FT_ASP
+cycle: port, reject, gate off, then reclaim the bytes — skip straight to not
+merging). The work is preserved on branch `worktree-agent-a5069aff1957caf00`.
+A real LMP arming bug (per-move live-window over-pruned PV nodes) was found and
+fixed IN that branch's code; it never touched shipped code.
+
+**The strategic close on question (c) "adapt modern techniques":** the cheap
+wins were already taken (improving-heuristic LMR +13, check extensions +24).
+Everything left in the pruning/reduction family — LMP, IIR, razoring, adaptive
+null-R, and now history-fed LMP — is NEGATIVE at asm/device depth. The 6502's
+move ordering is not the bottleneck a history table can fix cheaply enough to
+pay. Recorded as closed: the technique-adaptation well is dry at the price the
+6502 charges.
+
 ## 2026-08-07 — ★ ADAPTATION ROUND: the PRUNING CLUSTER pays once its enabler exists — cheap quiet-history ordering + history-gated LMP = **+31 ± 11** at asm cost; ordering alone +19 ± 12; IIR/razoring/null-R/TT-replacement all DROP
 
 The modern-technique round asked: **what ordering signal can the 6502

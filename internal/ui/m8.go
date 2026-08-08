@@ -441,10 +441,23 @@ const (
 	UINLEGAL = 0xF704
 	UICHK    = 0xF705
 	UIHFULL  = 0xF7AA
-	UIHFROM  = 0xF800
-	UIHTO    = 0xF900
-	UIHFLAG  = 0xFA00
-	UIHASH0  = 0xFB00
+	// Pondering state (asm/ui.s). PONDERON is the shipped enable flag
+	// (m8main defaults it to 1); the move-by-move test harness pokes it to 0
+	// because it does not model opponent think-time, so a ponder would run to
+	// its walk-away backstop every turn. The dedicated ponder gate re-enables
+	// it. PPFROM/PPTO are the device's predicted reply P (for cross-checking
+	// against the Go predictor).
+	PONDERON  = 0xF7AC
+	PONDERING = 0xF7AD
+	PONDERKEY = 0xF7AE
+	PPFROM    = 0xF7AF
+	PPTO      = 0xF7B0
+	PPFLAGS   = 0xF7B1
+	UITHINK   = 0xF730 // think line ($00 = blank; a ponder must never paint it)
+	UIHFROM   = 0xF800
+	UIHTO     = 0xF900
+	UIHFLAG   = 0xFA00
+	UIHASH0   = 0xFB00
 )
 
 // Game-over codes (RES_* in asm/ui.s). There is deliberately no "too long"

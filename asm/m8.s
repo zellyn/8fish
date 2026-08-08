@@ -518,6 +518,11 @@ m8main:
         sta UILEVEL
         lda #0
         sta UIHUMAN             ; the human plays White by default
+        lda #1
+        sta PONDERON            ; think on the opponent's clock by default
+        lda #0                  ; ...but never mid-ponder at boot
+        sta PONDERING
+        sta PONDERKEY
         ; The board screen. dhclear/dhinit are run ONCE -- the border never
         ; changes and the scanline tables never change.
         ;
@@ -553,6 +558,10 @@ mloop:  jsr uisync
         bne mcmd                ; game over: commands only
         jsr uimyturn
         bcc mengine
+        jsr m8ponder            ; the human is on move: think on his clock,
+                                ;  warming the aux TT for the line a ponder hit
+                                ;  will reach. Leaves the board at root+M and
+                                ;  the interrupting key buffered for uiread.
 mcmd:   jsr uiread
         jsr uidispatch
         jmp mloop
@@ -1372,10 +1381,20 @@ uidrive:
         lda FEATURES2
         and #FT2_SOFTCLK
         beq udnosc
-        lda #<ENG_checkclocks
-        sta ENG_ccsite+1
-        lda #>ENG_checkclocks
-        sta ENG_ccsite+2
+        ; ccsite's target: normally the accumulating soft clock, but while
+        ; PONDERING it is pkclk — the same soft clock PLUS a keyboard poll, so
+        ; the human's first keystroke interrupts the ponder search (design
+        ; §4.2). This is a RUNTIME OPERAND PATCH, live only during a ponder;
+        ; the own-move search runs the unchanged checkclocks stream and every
+        ; tree/cycle gate stays byte-identical by construction.
+        ldx #<ENG_checkclocks
+        ldy #>ENG_checkclocks
+        lda PONDERING
+        beq :+
+        ldx #<pkclk
+        ldy #>pkclk
+:       stx ENG_ccsite+1
+        sty ENG_ccsite+2
         lda #0
         sta CLOCK_TRAP+2
         lda PHASE
@@ -1410,7 +1429,10 @@ udnosc:
         lda MAXCAP              ; fixed-depth mode: one iteration at the cap
         sta CURDEPTH
         jsr ENG_iterate
-        jmp uithinkln
+        lda PONDERING           ; the shallow-search predictor (m8ponder) runs
+        beq udfxp               ;  fixed-depth: no paint, BEST* holds P (or
+        rts                     ;  PONDERKEY says a key ended it) — just return
+udfxp:  jmp uithinkln
 udid:   lda #1
         sta CURDEPTH
 udloop: lda CLOCK_TRAP          ; iteration start (latched 24-bit)
@@ -1422,10 +1444,18 @@ udloop: lda CLOCK_TRAP          ; iteration start (latched 24-bit)
         jsr ENG_iterate
         lda ABORT
         beq udok
+        ; A PONDER abort is not the clock running out: the human has not moved
+        ; and P was only a guess, so the pondered "best move" must be DISCARDED,
+        ; not recovered (design §4.3 — the round-6 recovery trap). Skip the
+        ; PREV* recovery and the paint entirely; the search already warmed the
+        ; TT, which is a ponder's whole product.
+        lda PONDERKEY
+        beq udrec
+        rts                     ; ponder abort: warmed the TT, discard the move
         ; Aborted mid-iteration: a partial iteration's "best" is only the
         ; first root move it happened to search, so prefer the last COMPLETED
         ; iteration's move, score and depth.
-        lda PREVFROM
+udrec:  lda PREVFROM
         cmp #NOSQ
         beq udrep
         sta BESTFROM
@@ -1439,7 +1469,10 @@ udloop: lda CLOCK_TRAP          ; iteration start (latched 24-bit)
         sta SCORE+1
         dec CURDEPTH            ; iteration 1 never aborts, so >= 1
 udrep:  jmp uithinkln
-udok:   jsr uithinkln           ; paint the completed iteration
+udok:   lda PONDERING           ; a ponder search paints nothing — the human is
+        bne udnopaint           ;  on move and the screen is his, not a think
+        jsr uithinkln           ;  line ticking over. Own-move: paints as always.
+udnopaint:
         lda SCORE+1             ; a winning mate is exact: deepening can't
         bmi :+                  ;  improve it
         cmp #MATEZONEHI
@@ -1485,6 +1518,204 @@ udok:   jsr uithinkln           ; paint the completed iteration
         bcs udx
 udlj:   jmp udloop
 udx:    rts
+
+; ===========================================================================
+; Pondering (docs/ponder-design.md §11.A — the reduced v1)
+;
+; Scheme A: while the human is on move, predict his reply P with a shallow
+; search, make P, and search the resulting position root+M+P as deeply as his
+; clock allows — warming the aux TT for exactly the line a ponder HIT reaches.
+; A hit is automatic (the TT self-verifies, so the ordinary own-move search
+; re-uses the warm entries and flies deeper); a miss is automatic too (the
+; entries key to a different position and are silently ignored). The whole of
+; "hit vs miss" is therefore: never wipe the TT, and never commit P.
+;
+; Ponder time is DISCARDED, not banked (design §7.3 deferred): every uidrive
+; entry re-primes CLOCK_TRAP from PHASE, so the ponder search's clock never
+; leaks into the next own move's soft-clock accounting.
+;
+; No engine byte changes: the search interrupts through the SAME ABORT + 128-
+; node ccsite poll the soft clock already uses, reached via a runtime operand
+; patch of ccsite to pkclk that is live ONLY while pondering.
+; ===========================================================================
+
+PPREDDEPTH = 3          ; shallow predictor depth (design §5.2: 2-3 plies)
+PPMAXDEPTH = 20         ; deep-ponder depth cap (the clock/keypress stops it
+                        ;  long before this — same cap the timed levels use)
+
+; pkclk: the ccsite target installed only while PONDERING. It is checkclocks
+; (soft-clock accumulate + the ABORTL hard-abort backstop, so an opponent who
+; walks away cannot search forever) followed by a NON-DESTRUCTIVE keyboard
+; poll. Reads keyboard STATUS only — it never clears the strobe — so entkey in
+; uiread still reads and TIMES the same key for the entropy collector (design
+; §8). On a key it folds the interruption timing into ENTROPY (the hook
+; entropy.inc documents) and raises ABORT (unwind, exactly as the clock does)
+; and PONDERKEY (tell the driver tail to discard). Clobbers A,X; preserves Y,
+; matching the checkclocks it replaces (search relies on Y surviving ccsite).
+pkclk:  jsr ENG_checkclocks
+        lda ENTKSTAT            ; $C000 (or the harness trap): bit 7 = key
+        bpl pkdone              ;  waiting. A plain READ leaves the strobe set.
+        lda CLOCK_TRAP          ; how far the estimate got before the key — as
+        jsr entfold             ;  unpredictable as the keypress; adds mixing
+        lda #1
+        sta ABORT               ; -> the existing 128-node unwind path
+        sta PONDERKEY           ; -> uidrive's tail discards, does not recover
+pkdone: rts
+
+; m8ponder: one pondering interval, called from mloop while the human is on
+; move. No-op when disabled or in two-player mode (no engine opponent). On
+; entry the board is root+M (the engine's move already applied), human to
+; move; on exit it is root+M again, with the aux TT warmed and the human's
+; interrupting key still buffered for uiread.
+m8ponder:
+        lda PONDERON
+        beq mprts
+        lda UIHCNT              ; before any move there is no engine move M to
+        beq mprts               ;  ponder past (matches the Go ref's selfPonder,
+                                ;  which skips the first move); also lets a cold
+                                ;  boot reach the input prompt without a ponder
+        lda UIHUMAN             ; two players: nobody to ponder for, and the
+        cmp #$FF                ;  engine never searches in that mode
+        bne mppred
+mprts:  rts
+mppred:
+        ; --- predict P: a shallow, interruptible, non-painting search of
+        ; root+M. PONDERING is set so ccsite -> pkclk (a key already buffered
+        ; aborts it) and the fixed-depth paint is suppressed; the predictor
+        ; also warms the TT for root+M, so it is never wasted (design §5.2).
+        lda #1
+        sta PONDERING
+        lda #0
+        sta PONDERKEY
+        lda #PPREDDEPTH
+        sta MAXDEPTH
+        lda #0                  ; BUDGET 0 -> fixed depth: exactly PPREDDEPTH
+        sta BUDGET0
+        sta BUDGET1
+        sta BUDGET2
+        jsr uidrive
+        lda PONDERKEY           ; the human moved during the predictor: bail;
+        bne mpbail              ;  the key waits for uiread, the TT is warm
+        lda BESTFROM
+        cmp #NOSQ
+        beq mpbail              ; no predicted reply (shouldn't happen — a mated
+                                ;  side routes through UIRESULT to mcmd)
+        sta PPFROM
+        sta UIMFROM
+        lda BESTTO
+        sta PPTO
+        sta UIMTO
+        lda BESTFLAGS
+        sta PPFLAGS
+        and #FL_PROMO
+        sta UIMPROM
+        ; validate P against the generator (design §5.4) — the UI's own move
+        ; validator, so castling / en passant / promotion carry the right
+        ; generator flags without the UI knowing chess rules.
+        jsr uifind
+        lda UIFOUND
+        bne mpmake              ; illegal/absent: skip pondering this turn
+mpbail: jmp mpret               ; (trampoline: mpret is past the deep-search
+                                ;  block, out of short-branch range above)
+mpmake:
+        ; --- snapshot root+M, then make P onto the board. P cannot be unmade
+        ; after the search (iterate roots at ply 0 and overwrites P's undo
+        ; slot), so root+M is restored from the snapshot instead (see ppsave).
+        jsr ppsave
+        lda PPFROM
+        sta FROM
+        lda PPTO
+        sta TO
+        lda UIFFLAGS            ; the generator's flags for P
+        sta MVFLAGS
+        lda #0
+        sta PLY
+        sta HVALID
+        jsr ENG_make            ; board -> root+M+P
+        ; --- deep ponder: a timed search with a large synthetic budget, so the
+        ; human's keystroke (pkclk) is the normal terminator and ABORTL is only
+        ; the walk-away backstop. Plain budget mode (FT2_ADAPT cleared) mirrors
+        ; the Go reference's ponder(), which searches with no adaptive bank.
+        lda #PPMAXDEPTH
+        sta MAXDEPTH
+        ; BUDGET = $008000 (256-cycle units) ~= 8.4 M estimated cycles ~= 8 s.
+        ; This is only the WALK-AWAY BACKSTOP — the human's keystroke is the
+        ; normal terminator — and a fixed, level-independent head start keeps
+        ; the free time bounded (v2 could scale it to the level; §7.3 deferred).
+        ; ABORTL = 2*BUDGET = $010000, comfortably inside 24 bits.
+        lda #$00
+        sta BUDGET0
+        lda #$80
+        sta BUDGET1
+        lda #$00
+        sta BUDGET2
+        lda FEATURES2
+        and #255-FT2_ADAPT      ; plain budget mode for the ponder (single bit)
+        sta FEATURES2
+        lda #1
+        sta PONDERING
+        lda #0
+        sta PONDERKEY
+        jsr uidrive             ; warms the TT for root+M+P; keypress -> discard
+        ; --- restore root+M (board, piece list, flags) and rebuild the derived
+        ; state. PONDERING off first so nothing downstream re-patches ccsite.
+        lda #0
+        sta PONDERING
+        jsr pprestore
+mpret:  lda #0
+        sta PONDERING
+        sta PONDERKEY
+        rts
+
+; ppsave / pprestore: snapshot the raw root+M position and put it back. The
+; derived state (PHASE, HASH0-3, NPAWNS, the eval accumulators and pawn-file
+; masks) is not snapshotted — pprestore rebuilds all of it with ENG_evalinit,
+; exactly as uistartpos does, so the snapshot is just the board, the piece
+; list and the four position scalars uistartpos also writes.
+ppsave:
+        ldy #127
+ppsvb:  lda a:BOARD,y
+        sta PPBOARD,y
+        dey
+        bpl ppsvb
+        ldy #31
+ppsvp:  lda PIECESQ,y
+        sta PPPIECE,y
+        dey
+        bpl ppsvp
+        lda SIDE
+        sta PPSIDE
+        lda CASTLE
+        sta PPCASTLE
+        lda EPSQ
+        sta PPEPSQ
+        lda HALFMOVE
+        sta PPHALF
+        rts
+
+pprestore:
+        ldy #127
+pprsb:  lda PPBOARD,y
+        sta a:BOARD,y
+        dey
+        bpl pprsb
+        ldy #31
+pprsp:  lda PPPIECE,y
+        sta PIECESQ,y
+        dey
+        bpl pprsp
+        lda PPSIDE
+        sta SIDE
+        lda PPCASTLE
+        sta CASTLE
+        lda PPEPSQ
+        sta EPSQ
+        lda PPHALF
+        sta HALFMOVE
+        lda #0
+        sta PLY
+        sta HVALID
+        jmp ENG_evalinit        ; rebuild PHASE/HASH/NPAWNS/accumulators/masks
 
 ; ===========================================================================
 ; Input

@@ -144,12 +144,26 @@ CURACT    = M8VARS+$B6  ; nonzero: the cursor is up on the board
 CURSQ     = M8VARS+$B7  ; the cursor's 0x88 square
 CURFROM   = M8VARS+$B8  ; latched FROM square (NOSQ = none)
 CURTSQ    = M8VARS+$BA  ; cursqdraw scratch: the square being repainted
+; ---- The BIG BOOK and its ProRWTS2 reader (asm/m8.s m8bigbook and friends;
+; docs/prorwts2-design.md). BIGBOOKOK is the ONE-WAY latch: set only by a
+; verified load, cleared at mesearch the instant "out of book" becomes true
+; (the first real search overwrites the borrowed TT window), re-opened only
+; by a New Game reload. RWTSHOLD is the zp-swap image rwtszp exchanges with
+; the driver's $3C-$67 window around every call.
+BIGBOOKOK = M8VARS+$BB  ; nonzero: the big book is verified in aux $4000 and
+                        ;  the game has not yet left it
+BBIDX     = M8VARS+$BC  ; big-book load: which of BOOK0-BOOK3
+BBST      = M8VARS+$BD  ; big-book load: driver status, saved across rwtszp
+BBDH      = M8VARS+$BE  ; big-book load: UIDHGR held while the loader borrows
+                        ;  the DHGR main half as its staging window
+RWTSHOLD  = M8VARS+$BF  ; $F7BF-$F7EA: the zp window image (RWTS_ZPN = 44 B)
 UIBUF     = M8VARS+$20  ; input line (UIBUFMAX bytes)
 UITHINK   = M8VARS+$30  ; think line: depth / score / best move
 UIMSGB    = M8VARS+$50  ; message row (40 B + terminator)
 UIBOOKB   = M8VARS+$80  ; opening-name row (40 B + terminator)
                         ; UIHFULL is $F7AA, UIDHGR $F7AB; PP* run $F7AC-$F7B5;
-                        ; CUR*/DHFLIP $F7B6-$F7BA; $F7BB-$F7FF free
+                        ; CUR*/DHFLIP $F7B6-$F7BA; BIGBOOKOK/BB*/RWTSHOLD
+                        ; $F7BB-$F7EA; $F7EB-$F7FF free
 
 ; The game history is three PARALLEL 256-byte arrays so a ply index fits in
 ; X with no multiply: 256 plies = 128 full moves (Sargon III's own move list

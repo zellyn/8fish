@@ -36,6 +36,7 @@ var Wanted = map[string]string{
 	"curincheck":      "is the side to move in check?",
 	"evalinit":        "root accumulators, PHASE and HASH0-3 from the board",
 	"bookprobe":       "resident opening-book probe (C=1 on a hit)",
+	"bookpg":          "the probe's base page byte ($08 resident / $40 big book)",
 	"checkclocks":     "FT2_SOFTCLK accumulating-clock entry point",
 	"ccsite":          "the `jsr checkclock` whose operand FT2_SOFTCLK patches",
 	"PCOSTLO":         "FT2_SOFTCLK per-phase cost table, low bytes",

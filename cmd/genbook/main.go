@@ -67,6 +67,22 @@ func main() {
 		fmt.Fprintln(os.Stderr, "genbook:", err)
 		os.Exit(1)
 	}
+	// The BIG BOOK (docs/prorwts2-design.md §3): the same entries in the same
+	// layout plus a checksum trailer, loaded from disk into the idle
+	// transposition-table window at aux $4000. Today it carries the same
+	// curated lines as the resident blob — the MECHANISM supports
+	// book.BigMaxEntries (3,639); filling it is the follow-on content task.
+	// Its names are the resident name table (shared; one-byte NameIDs), so
+	// growing the big book must stay inside the same 255-name budget.
+	bigBlob, err := book.EncodeBig(entries, names)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "genbook:", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile("internal/book/bigbook.bin", bigBlob, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "genbook:", err)
+		os.Exit(1)
+	}
 	if err := os.WriteFile("asm/book.inc",
 		[]byte(asmHeader(len(entries), len(names), len(blob), len(nameBlob))), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "genbook:", err)
@@ -87,6 +103,10 @@ func main() {
 		len(blob), book.MaxSize, book.BaseAddr, 100*float64(len(blob))/float64(book.MaxSize),
 		len(nameBlob), book.NamesMaxSize, 100*float64(len(nameBlob))/float64(book.NamesMaxSize))
 	fmt.Printf("  reload OK: %d entries, %d names\n", len(bk.Entries()), len(names))
+	fmt.Printf("  BIGBOOK: %d B (header + %d entries + checksum) -> AUX $%04X via ProRWTS2; "+
+		"capacity %d entries (%.1f%% full)\n",
+		len(bigBlob), len(entries), book.BigBase, book.BigMaxEntries,
+		100*float64(len(entries))/float64(book.BigMaxEntries))
 
 	// The budget checks come LAST and after the breakdown is printed: when a
 	// book overflows you need to see WHERE the bytes went (entries vs names)
@@ -162,7 +182,10 @@ func asmHeader(entryCount, nameCount, blobSize, nameSize int) string {
 	fmt.Fprintf(&b, "BOOK_NAMECT    = BOOK_BASE+%d   ; byte: name count (%d)\n", 6, nameCount)
 	fmt.Fprintf(&b, "BOOK_STRIDE    = %d            ; entry stride in bytes\n", book.EntryStride)
 	fmt.Fprintf(&b, "BOOK_ENTRIES   = BOOK_BASE+%d   ; first entry\n", book.HeaderSize)
-	fmt.Fprintf(&b, "BOOK_NAMES     = $%04X   ; the name table's resident base (LC bank 2)\n\n", book.NamesAddr)
+	fmt.Fprintf(&b, "BOOK_NAMES     = $%04X   ; the name table's resident base (LC bank 2)\n", book.NamesAddr)
+	fmt.Fprintf(&b, "BIGBOOK_BASE   = $%04X   ; the BIG BOOK's aux home: the idle TT window\n", book.BigBase)
+	fmt.Fprintf(&b, "BIGBOOK_WIN    = $%04X   ; the window's size; checksum trailer in its last 2 bytes\n", book.BigWindow)
+	fmt.Fprintf(&b, "BIGBOOK_MAX    = %d    ; its capacity in entries (checksum trailer priced in)\n\n", book.BigMaxEntries)
 	b.WriteString("; entry field offsets (from an entry base):\n")
 	b.WriteString("BOOK_E_KEY     = 0    ; 4 bytes LE == HASH0..3\n")
 	b.WriteString("BOOK_E_FROM    = 4    ; 0x88 from-square\n")

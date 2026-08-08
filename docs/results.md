@@ -3,6 +3,73 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-08 — ★ THE BIG BOOK ships (ProRWTS2 feature 1): a resident 724 B read-only disk driver, and a 32 KB opening book living in the idle transposition table
+
+`docs/prorwts2-design.md` feature 1 is implemented, the design held, and the
+mechanism ships full-size: the disk now carries a **32,768-byte big-book
+window** (capacity **3,639 entries** — the design's 3,640 less one entry for
+the load-verify checksum trailer), loaded after the board paints into aux
+`$4000-$BFFF`, which is dead TT freight until the first real search. Today it
+carries the same 633 curated entries as the resident book (17% full):
+**filling it is the follow-on content task**; nothing in the mechanism knows
+the count.
+
+The pieces, all measured:
+
+- **Toolchain**: upstream `PRORWTS2.S` vendored pristine (BSD-3-Clause,
+  commit `56f76d40`, sha256-pinned), assembled by `cmd/genrwts` with
+  a2audit's ACME 0.97 into a fully-relocated blob. The 8fish read-only
+  config came out **495 B of code** (the design measured 658 with
+  `use_smartport=1`; dropping the unused SmartPort init path is 163 B);
+  724 B shipped (code + prebuilt denibble table + the slot-poke site
+  table). One structural patch: `dirbuf` → main `$1300` (MOVESTACK, dead
+  between searches). ProRWTS2's own `init` needs a running ProDOS and is
+  never assembled in; its products are reproduced at build time (denibble
+  table, directory block number) or at boot (`m8rwtsinit` pokes slot<<4
+  from the saved `$2B` into 10 operands, seeds `trackd1` from `$41`).
+- **Resident cost**: LC bank 1 `$DC00-$DED3` (the resting bank — no call
+  ever switches banks), 300 B of bank 1 still free. UICODE glue **374 B**
+  in its own budget section + ~30 B of hooks — the design guessed ~300 —
+  of the 417 free after arrow keys; **10 B of UICODE headroom** remain,
+  after two densifications (fixed-window checksum instead of count·9
+  bounds; the poke table appended to the blob so it reads from bank 1).
+  Copier 255 of 256 B. zp: the driver's `$3C-$67` window (live BOARD rows
+  included) is **swapped** around every call, 44 B held at `$F7BF`.
+- **Disk**: a ProDOS-*shaped* region (directory key block 208 + 4 sapling
+  index blocks + `BOOK0`-`BOOK3`), 138 sectors in tracks 26-34, disjoint
+  from the SD stages (tracks 0-12) by gate. Ledger: stage 1 154/176,
+  stage 2 41/176 (+3 sectors: the staged reader), region 138 — **334 of
+  560 sectors**.
+- **Latch semantics**: `BIGBOOKOK` opens only on a verified load (magic +
+  16-bit checksum over the whole window, recomputed on-device in ~0.5 s);
+  `mesearch` closes it one-way and re-points the engine's new `bookpg`
+  byte (`$40` → `$08`, the ONE engine-image change, +8 B into LCCODE's
+  108/128); `m8ponder` no-ops while open (the TT *is* the book); New Game
+  reloads only if the game left book. Failure (bad read, wrong disk, bad
+  sum) degrades to exactly the old shipped behaviour plus one message.
+- **Timing, measured on the booted disk**: board paints at **7.40 s**
+  (was 7.13: +3 stage-2 sectors and one pre-load paint), the load and
+  verify take **+8.95 s** (the design's ~5 s estimate was optimistic:
+  ProRWTS2 reads 2-sector blocks with address-field sync), first input
+  ~**16.4 s** on game 1 and after a post-book New Game; 0 s when a game
+  never left book.
+
+Gates, all executed and mutation-checked: `TestMicroAB` vs `microABGolden`
+**byte-identical, exact cycles unchanged** (grand total 3,225,425,169 — the
+bookless tree never reaches the probe); big-book probe parity ASM==Go at
+base `$40` (264 positions, 2,082 probes) beside the unchanged resident-base
+parity; `TestDiskBigBook` boots `$C600` and proves the whole chain — zp
+equality across the load, aux == `bigbook.bin` == the `.dsk`'s own blocks,
+the opening served from `$4000` with the resident entries neutered, the
+latch closing on the first search, New Game re-reading the searched-over
+window; corrupt-disk refusal with the resident book still playing; ponder
+latch respected (control: a ponder writes 2,179 window bytes; gated: 0).
+Mutations (latch clear deleted, zp swap-back deleted, ponder gate inverted)
+each killed by a named assertion. Per §3.7 of the design this feature is
+gated on correctness, not Elo: book breadth measured +3 ± 10 in July and the
+win here is product value plus zero resident-byte cost during the
+middlegame.
+
 ## 2026-08-08 — ARROW-KEY MOVE ENTRY ships: cursor square-picking on the DHGR board, 658 B of UICODE, and the BLOAD tripwire fired on schedule
 
 The on-device UI has a second input mode (docs/ui-design.md §18): an arrow

@@ -1,7 +1,11 @@
 # chess6502 build. Requires ca65/ld65 (brew install cc65) and Go.
+# The ProRWTS2 resident reader additionally needs ACME (the binary a2audit
+# vendors); its generated outputs are committed, so ACME is only needed when
+# regenerating them (the vendored source or cmd/genrwts changed).
 
 CA65 := ca65
 LD65 := ld65
+ACME ?= $(HOME)/gh/a2audit/bin/acme
 
 # Warn (once per make run) if the toolchain drifts from the tested version.
 TESTED_CC65 := V2.18
@@ -92,8 +96,19 @@ asm/uitest.bin: asm/uitest.s asm/ui.s asm/defs.inc asm/uitest.cfg
 asm/engsyms.inc: asm/engine.bin internal/engsyms/engsyms.go cmd/genengsyms/main.go
 	go run ./cmd/genengsyms
 
+# The ProRWTS2 resident-reader blob and its layout facts: ONE genrwts run
+# writes THREE outputs (the blob, the Go constants, the asm include). Same
+# grouped-target arrangement as the tile blob below, for the same GNU Make
+# 3.81 reason: the blob carries the real rule, the sibling outputs depend on
+# it with an empty recipe.
+internal/rwts/rwtsblob.bin: asm/third_party/PRORWTS2.S cmd/genrwts/main.go internal/rwts/rwts.go
+	ACME=$(ACME) go run ./cmd/genrwts
+
+asm/rwts.inc internal/rwts/gen.go: internal/rwts/rwtsblob.bin
+	@:
+
 M8_SRCS = asm/m8.s asm/ui.s asm/dhgr.s asm/entropy.inc asm/defs.inc asm/book.inc \
-          asm/tiledefs.inc asm/tiles.inc asm/engsyms.inc asm/m8.cfg
+          asm/tiledefs.inc asm/tiles.inc asm/engsyms.inc asm/rwts.inc asm/m8.cfg
 
 asm/m8.bin: $(M8_SRCS)
 	cd asm && $(CA65) -g m8.s -o m8.o
@@ -118,7 +133,9 @@ asm/m8sdboot.bin: $(M8_SRCS) asm/m8sd.cfg
 dsk: asm/8fish.dsk
 
 asm/8fish.dsk: asm/m8sdboot.bin asm/m8.bin asm/engine.bin internal/book/bookblob.bin \
-               internal/tiles/tileblob.bin cmd/mkdsk/main.go internal/delivery/delivery.go
+               internal/book/bigbook.bin internal/rwts/rwtsblob.bin \
+               internal/tiles/tileblob.bin cmd/mkdsk/main.go internal/delivery/delivery.go \
+               internal/delivery/bookregion.go
 	@command -v $(DISKII) >/dev/null 2>&1 || { \
 	  echo "$(DISKII) not found on PATH: it builds the Standard Delivery boot disk." >&2; \
 	  echo "  go install github.com/zellyn/diskii@latest" >&2; \

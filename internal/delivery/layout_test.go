@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/zellyn/chess6502/internal/asmbuild"
+	"github.com/zellyn/chess6502/internal/rwts"
 )
 
 const layoutRoot = "../.."
@@ -158,11 +159,13 @@ func TestMainMemoryLayout(t *testing.T) {
 	// reuses the payload's staging area. Both blobs are then copied on -- the
 	// tiles to LC bank 1, the names to LC bank 2, the entries to aux $0800 --
 	// and main $2000-$3FFF is left free for the DHGR main half.
+	rwtsblob := fileLen(t, "internal/rwts/rwtsblob.bin")
 	t.Log("STANDARD DELIVERY stage 2 (landing zones in MAIN, then copied on):")
 	disjoint(t, "SD stage 2", []region{
 		{"copier + chain loader (m8sdboot.bin)", CopierOrg, CopierOrg + sdBoot},
 		{"staged tile blob", TilesOrg, TilesOrg + tileblob},
 		{"staged book name table", NamesOrg, NamesOrg + booknames},
+		{"staged ProRWTS2 reader blob", RwtsOrg, RwtsOrg + rwtsblob},
 		{"staged opening book", BookOrg, BookOrg + book},
 		{"engine image", EngineOrg, EngineOrg + engine},
 	})
@@ -177,6 +180,18 @@ func TestMainMemoryLayout(t *testing.T) {
 			"$%04X: asm/m8.s derives SD2NAMES from TILE_BLOB_SIZE, so the two now "+
 			"disagree about where stage 2 puts the name table",
 			NamesOrg, tileblob, TilesOrg, want)
+	}
+	// Same derivation discipline for the reader blob's landing zone: asm/m8.s
+	// computes SD2RWTS as the page after the name table; RwtsOrg must be the
+	// identical sum or the copier lifts the name table's tail as driver code.
+	if want := NamesOrg + (booknames+SectorBytes-1)/SectorBytes*SectorBytes; RwtsOrg != want {
+		t.Errorf("RwtsOrg is $%04X but the name table (%d B at $%04X) ends at page "+
+			"$%04X: asm/m8.s's SD2RWTS and delivery.RwtsOrg disagree",
+			RwtsOrg, booknames, NamesOrg, want)
+	}
+	if RwtsOrg+rwtsblob > BookOrg {
+		t.Errorf("the staged reader blob ($%04X+%d) runs into the book's landing "+
+			"zone at $%04X", RwtsOrg, rwtsblob, BookOrg)
 	}
 
 	// The BLOAD layout carries NO staged opening book any more (2026-08-08):
@@ -516,6 +531,14 @@ func TestLanguageCardBank1Layout(t *testing.T) {
 	const rowTab = 152 // one entry per board scanline
 	const blankTab = 2 * 76
 
+	rwtsblob := fileLen(t, "internal/rwts/rwtsblob.bin")
+	if rwtsblob != rwts.BlobLen {
+		t.Errorf("internal/rwts/rwtsblob.bin is %d B but gen.go says %d: re-run "+
+			"`go run ./cmd/genrwts`", rwtsblob, rwts.BlobLen)
+	}
+	if RwtsLC != rwts.EntryAddr {
+		t.Errorf("delivery.RwtsLC = $%04X but rwts.EntryAddr = $%04X", RwtsLC, rwts.EntryAddr)
+	}
 	t.Log("LANGUAGE CARD BANK 1 ($D000-$DFFF):")
 	disjoint(t, "LC bank 1", []region{
 		{"LCCODE (ttfetch + the book's bkfetch/bkhdr)", lccode, lccode + lcsize},
@@ -523,8 +546,9 @@ func TestLanguageCardBank1Layout(t *testing.T) {
 		{"DHROWL (scanline bases, low)", rowl, rowl + rowTab},
 		{"DHROWH (scanline bases, high)", rowh, rowh + rowTab},
 		{"dhblnk (the two synthesised empty tiles)", blnk, blnk + blankTab},
+		{"ProRWTS2 read-only driver (m8rwtsinit installs it)", RwtsLC, RwtsLC + rwtsblob},
 	})
-	top := blnk + blankTab
+	top := RwtsLC + rwtsblob
 	if top > 0xE000 {
 		t.Errorf("LC bank 1 use ends at $%04X, past $DFFF and into the UI's own "+
 			"$E000-$FFEF", top-1)

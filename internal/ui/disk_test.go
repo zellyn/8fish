@@ -712,22 +712,16 @@ func TestDiskPlays(t *testing.T) {
 	// transposition table in AUXILIARY RAM was written, which is the whole
 	// reason this machine has to be a IIe and not the ][+ the rest of the
 	// project's emulator work boots.
-	auxTouched := func() int {
-		n := 0
-		// The transposition table is aux $4000-$BFFF (all 4096 entries; it
-		// moved off $0200 when the DHGR aux half claimed $2000-$3FFF). Aux
-		// $0800-$1E48 below it is the resident opening book's entries, which
-		// the copier filled at boot, so counting from $0200 would count the
-		// book -- and $0400-$07FF below THAT is the 80-column text page.
-		for _, b := range m.Mem.Aux[0x4000:0xC000] {
-			if b != 0 {
-				n++
-			}
-		}
-		return n
-	}
-	if n := auxTouched(); n != 0 {
-		t.Errorf("the aux transposition table already has %d non-zero bytes before any search", n)
+	//
+	// The TT window aux $4000-$BFFF is NOT empty before the first search any
+	// more: since 2026-08-08 it holds the BIG BOOK (loaded off the disk by
+	// the ProRWTS2 reader -- TestDiskBigBook is its own gate). So "nothing
+	// searched yet" is now the assertion that the window still equals
+	// bigbook.bin, and "the search wrote the TT" is that it no longer does.
+	auxWindow := func() []byte { return m.Mem.Aux[0x4000:0xC000] }
+	if !bytes.Equal(auxWindow(), book.DefaultBig()) {
+		t.Errorf("before any search the TT window should still be the big book, " +
+			"byte for byte -- something searched (or scribbled) during the opening")
 	}
 	searched := false
 	for _, mv := range []string{"g1h3", "h1g1", "f1e2", "e1f1"} {
@@ -750,9 +744,14 @@ func TestDiskPlays(t *testing.T) {
 	if !searched {
 		t.Fatal("never left the book, so nothing searched")
 	}
-	n := auxTouched()
-	t.Logf("AUX RAM: %d non-zero bytes in the transposition table at aux $4000-$BFFF "+
-		"after the first real search", n)
+	n := 0
+	for i, b := range auxWindow() {
+		if b != book.DefaultBig()[i] {
+			n++
+		}
+	}
+	t.Logf("AUX RAM: the first real search overwrote %d bytes of the TT window at "+
+		"aux $4000-$BFFF (which until then was the big book)", n)
 	if n == 0 {
 		t.Error("the engine searched but wrote nothing to the aux-RAM transposition " +
 			"table: the copier's LCCODE install or the RAMWRT path is broken")

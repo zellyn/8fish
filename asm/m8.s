@@ -32,6 +32,7 @@
         .include "book.inc"
         .include "tiledefs.inc"
         .include "engsyms.inc"
+        .include "rwts.inc"
 
 ; ---------------------------------------------------------------------------
 ; LANGUAGE CARD BANK 1, above the engine's 65-byte LCCODE at $D000. Until now
@@ -279,6 +280,18 @@ sd2done:
         lda #1                  ; the artwork is resident: boot to the BOARD
         sta UIDHGRDEF           ;  (a RAM patch of the payload, not a build
                                 ;   difference -- see m8main)
+        ; The two boot-time facts the ProRWTS2 reader's install needs, saved
+        ; while they are still alive (this is the last code that may read
+        ; them): the boot slot and the track the head is on. The install
+        ; itself (m8rwtsinit) runs from the payload at m8main time -- the
+        ; copier's one page is full -- and the blob it installs is staged at
+        ; SD2RWTS, which nothing touches before the first search.
+        lda $2B                 ; slot<<4, exactly as the boot ROM left it
+        sta RWTSSLOT
+        lda $41                 ; the loader's current track: the head does
+        sta RWTSTRK             ;  not move again until the driver seeks
+        lda #1                  ; the reader is deliverable: m8rwtsinit and
+        sta RWTSDEF             ;  m8bigbook run (RAM patch, like UIDHGRDEF)
 .endif
 
         jmp $E000               ; the payload's first three bytes are a jump
@@ -331,8 +344,28 @@ SD2NAMES  = SD2TILES + SD2TILEN * 256   ; the name table abuts the artwork, so
                                         ;  and TestStage2PageTable fails if the
                                         ;  two ever disagree.
 SD2NAMEN  = (BOOK_NAMES_SIZE + 255) / 256
+; The ProRWTS2 reader blob abuts the name table -- same derivation, same
+; drift gates (delivery.RwtsOrg is the identical sum, TestMainMemoryLayout;
+; the page table below, TestStage2PageTable). Derived from the CONSTANT
+; stage-2 base rather than from SD2NAMES, because m8rwtsinit -- payload code,
+; which must stay byte-identical across both links -- reads it, and SD2NAMES
+; is rooted in UIPAYLOAD, which differs per link. The .assert under SDCHAIN
+; below pins the two derivations together on the one link where both exist.
+SD2STAGE  = $0E00                       ; = delivery.TilesOrg
+SD2RWTS   = SD2STAGE + (SD2TILEN + SD2NAMEN) * 256
+SD2RWTSN  = (RWTS_SIZE + 255) / 256
 SD2BOOK   = BOOKSTAGE           ; main hi-res page 1: the DHGR main half
 SD2BOOKN  = (BOOK_BLOB_SIZE + 255) / 256
+
+; The staged reader must stop below the book's landing zone at $2000. It does
+; today ($1D00 + 724); if the name table grows past $1D40-ish this fires and
+; the reader moves to a higher hole (e.g. $3700, below the engine).
+.assert SD2RWTS + RWTS_SIZE <= SD2BOOK, error, "the staged ProRWTS2 reader runs into the book's landing zone at $2000: move SD2RWTS (and delivery.RwtsOrg) to a higher hole"
+.ifdef SDCHAIN
+; ...and on the link that HAS a stage 2, the constant-rooted derivation must
+; equal the UIPAYLOAD-rooted one the copier stages by.
+.assert SD2RWTS = SD2NAMES + SD2NAMEN * 256, error, "SD2STAGE is not the disk link's staging base: SD2RWTS and the stage-2 span list disagree"
+.endif
 
 ; The name table's whole-page copy must stay inside Language Card bank 2. It
 ; lands at BOOK_NAMES ($D000) and $E000-$FFFF is NOT banked -- it is the UI's
@@ -353,6 +386,9 @@ sd2tab:
         .endrepeat
         .repeat SD2NAMEN, i
         .byte >SD2NAMES + i
+        .endrepeat
+        .repeat SD2RWTSN, i
+        .byte >SD2RWTS + i
         .endrepeat
         .repeat SD2BOOKN, i
         .byte >SD2BOOK + i
@@ -484,6 +520,10 @@ m8main:
                                 ;  would arrive as the first character typed
         jsr m8machine           ; refuse to run where the engine cannot
         jsr m8bookaux           ; ...and only then move the book into aux
+        lda RWTSDEF             ; disk build only: make the ProRWTS2 reader
+        beq :+                  ;  resident while its staged blob (SD2RWTS)
+        jsr m8rwtsinit          ;  is still alive
+:
         ; CTRL-RESET. On a IIe (unlike a ][+ with a Language Card) a hardware
         ; reset DISABLES the built-in language card — that is exactly why
         ; Apple Pascal could use Ctrl-Reset as a warm start — so $FFFC is
@@ -558,6 +598,9 @@ m8main:
         lda #0                  ; ...but never mid-ponder at boot
         sta PONDERING
         sta PONDERKEY
+        sta BIGBOOKOK           ; the big-book latch opens only on a VERIFIED
+                                ;  load (m8bigbook); until then this LC byte
+                                ;  is power-on garbage
         ; The board screen. dhclear/dhinit are run ONCE -- the border never
         ; changes and the scanline tables never change.
         ;
@@ -581,6 +624,16 @@ m8main:
         jsr uidhon
 :
         jsr m8new
+        ; Disk build: pull the BIG BOOK into the idle transposition-table
+        ; window. AFTER the first board paint, deliberately -- the load takes
+        ; seconds and the 7.13 s boot-to-board is a shipped number -- so paint
+        ; here, then load, then fall into the loop (whose own paint repaints
+        ; whatever the load's staging scribbled).
+        lda RWTSDEF
+        beq mloop
+        jsr uisync
+        jsr uipaint
+        jsr m8bigbook
 
 ; The main loop. Every position change goes through uisync, and every
 ; iteration repaints the WHOLE screen: a full 40x24 repaint is 23,659 cycles
@@ -646,17 +699,260 @@ m8bookaux:
         sta TTPTR+1
         ldx #(BOOK_BLOB_SIZE + 255) / 256
         sta RAMWRTON
-        ldy #0
-m8bal:  lda (ZPTR),y
+        jsr copyx
+        sta RAMWRTOFF
+        rts
+
+; copyx: copy X pages from (ZPTR) to (TTPTR). The UICODE twin of the boot
+; copier's copyp, shared by m8bookaux, m8rwtsinit and m8bigbook -- needed
+; here because the copier's copy runs from main RAM the engine reclaims.
+; Honours whatever RAMWRT/RAMRD state the caller set (that is how one loop
+; serves main->aux and main->LC alike). Clobbers A,X,Y and both pointers.
+copyx:  ldy #0
+cxl:    lda (ZPTR),y
         sta (TTPTR),y
         iny
-        bne m8bal
+        bne cxl
         inc ZPTR+1
         inc TTPTR+1
         dex
-        bne m8bal
-        sta RAMWRTOFF
+        bne copyx
         rts
+
+; ---------------------------------------------------------------------------
+; m8rwtsinit: make the ProRWTS2 read-only reader RESIDENT (disk build only;
+; the caller gates on RWTSDEF). Stage 2 landed the relocated blob at SD2RWTS;
+; copy it into Language Card bank 1 at RWTS_ENTRY -- the RESTING bank, already
+; read+write, so neither this copy nor any later driver call switches banks --
+; then finish what ProRWTS2's own init would have done if 8fish had the
+; ProDOS it requires (docs/prorwts2-design.md §2.3):
+;
+;   * poke the boot slot (slot<<4, saved from $2B by the chain loader) into
+;     the driver's soft-switch operands. The assembled operands are the
+;     slot-0 addresses ($C080/$C088/$C089/$C08C), so one ORA per site is the
+;     whole fix-up; the site list comes from cmd/genrwts's label extraction,
+;     APPENDED TO THE BLOB ITSELF (so it reads from bank 1 and costs the
+;     UICODE budget nothing), and upstream drift breaks the build, not the
+;     disk.
+;   * seed the driver's current-track operand from the loader's $41 (saved
+;     at the same moment) -- the head has not moved since, so the driver's
+;     first seek steps from where the arm really is.
+;
+; The denibble table is not built here: cmd/genrwts prebakes it into the blob.
+; Runs ONCE, before anything can search (the staged blob sits in MOVESTACK).
+; ---------------------------------------------------------------------------
+m8rwtsinit:
+        lda #0                  ; both the staging zone and the resident home
+        sta ZPTR                ;  are page-aligned
+        sta TTPTR
+        lda #>SD2RWTS
+        sta ZPTR+1
+        lda #>RWTS_ENTRY
+        sta TTPTR+1
+        ldx #(RWTS_SIZE + 255) / 256
+        jsr copyx
+        ldx #RWTS_NSLOT-1
+mrwp:   lda RWTS_SLOTLO,x       ; the site table travels INSIDE the blob just
+        sta mrw1+1              ;  copied to bank 1, so these reads cost the
+        sta mrw2+1              ;  UICODE budget nothing
+        lda RWTS_SLOTHI,x
+        sta mrw1+2
+        sta mrw2+2
+        lda RWTSSLOT
+mrw1:   ora $FFFF               ; operands are self-modified per site: the
+mrw2:   sta $FFFF               ;  table is data, the poke is two stores
+        dex
+        bpl mrwp
+        lda RWTSTRK
+        sta RWTS_TRACKD1
+        rts
+
+; rwtszp: SWAP the zero-page window $3C-$67 with the held image at RWTSHOLD.
+; The driver claims that window (its API bytes and its scratch), and the
+; engine's board rows $40-$67 are LIVE across a load -- so the glue swaps the
+; whole window around every driver call: once before (engine out, driver in)
+; and once after (driver out, engine back). A SWAP rather than a save/restore
+; pair so one routine serves both directions and, incidentally, any
+; persistent driver zp state survives in the hold between calls.
+; Clobbers A,X,Y.
+rwtszp: ldx #RWTS_ZPN-1
+rzpl:   ldy RWTS_ZP,x
+        lda RWTSHOLD,x
+        sta RWTS_ZP,x
+        tya
+        sta RWTSHOLD,x
+        dex
+        bpl rzpl
+        rts
+
+; ---------------------------------------------------------------------------
+; m8bigbook: load the BIG BOOK from the disk into the idle transposition-
+; table window, aux $4000-$BFFF, and open the BIGBOOKOK latch -- but only
+; after the load VERIFIES ('BK' magic and the 16-bit checksum over the whole
+; window against the trailer in its last two bytes). A wrong slot or a
+; swapped disk reads garbage silently at the driver level; the checksum is
+; what turns "the driver returned" into "the book is really there", and an
+; unverified window is never probed.
+;
+; Self-gating: a no-op without the resident reader (BLOAD build) and while
+; the latch is already open (a New Game whose previous game never left book
+; reloads nothing -- the window was never written).
+;
+; Four driver calls, one per 8 KB file (BOOK0-BOOK3), each staged through
+; main $2000-$3FFF (the DHGR MAIN half -- the largest dead window below the
+; engine) and lifted to aux by copyx under RAMWRT. Because that staging IS
+; half the displayed board, the load runs on the 40-column screen (uidhoff)
+; and the board comes back after; the caller's next full paint repaints it.
+;
+; Failure (empty drive, swapped disk, bad read, bad checksum) can only ever
+; DEGRADE TO TODAY: the latch stays closed, the probe stays on the resident
+; book, and one message says so.
+; ---------------------------------------------------------------------------
+m8bigbook:
+        lda RWTSDEF             ; no resident reader: nothing to load
+        beq mbbr0
+        lda BIGBOOKOK           ; already verified and never searched over:
+        beq mbbgo               ;  nothing to do
+mbbr0:  rts
+mbbgo:  lda UIDHGR              ; the staging window is the displayed board's
+        sta BBDH                ;  main half: show the text screen while the
+        lda #0                  ;  loader scribbles over it
+        sta UIDHGR
+        jsr uidhoff
+        lda #<m_loading
+        ldx #>m_loading
+        jsr uisetmsg
+        jsr uipaintmsg
+        lda #0
+        sta BBIDX
+mbbfile:
+        lda BBIDX               ; the file names differ in their last byte:
+        clc                     ;  "BOOK0".."BOOK3"
+        adc #'0'
+        sta f_book+5
+        jsr rwtszp              ; engine zp (incl. board rows $40-$67) out,
+                                ;  driver zp in
+        lda #<f_book
+        sta RWTS_NAMLO
+        lda #>f_book
+        sta RWTS_NAMLO+1
+        lda #0
+        sta RWTS_SIZELO         ; 8,192 B = 16 blocks per file...
+        sta RWTS_LDRLO
+        lda #$20                ; ...landing at main $2000: >8192 and
+        sta RWTS_SIZELO+1       ;  >BOOKSTAGE are the same $20, shared
+        sta RWTS_LDRLO+1        ;  deliberately (this comment is the tie)
+        jsr RWTS_ENTRY          ; motor on, find the file, read, motor off
+        lda RWTS_STATUS
+        sta BBST                ; saved across the swap-back
+        jsr rwtszp              ; driver zp out, engine zp back
+        lda BBST
+        bne mbbfj               ; no disk / wrong disk / no such file
+        lda #<BOOKSTAGE
+        sta ZPTR
+        lda #>BOOKSTAGE
+        sta ZPTR+1
+        lda #0
+        sta TTPTR
+        lda BBIDX               ; aux destination page: $40 + 32*index
+        asl
+        asl
+        asl
+        asl
+        asl
+        adc #>BIGBOOK_BASE      ; C is clear: five ASLs of 0..3 end with 0
+        sta TTPTR+1
+        ldx #$20                ; 8 KB
+        sta RAMWRTON
+        jsr copyx
+        sta RAMWRTOFF
+        inc BBIDX
+        lda BBIDX
+        cmp #4
+        bcc mbbfile
+        jmp mbbverify
+mbbfj:  jmp mbbfail             ; near trampolines: the failure paths sit
+mbbvfj: jmp mbbvfail            ;  past the sum loop, out of branch range
+mbbverify:
+        ; ---- verify. This code runs at $E000, which RAMRD does not remap,
+        ; so one RAMRD-on window reads the assembled blob straight out of
+        ; aux; zero page (the pointer) follows ALTZP, not RAMRD. The 16-bit
+        ; byte sum runs over the WHOLE window less its 2-byte trailer --
+        ; fixed bounds, no count arithmetic, and the count bytes are covered
+        ; by the sum. Keep byte-identical to Go book.Checksum16 /
+        ; book.EncodeBig.
+        sta RAMRDON
+        lda BIGBOOK_BASE
+        cmp #'B'
+        bne mbbvfj
+        lda BIGBOOK_BASE+1
+        cmp #'K'
+        bne mbbvfj
+        lda #0
+        sta UISCR0
+        sta UISCR1
+        sta T0
+        lda #>BIGBOOK_BASE
+        sta T0+1
+        ldy #0
+mbbsum: lda (T0),y
+        clc
+        adc UISCR0
+        sta UISCR0
+        bcc :+
+        inc UISCR1
+:       inc T0
+        bne :+
+        inc T0+1
+:       lda T0
+        cmp #<(BIGBOOK_BASE+BIGBOOK_WIN-2)
+        bne mbbsum
+        lda T0+1
+        cmp #>(BIGBOOK_BASE+BIGBOOK_WIN-2)
+        bne mbbsum
+        lda (T0),y              ; the trailer: the sum the builder wrote
+        cmp UISCR0
+        bne mbbvfail
+        iny
+        lda (T0),y
+        cmp UISCR1
+        bne mbbvfail
+        sta RAMRDOFF
+        lda #>BIGBOOK_BASE      ; VERIFIED: open the latch and point the
+        sta ENG_bookpg          ;  probe at the big book
+        lda #1
+        sta BIGBOOKOK
+        jsr uiclrmsg
+        jmp mbbshow
+mbbvfail:
+        sta RAMRDOFF
+mbbfail:
+        lda #0                  ; failure degrades to exactly today's shipped
+        sta BIGBOOKOK           ;  behaviour: resident book, closed latch,
+        lda #>BOOK_BASE         ;  one message
+        sta ENG_bookpg
+        lda #<m_nobigbook
+        ldx #>m_nobigbook
+        jsr uisetmsg
+mbbshow:
+        jsr dhclear             ; the staging scribbled ALL of DHGR page 1,
+                                ;  and repaints only cover the board rows --
+                                ;  the border keeps whatever the last file's
+                                ;  bytes were. Clear it back to the boot
+                                ;  state; the caller's next paint draws the
+                                ;  board rows. (Reached only on the disk
+                                ;  build, so the artwork is resident.)
+        lda BBDH                ; ...and the board back, if it was up
+        sta UIDHGR
+        beq mbbrts
+        jsr uidhon
+mbbrts: rts
+
+; The book files' names, length-prefixed, PLAIN ASCII: the driver compares
+; these bytes against the directory block's own, and mbbfile pokes the digit.
+; In UICODE (not UIDATA2) because the driver reads them through (namlo) from
+; bank-1-resting state, and bank 2 would be switched out under it.
+f_book: .byte 5, "BOOK0"
 
 ; ---------------------------------------------------------------------------
 ; m8machine: this program needs a 128K Apple IIe. Prove it, or refuse.
@@ -1147,6 +1443,16 @@ m8engine:
         sta UITHINK             ; a book move did no searching: the previous
         jmp meapply             ;  move's depth/score readout would be a lie
 mesearch:
+        ; OUT OF BOOK: the search below is about to write the transposition
+        ; table -- which, while the BIGBOOKOK latch is open, IS the big book.
+        ; Close the latch (one-way: only a New Game reload reopens it) and
+        ; point the probe back at the resident blob, which is never
+        ; overwritten and is always the floor. Takeback back into book
+        ; territory stays closed and degrades exactly to today's behaviour.
+        lda #0
+        sta BIGBOOKOK
+        lda #>BOOK_BASE
+        sta ENG_bookpg
         jsr uiclrbook           ; out of book: drop the opening line AND repaint
                                 ;  it blank NOW, on both screens, so the stale
                                 ;  opening name is gone the instant the engine
@@ -1619,6 +1925,11 @@ pkdone: rts
 ; move; on exit it is root+M again, with the aux TT warmed and the human's
 ; interrupting key still buffered for uiread.
 m8ponder:
+        lda BIGBOOKOK           ; in the big book, pondering is OFF: a ponder
+        bne mprts               ;  search writes the TT, and the TT is the
+                                ;  book (design §3.4 -- the engine answers
+                                ;  instantly in book anyway; the only loss is
+                                ;  TT warmth for the FIRST real search)
         lda PONDERON
         beq mprts
         lda UIHCNT              ; before any move there is no engine move M to
@@ -2364,8 +2675,11 @@ uapcan: jsr uiclrmsg
 ; ===========================================================================
 
 cmd_new:
-        jsr m8new
-        jmp uiclrmsg
+        jsr uiclrmsg            ; clear FIRST: m8bigbook may leave its own
+        jsr m8new               ;  message (a failed reload names itself)
+        jmp m8bigbook           ; reload the big book ONLY if the last game
+                                ;  left it (it self-gates on BIGBOOKOK, so a
+                                ;  game that stayed in book reloads nothing)
 
 cmd_take:
         lda UIHFULL             ; past ply 255 the plies are no longer
@@ -3425,6 +3739,11 @@ m_side2:    SCRSTR "TWO PLAYERS. S NEXT: YOU PLAY BLACK"
 ; moment it appears — the same discoverability rule cmd_swap learned the
 ; hard way (§16.3). 39 characters is the message row's limit (uisetmsg).
 m_cursor:   SCRSTR "ARROWS MOVE. SPACE SELECTS. ESC CANCELS"
+; The big-book load (m8bigbook): what the seconds of disk activity are, and
+; the one honest sentence when they fail (the game then runs on the resident
+; book, exactly as a diskless 8fish always has).
+m_loading:  SCRSTR "LOADING OPENING LIBRARY..."
+m_nobigbook: SCRSTR "DISK NOT READ - USING THE SMALL BOOK"
 
         .segment "UICODE"
 
@@ -3447,3 +3766,13 @@ m_cursor:   SCRSTR "ARROWS MOVE. SPACE SELECTS. ESC CANCELS"
 ; loader stores $01 here in RAM once it has put the artwork in Language Card
 ; bank 1. See m8main.
 UIDHGRDEF: .byte 0
+
+; The ProRWTS2 reader's boot facts, same RAM-patch pattern as UIDHGRDEF ($00
+; in both links; only the disk's chain loader stores here). RWTSDEF gates
+; m8rwtsinit and m8bigbook: a BRUN has no staged driver blob and no live
+; loader state, so on that path the reader simply does not exist. RWTSSLOT /
+; RWTSTRK are the boot ROM's $2B and the loader's $41, saved by the copier at
+; the one moment they are still alive.
+RWTSDEF:  .byte 0
+RWTSSLOT: .byte 0
+RWTSTRK:  .byte 0

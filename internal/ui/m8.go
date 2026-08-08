@@ -512,6 +512,11 @@ const (
 	CURACT  = 0xF7B6 // nonzero: the cursor is up on the board
 	CURSQ   = 0xF7B7 // the cursor's 0x88 square
 	CURFROM = 0xF7B8 // latched FROM square ($FF = none)
+	// The big book and its ProRWTS2 reader (asm/m8.s m8bigbook,
+	// docs/prorwts2-design.md). BIGBOOKOK is the one-way in-book latch;
+	// RWTSHOLD is the zp-swap image (44 bytes, $F7BF-$F7EA).
+	BIGBOOKOK = 0xF7BB
+	RWTSHOLD  = 0xF7BF
 	UITHINK   = 0xF730 // think line ($00 = blank; a ponder must never paint it)
 	UIHFROM   = 0xF800
 	UIHTO     = 0xF900

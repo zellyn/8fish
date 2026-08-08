@@ -51,11 +51,25 @@ type BookProbeResult struct {
 //
 // bookentry is the address of the asm bookentry label (from engine.lbl).
 func AsmBookProbe(bin []byte, defs Defs, bookentry uint16, blob []byte, pos *Position, r uint32) (*BookProbeResult, error) {
+	return AsmBookProbeAt(bin, defs, bookentry, 0, BookBase, blob, pos, r)
+}
+
+// AsmBookProbeAt is AsmBookProbe with the probe RE-BASED: the blob is loaded
+// into aux at base, and the engine's `bookpg` byte (address bookpg, from
+// engine.lbl; 0 = leave the shipped default) is poked to base's page — the
+// exact one-byte re-point asm/m8.s performs when the BIG BOOK is resident in
+// the idle TT window at aux $4000. Everything else — the machine, the probe
+// entry, the read-only blob check — is identical, which is the point: the
+// selection code must not know which blob it is walking.
+func AsmBookProbeAt(bin []byte, defs Defs, bookentry, bookpg uint16, base uint16, blob []byte, pos *Position, r uint32) (*BookProbeResult, error) {
 	m, err := NewMachine(bin, defs, pos, 0, io.Discard)
 	if err != nil {
 		return nil, err
 	}
-	LoadBook(m, blob)
+	copy(m.Mem.Aux[base:], blob)
+	if bookpg != 0 {
+		m.Mem.Main[bookpg] = byte(base >> 8)
+	}
 	rnd := defs["BOOKRND"]
 	m.Mem.Main[rnd] = byte(r)
 	m.Mem.Main[rnd+1] = byte(r >> 8)
@@ -86,13 +100,13 @@ func AsmBookProbe(bin []byte, defs Defs, bookentry uint16, blob []byte, pos *Pos
 	// in the suite that would notice a future primitive whose pointer
 	// arithmetic writes THROUGH the blob, and it costs O(blob) per probe
 	// against an emulated 6502 search, i.e. nothing.
-	if got := m.Mem.Aux[BookBase : BookBase+len(blob)]; !bytes.Equal(got, blob) {
+	if got := m.Mem.Aux[base : int(base)+len(blob)]; !bytes.Equal(got, blob) {
 		for i := range blob {
 			if blob[i] != got[i] {
 				return nil, fmt.Errorf("the probe MODIFIED the resident blob at aux "+
 					"$%04X (offset %d of %d): $%02X became $%02X. The blob is read-only; "+
 					"a write into it means bkfetch/bkhdr ran with RAMWRT on (see asm/book.s)",
-					BookBase+i, i, len(blob), blob[i], got[i])
+					int(base)+i, i, len(blob), blob[i], got[i])
 			}
 		}
 	}

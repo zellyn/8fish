@@ -1,7 +1,12 @@
 # ProRWTS2 on the 8fish disk — design
 
-Status: **DESIGN ONLY (2026-08-08).** No engine code, no `asm/` edits, no build
-changes. This document specifies how peterferrie's ProRWTS2 (read+write ProDOS
+Status: **FEATURE 1 SHIPPED (2026-08-08)** — the big book and its resident
+read-only reader are implemented as specified; see §10 for the measured
+deltas against this design, and docs/results.md for the entry. Feature 2
+(saves) remains design-only.
+
+Original status line: DESIGN ONLY (2026-08-08). No engine code, no `asm/`
+edits, no build changes. This document specifies how peterferrie's ProRWTS2 (read+write ProDOS
 driver, BSD-3-Clause) gives the shipped disk (1) a much larger opening book in
 the idle transposition table and (2) save/load games — and answers the central
 bootstrapping question: **if the driver is loaded on demand, what loads it?**
@@ -563,6 +568,32 @@ and the `internal/delivery` layout suite.
    not to touch LC bank switches at run time (init-only concern upstream);
    `TestDriverReads` should assert bank 1 read+write is still selected on
    return, same shape as `TestBookNameRestoresBank1`.
+
+---
+
+## 10. Feature 1 implementation deltas (2026-08-08, measured)
+
+What shipped differs from the design above in exactly these places; each was
+a measurement replacing an estimate, or a densification the UICODE budget
+forced. Everything else is as specified.
+
+| design said | shipped | why |
+|---|---|---|
+| resident driver 658 B code / 960 B page-rounded | **495 B code / 724 B blob**, `$DC00-$DED3` | `use_smartport=0`: there is no SmartPort init path to keep once `init` is replaced (−163 B) |
+| capacity 3,640 entries | **3,639** | the load-verify checksum trailer (§3.4's "checksum in the header spare" does not fit an 8-byte header that is already full; it lives in the window's last 2 bytes instead, with FIXED bounds — which also deleted ~70 B of count·9 arithmetic from the verify loop) |
+| glue ~300 B UICODE | **374 B section + ~30 B hooks**, 10 B headroom left | measured; two densifications paid for it (fixed-window checksum; the slot-poke site table appended to the driver blob so `m8rwtsinit` reads it from bank 1) |
+| copier-side init in the copier | split: the copier (255/256 B full) saves `$2B`/`$41` into payload bytes; **`m8rwtsinit` in UICODE** does the install at `m8main` time | the boot page had 19 B free; the staged blob at `$1D00` is intact until the first search, so the install can run from the payload |
+| driver blob staged "+4" in stage 1 | **stage 2, 3 sectors at `$1D00`** (abutting the name table) | stage 2 is where every other lifted blob lives; the `$1D00-$1FBF` hole below the book landing was free |
+| load ~5 s, input ~12 s | **+8.95 s load, input ~16.4 s** (board at 7.40 s) | ProRWTS2 reads 2-sector ProDOS blocks with address-field sync between; the 36.8 ms/sector SD figure was the wrong model. Acceptable: it is once per game 1 / post-book New Game only |
+| `dirbuf` at `$1300` | as designed | one structural patch, anchored exact-match in cmd/genrwts |
+| open question 1 (measured load time) | answered above | |
+| open question 2 (clear-on-latch-close) | **garbage-start kept** as the defined semantics | the same `ttfetch` 24-bit verify that guards power-on garbage guards book leftovers; written down at `mesearch`'s close |
+
+The book REGION note in §5 held exactly: directory key block 208, sapling
+index blocks, fixed in-place files, zero track-0 metadata, zero boot cost.
+`TestBlockOffsetsMatchTheCanonicalSkew` pins the builder's block→sector
+arithmetic against the published ProDOS/DOS-3.3 table, and `TestDiskBigBook`
+executes the driver against the real nibblised disk.
 
 ---
 

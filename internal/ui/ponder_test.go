@@ -110,14 +110,23 @@ func ttWarmMove(t *testing.T, aux *[0x10000]byte, fen string) (from, to byte, ok
 }
 
 // TestPondersByDefault: the shipped image really ponders — m8main leaves
-// PONDERON set. (boot() then pokes it off for the move-by-move gates.)
+// PONDERON set. ui.Boot captures that shipped default before turning pondering
+// off for the harness (which cannot run a non-blocking poll — see
+// Machine.PonderDefault).
 func TestPondersByDefault(t *testing.T) {
 	u, err := ui.Boot(root, nil)
 	if err != nil {
 		t.Fatalf("boot: %v", err)
 	}
-	if got := u.Peek(ui.PONDERON); got != 1 {
-		t.Fatalf("the booted disk has PONDERON=%d, want 1 — the shipped disk must ponder", got)
+	if u.PonderDefault != 1 {
+		t.Fatalf("the shipped image booted with PONDERON=%d, want 1 — the disk must ponder", u.PonderDefault)
+	}
+	s, err := ui.BootShipping(root, nil)
+	if err != nil {
+		t.Fatalf("boot shipping: %v", err)
+	}
+	if s.PonderDefault != 1 {
+		t.Fatalf("the SHIPPING image booted with PONDERON=%d, want 1", s.PonderDefault)
 	}
 }
 

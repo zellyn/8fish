@@ -121,6 +121,14 @@ type DiskMachine struct {
 	Cycles uint64
 	// ROMName records which $D000-$FFFF ROM image was used (see FindROM).
 	ROMName string
+
+	// PonderDefault is the PONDERON value the disk image set (1 — the disk
+	// ponders). The first time the boot reaches the keyboard it is captured and
+	// pondering is turned off, because the harness parks the machine on a
+	// non-blocking keyboard poll (see Machine.PonderDefault); pondering itself
+	// is gated by internal/ui/ponder_test.go on the HARNESSKBD image.
+	PonderDefault  byte
+	ponderDisabled bool
 }
 
 // FindROM returns a $D000-$FFFF ROM image and a name for it, preferring a
@@ -308,11 +316,20 @@ func (m *DiskMachine) RunToKeyboard(maxCycles uint64) (bool, error) {
 			return false, err
 		}
 		if m.Mem.waitingKey {
+			if !m.ponderDisabled { // at the first prompt the game has not started
+				m.PonderDefault = m.Mem.Main[ponderOnAddr]
+				m.Mem.Main[ponderOnAddr] = 0
+				m.ponderDisabled = true
+			}
 			return true, nil
 		}
 	}
 	return false, nil
 }
+
+// ponderOnAddr is asm/ui.s PONDERON, mirrored (an equate, not an emitted
+// label). Keep equal to internal/ui.PONDERON.
+const ponderOnAddr = 0xF7AC
 
 // SendKey presses one key on the modelled IIe keyboard. The key stays in the
 // latch until the program clears the strobe at $C010.

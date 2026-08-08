@@ -56,15 +56,8 @@ func boot(t *testing.T) *ui.Machine {
 	if err != nil {
 		t.Fatalf("boot: %v", err)
 	}
-	// The shipped disk PONDERS (m8main defaults PONDERON=1 — TestPondersByDefault
-	// asserts that on the raw image). These tests drive the game one keystroke at
-	// a time and only send the next move once the machine has parked at the input
-	// prompt, so a ponder would find no key buffered and run to its walk-away
-	// backstop on every human turn — slow, and it would fold ~8 s of "opponent
-	// time" into TestTimedLevel's own-move cycle measurement. They do not model
-	// opponent think-time, so pondering is off here; ponder.go's gate exercises
-	// it with a think-time-aware driver.
-	u.Poke(ui.PONDERON, 0)
+	// ui.Boot already turned pondering off for the harness (Machine.PonderDefault
+	// records the shipped default). The ponder gate re-enables it explicitly.
 	return u
 }
 

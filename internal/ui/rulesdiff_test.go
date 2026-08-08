@@ -709,11 +709,18 @@ func longGame(t *testing.T, plies int) []string {
 //   - nothing is written past the last byte of any array (canaries);
 //   - takeback is REFUSED, in words, rather than replaying to a position
 //     that is not the one before the last move.
-// canaryLo/canaryHi bracket free Language Card RAM above UI80BUF
-// ($FF00-$FF4F, the mixed-mode window's staging line). The canary used to sit
-// at $FF00 under the comment "free LC RAM just past UIHASH3" -- true when it
-// was written, false the moment MIXED MODE landed, and invisible because this
-// test is -short-skipped and `make test` runs -short.
+// canaryLo/canaryHi bracket the START of the ponder position snapshot
+// (PPBOARD, $FF50-$FFCF; see asm/ui.s). This was "free LC RAM" when the
+// canary moved here after MIXED MODE landed, but pondering (2026-08-07) took
+// the LAST free run below the vectors -- $FF00-$FFEF is now UI80BUF +
+// PPBOARD/PPPIECE with NOTHING free above the history arrays. So the canary
+// no longer watches free space; it watches the ponder snapshot, and the
+// invariant it now enforces is real and worth keeping: a maximal-length
+// TWO-PLAYER game (which never ponders) must not spill the history arrays or
+// UI80BUF into the ponder region. If it fires, either the $FB00-$FEFF arrays
+// overran or UI80BUF wrote past its 80 bytes. (Earlier this comment claimed
+// $FF50 was "GENUINELY free" -- the third memory-map comment in this repo to
+// go stale; it is corrected here rather than left to rot.)
 const (
 	canaryLo = uint16(0xFF50)
 	canaryHi = uint16(0xFF60)
@@ -733,10 +740,10 @@ func TestLongGameIsNotDrawn(t *testing.T) {
 	for i := range hash0 {
 		hash0[i] = u.Peek(ui.UIHASH0 + uint16(0x100*i))
 	}
-	// canaryLo/canaryHi bracket 16 bytes of GENUINELY free Language Card RAM,
-	// which is not the same thing as "just past UIHASH3": $FF00-$FF4F is
-	// UI80BUF, the mixed-mode window's staging line, rewritten on every
-	// keystroke. Free space starts at $FF50 and runs to the 6502 vectors.
+	// canaryLo/canaryHi bracket the ponder snapshot region (PPBOARD). A
+	// two-player game never ponders, so these bytes must stay untouched; a
+	// change means the history arrays or UI80BUF spilled into them (see the
+	// const's comment -- the LC is full, there is no free RAM left to canary).
 	for a := canaryLo; a < canaryHi; a++ {
 		u.Poke(a, 0xC5)
 	}

@@ -3,6 +3,47 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-08 — ARROW-KEY MOVE ENTRY ships: cursor square-picking on the DHGR board, 658 B of UICODE, and the BLOAD tripwire fired on schedule
+
+The on-device UI has a second input mode (docs/ui-design.md §18): an arrow
+press pops a cursor box onto the board (starting on the last-moved piece's
+destination), SPACE latches from / plays to, ESC cancels, and any letter
+falls back to typed entry — which is unchanged keystroke-for-keystroke. The
+cursor contains **zero chess rules**: a selection is synthesized into `UIBUF`
+as the typed 4-character line and submitted through `uidispatch`, so
+`uifind`/`uitrylegal`/`uiapply` validate it, promotions route through the
+existing `uiaskpromo`, and an illegal pick gets the existing `m_illegal` with
+the cursor kept for another try.
+
+Highlights, on both screens: the cursor is a two-dot **contrast box**
+(`dhcursor` — dark on light, lit on dark, keyed off the displayed shade);
+the latched FROM square repaints in its **opposite shade** (`dhsq1` +
+`DHFLIP` — the artwork already carries every piece on both shades, so the
+flip is one EOR). A cursor step re-blits exactly two squares (~6 ms) via the
+new `dhsetsq`/`dhsq1` factoring instead of the 190 ms full repaint; full
+repaints still paint plain and overlay after (`uicursor`), so every existing
+screen gate gates the same bytes.
+
+Costs and the tripwire: **658 B of UICODE** (headroom 1,075 → 417 B), 40 B
+of bank-2 string, 5 B of `$F700` state. `m8.bin` is now 6,508 B and BLOADs
+past `$2000`, which fired `TestUIByteBudget`'s BLOAD-contract tripwire — the
+deliberate call it exists to force: **the disk is the shipping path** (its
+chain load lifts the payload before stage 2 lands the book at `$2000`;
+ledger now stage 1 152/176, stage 2 38/176, 191/560 sectors, payload ends
+`$27FF`), and **BLOAD-with-a-book-preloaded is retired** (the harness's
+`stageBook` now lands the book after the copier runs, mirroring the disk's
+ordering; the tripwire was re-aimed at the engine at `$4000`). Boot 7.26 s
+(was 7.13 s: four more stage-1 sectors).
+
+Gates: eight new `TestDiskCursor*` gates drive the SHIPPING DISK by
+keystroke and assert the highlights as all 16,384 DHGR bytes against an
+independent Go model of the overlays (the `TestDiskBoardParity` discipline);
+typed entry, ESC-swap, promotion and illegal-move behaviour asserted
+end-to-end. **Seven mutations** (box not drawn; edge clamp removed; from=to
+synth; cursor never retired; ESC never cancels; latch flip dropped; promo
+prompt bypassed) each killed by a named assertion. `make test` (short) green
+end to end; `engine.bin` untouched (md5 `7ddc6a22…`).
+
 ## 2026-08-08 — ★★ THE DEVICE PONDER MEASURED: **+112 ± 30** self-play Elo (8fish-ponder vs 8fish-noponder, both real `m8.s` UIs); predictor hit rate **84%**; and pondering makes the shipped clock spend **1.33x** on its own moves
 
 Every published ponder Elo (~+116 vs Sargon) came from `internal/ucibridge`'s

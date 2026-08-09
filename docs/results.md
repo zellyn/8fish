@@ -3,6 +3,56 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-09 — Boot SPLASH title card ships (the owner's hand-drawn 8fish logo), + white arrow-cursor box
+
+Two UI-polish items, engine and driver both **byte-identical** (`engine.bin`
+md5 `c7998397…` unchanged; `rwtsblob.bin` sha `51656c…`, 724 B unchanged — the
+ProRWTS2 driver code was NOT touched, so its pending real-hardware validation
+stands).
+
+- **Boot splash**: the owner drew a 16 KB double-hi-res 8fish logo
+  (`FISH8LCDSSS` on the DazzleDraw disk, captured to
+  `assets/fish8-splash-dazzledraw-save.bin` via `make pull-splash`). It ships
+  **PackBits-compressed to 5,598 B** (34% of raw — the image is 78% `$80`
+  DHGR-black) as a fifth disk file `SPLASH` in the book region's directory
+  (directory data only; the driver reads whatever it finds at block 208, so no
+  driver/`genrwts` change). At boot it is read to main `$2000` via the existing
+  book read path, copied to aux `$4000`, and a ~40-byte 6502 PackBits decoder
+  (`spldecode`) expands it straight into DHGR page 1 — aux `$2000` then main
+  `$2000`, one continuous source stream, switching banks at exactly 8192 output
+  bytes per half. Shown before the board, auto-advancing on any key or a
+  ~2.6 s timeout. A `'8','F'` magic guards a gross bad read; any failure
+  (no disk / no file / bad status / magic mismatch) **skips silently to the
+  board** — the splash can never block boot.
+  - **Where the code lives**: UICODE (`$E000-$F6FF`) was full, so the splash
+    code + decoder ride the payload and are delivered to the transient
+    ply-history region at `$F800` (bank-independent LC; three pages
+    `UIHFROM/UIHTO/UIHFLAG`, all reclaimed by `m8new` right after the splash
+    runs). Zero permanent memory; runs in the resting bank 1, no bank
+    switching, the driver at `$DC00` right there.
+  - **Cost**: boot-to-board **~7.1 s → ~9.5 s** (the ~11-block splash read +
+    decode/display), first input ~18.4 s. Book region 138 → 162 sectors
+    (359/560 disk sectors used).
+  - **Deferred, on purpose**: the splash does NOT cover the ~9 s book-load
+    wait (that still shows the text "LOADING…" screen), because the book
+    stages through main `$2000` — the DHGR main half — and would scribble any
+    graphic there. Covering the load needs the book to read straight to aux
+    (ProRWTS2 `allow_aux`), i.e. **rebuilding the driver that is about to be
+    validated on real hardware** — so it waits until that validation. When it
+    lands it both holds the splash through the load AND drops the copy-to-aux
+    staging (faster load).
+  - **Gates**: `internal/splash` PackBits round-trip + size; `internal/delivery`
+    5-file region layout; `internal/ui` `TestDiskSplashShowsThenAdvances` boots
+    the shipping `.dsk` through the real Disk II ROM and byte-compares decoded
+    DHGR page 1 against the raw asset, then dismisses the splash. Three
+    mutations verified (decoder run-count `257-c`, directory FILE_COUNT, decoder
+    branch sense). An independent adversarial review cleared all six risk areas
+    of the boot-path change (no bugs; one comment nit fixed).
+- **White cursor box**: the arrow-key selection box (`dhcursor`) is now lit on
+  BOTH square shades instead of contrast-keyed (dark-on-light) — the light
+  squares are only a ~50% dither, so a white frame reads cleanly over them.
+  Simpler (no `DHFLIP` dependency), and the Go model gate updated to match.
+
 ## 2026-08-08 — ★ THE BIG BOOK ships (ProRWTS2 feature 1): a resident 724 B read-only disk driver, and a 32 KB opening book living in the idle transposition table
 
 `docs/prorwts2-design.md` feature 1 is implemented, the design held, and the

@@ -16,7 +16,7 @@ endif
 
 DISKII := diskii
 
-.PHONY: all hello perft banktest entropytest uitest m8 engine tables tiles check-tiles pull-art dsk test test-full test-siblings clean
+.PHONY: all hello perft banktest entropytest uitest m8 engine tables tiles check-tiles pull-art pull-splash dsk test test-full test-siblings clean
 
 # Pull the CHESS2 board art off a DazzleDraw .po disk image, GEOMETRY-CHECK it,
 # and regenerate the tile blob from it. The art is authored on an 800K ProDOS
@@ -30,7 +30,15 @@ pull-art:
 	go run ./cmd/pullart -po "$(PO)" -name CHESS2 -out assets/chess2-dazzledraw-save.bin
 	go run ./cmd/gentiles -check
 	go run ./cmd/gentiles
-	@echo "art pulled and geometry-checked; tile blob regenerated. Run 'make dsk' to rebuild the disk."
+
+# Pull the 8fish SPLASH/logo screen (FISH8LCDSSS) off the same DazzleDraw .po.
+# Unlike the board, the splash is a full 16 KB double-hires screen shown as-is
+# (no tiling), so it just gets captured into assets/.
+#   make pull-splash PO=~/Downloads/1652_Dazzle_Draw_v1.2_Apple_IIe.po
+pull-splash:
+	@test -n "$(PO)" || { echo "usage: make pull-splash PO=<path-to-DazzleDraw.po>" >&2; exit 2; }
+	go run ./cmd/pullart -po "$(PO)" -name FISH8LCDSSS -out assets/fish8-splash-dazzledraw-save.bin
+	@echo "splash captured to assets/fish8-splash-dazzledraw-save.bin (not tiled, not yet wired into the boot)."
 
 all: hello perft engine test
 

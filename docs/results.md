@@ -3,6 +3,42 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-09 — Splash now COVERS the ~9 s big-book load (aux-direct read); driver blob changes, engine still byte-identical
+
+Supersedes the "Deferred, on purpose" note in the title-card entry below. The
+full-screen splash now stays up through the ENTIRE big-book load instead of the
+text "LOADING…" screen, and the load is ~0.6 s FASTER. Found in Virtual ][
+testing that the title card was full-screen-garbled (MIXED window over a
+192-line image — fixed with `MIXCLR`) and that the book-load text screen showed
+leftover 80-col window bytes as "every other letter" — both gone now.
+
+- **Mechanism**: the book reads each 8 KB file DIRECTLY into its aux home
+  (`$4000 + 32*i`) via ProRWTS2's `allow_aux` path — no main-`$2000` staging,
+  no `copyx`. Since the read never touches DHGR page 1, whatever is displayed
+  (the boot splash, or the board on a mid-game New Game reload) stays up. The
+  whole `RWTS_ENTRY` call runs under `SETAUXRD+SETAUXWR`; `dirbuf` moved from
+  main `$1300` to **aux `$0200-$03FF`** (the low TT, dead before the first
+  search — a boot-only reservation; a future save/load *during* a game must
+  re-home it, documented in `cmd/genrwts` + `docs/loadcover-feasibility.md`).
+- **Driver blob**: regenerated with `allow_aux=1`; code 495 → 508 B (absorbed
+  by table padding), **blob still 724 B**, footprint `$DC00-$DED3` unchanged,
+  UICODE glue NOT grown. sha `51656c…` → **`9de6808b…`** — the ONE artifact
+  that changes; re-validate on device. `asm/engine.bin` md5 `c7998397…`
+  UNCHANGED; FEATURES/FEATURES2 untouched.
+- **Timing** (`TestDiskBigBook`): splash up full-screen at ~9.2 s, 32 KB loads
+  behind it in **+8.37 s** (was +8.95 s — no copy step), board + first input
+  ~17.6 s. Aux window matches `bigbook.bin` 0/32,768 bytes wrong.
+- **Process**: feasibility-gated (a Fable agent proved size fits + found the
+  aux-path blocker: `allow_aux` runs the whole call under aux, so main `dirbuf`
+  had to move). An independent adversarial review then caught **the one bug the
+  zeroed-RAM emulator cannot see**: `m8splash` inherited an uninitialised
+  `auxreq` ($51 held at `$F7D4`, left =1 by any prior load, un-wiped by
+  Ctrl-Reset) → on every boot after the first the splash would read into aux,
+  fail its magic, and load under a BLACK screen. Fixed (`sta RWTS_AUXREQ`=0)
+  and gated by `TestDiskSplashAuxreqPoisonedStillShows`, which POISONS `$F7D4`
+  (mutation-verified: the plain gate still passes on zeroed RAM while the poison
+  gate fails). Total 5 mutations across the feature.
+
 ## 2026-08-09 — Boot SPLASH title card ships (the owner's hand-drawn 8fish logo), + white arrow-cursor box
 
 Two UI-polish items, engine and driver both **byte-identical** (`engine.bin`

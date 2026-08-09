@@ -34,6 +34,16 @@ func TestDiskSplashShowsThenAdvances(t *testing.T) {
 			ok, err, m.CPU.PC())
 	}
 
+	// ---- 0. the splash is shown FULL-SCREEN, not MIXED ----------------------
+	// It is a full 192-line image, so unlike the board it must NOT carry the
+	// four-row text window (that window shows the uninitialised text page as
+	// garbage). Regress asm/m8.s m8splash's `sta MIXCLR` and the bottom of the
+	// logo — "Seagull Sisters Software" — is replaced by text-page noise.
+	if m.Mem.Mixed || m.Mem.Text || !m.Mem.DHires() {
+		t.Fatalf("splash not full-screen DHGR: Mixed=%v Text=%v DHires=%v "+
+			"(want false/false/true)", m.Mem.Mixed, m.Mem.Text, m.Mem.DHires())
+	}
+
 	// ---- 1. the splash bytes landed in DHGR page 1, decoded correctly -------
 	// dhgrScreen reads page 1 in A2FC order (aux half then main half), which is
 	// exactly the raw splash layout. It must equal the hand-drawn asset.

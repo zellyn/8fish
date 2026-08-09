@@ -1064,6 +1064,12 @@ m8splash:
         lda #1                 ; show DHGR page 1: the splash
         sta UIDHGR
         jsr uidhon
+        sta MIXCLR             ; ...but FULL-SCREEN, not MIXED: the splash is a
+                               ;  full 192-line image, so unlike the board it
+                               ;  wants no four-row text window under it (that
+                               ;  window would show the uninitialised text page
+                               ;  as garbage). The board's own uidhon re-sets
+                               ;  MIXED when m8main paints it.
         jsr splhold            ; wait for a key or time out
         rts
 splbadm:

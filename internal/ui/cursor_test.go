@@ -131,14 +131,12 @@ func flipSquareModel(model []byte, b64 *[64]byte, sq int) {
 	}
 }
 
-// boxSquareModel draws the cursor's contrast box on square sq — the Go
-// mirror of asm/dhgr.s dhcursor. shownDark is the shade the square is
-// DISPLAYED in (flipped if it is also the latch).
-func boxSquareModel(model []byte, sq int, shownDark bool) {
-	full, left, right := byte(0x00), byte(0x54), byte(0x0A) // dark box on light
-	if shownDark {
-		full, left, right = 0x7F, 0x03, 0x60 // lit box on dark
-	}
+// boxSquareModel draws the cursor's WHITE box on square sq — the Go mirror
+// of asm/dhgr.s dhcursor. The box is now lit on BOTH shades (the light
+// squares are only ~50% dither), so it no longer keys off the displayed
+// shade; the values below are shade-independent.
+func boxSquareModel(model []byte, sq int) {
+	full, left, right := byte(0x7F), byte(0x03), byte(0x60) // lit box, both shades
 	r, f := squareRF(sq)
 	aux, mainb := model[:tiles.BankSize], model[tiles.BankSize:]
 	col := dhOriginCol + f*(tiles.TileCols/2)
@@ -168,12 +166,7 @@ func cursorModel(t *testing.T, b64 *[64]byte, cur, latch int) []byte {
 		flipSquareModel(model, b64, latch)
 	}
 	if cur >= 0 {
-		r, f := squareRF(cur)
-		shownDark := !tiles.Light(r, f)
-		if cur == latch {
-			shownDark = !shownDark // the box sits on the flipped shade
-		}
-		boxSquareModel(model, cur, shownDark)
+		boxSquareModel(model, cur) // white box, shade-independent
 	}
 	return model
 }

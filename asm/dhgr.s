@@ -420,36 +420,30 @@ dhrkrow:
 ; --------------------------------------------------------------------------
 ; dhcursor: draw the arrow-cursor's box on the square dhsq1 JUST painted — a
 ; two-scanline rule along the top and bottom and a two-dot bar down each
-; side, in the CONTRAST colour (dark on a light square, lit on a dark one),
-; so it is equally visible on both shades and over any piece.
+; side, always in WHITE on BOTH shades. The light squares are only a ~50%
+; dither (never solid white), so a lit frame reads clearly over them too;
+; keying off the shade bought nothing but complexity.
 ;
-; PRECONDITION: dhsq1 has run for this square, so DHCOL/DHROWI address it
-; and DHDARK is the shade actually on screen (including a DHFLIP swap) — the
-; box's contrast colour keys off the DISPLAYED shade, not the natural one.
+; PRECONDITION: dhsq1 has run for this square, so DHCOL/DHROWI address it.
+; (The box no longer inspects DHDARK, so a DHFLIP latch-swap can't change
+; its colour — the frame is white whatever shade is displayed underneath.)
 ;
 ; The side bars live in byte columns 0 (aux) and 5 (main), which are pure
 ; background in every tile (that fact is what lets the blob store only four
 ; of six columns), so the box never overwrites piece pixels except in its
-; top and bottom rules. Clobbers A, X, Y, DHPTR and DHA1/DHA2/DHM0.
+; top and bottom rules. On a light square the bar column loses its dither
+; for the box's lifetime; the de-highlight repaint restores it.
+; Clobbers A, X, Y, DHPTR and DHA1/DHA2/DHM0.
 ; --------------------------------------------------------------------------
 DHCURTH = 2             ; rule thickness in scanlines / bar width in dots
 dhcursor:
-        lda DHDARK
-        beq dhcul
-        lda #$7F                ; dark square: a LIT box
+        lda #$7F                ; a LIT (white) box on both shades:
         sta DHA1                ;   full rule byte (all 7 dots)
         lda #$03
-        sta DHA2                ;   left bar: aux bits 0-1 over bg $00
+        sta DHA2                ;   left bar: aux bits 0-1
         lda #$60
-        sta DHM0                ;   right bar: main bits 5-6 over bg $00
-        bne dhcug               ; always ($60 is nonzero)
-dhcul:  lda #$00                ; light square: a DARK box
-        sta DHA1                ;   full rule byte (all 7 dots dark)
-        lda #DHBGL_A & $7C
-        sta DHA2                ;   left bar: dither with bits 0-1 cleared
-        lda #DHBGL_M & $1F
-        sta DHM0                ;   right bar: dither with bits 5-6 cleared
-dhcug:  ldx #0                  ; row 0..DHROWS-1 within the square
+        sta DHM0                ;   right bar: main bits 5-6
+        ldx #0                  ; row 0..DHROWS-1 within the square
 dhcrow: txa
         clc
         adc DHROWI

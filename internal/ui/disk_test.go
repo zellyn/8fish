@@ -447,7 +447,7 @@ func TestDiskBoots(t *testing.T) {
 		l.Stage1Sectors, loadCycles, float64(loadCycles)/1_020_484)
 
 	// ---- 2. the UI comes up and blocks for a key ---------------------------
-	ok, err = m.RunToKeyboard(200_000_000)
+	ok, err = m.BootToPrompt(200_000_000)
 	if err != nil {
 		t.Fatalf("running the UI: %v", err)
 	}
@@ -626,7 +626,7 @@ func TestDiskPlays(t *testing.T) {
 	if err != nil {
 		t.Skipf("SKIP: no Apple II machine available: %v", err)
 	}
-	if ok, err := m.RunToKeyboard(600_000_000); err != nil || !ok {
+	if ok, err := m.BootToPrompt(600_000_000); err != nil || !ok {
 		t.Fatalf("boot: ok=%v err=%v (PC $%04X)", ok, err, m.CPU.PC())
 	}
 
@@ -820,7 +820,7 @@ func TestDiskThinkingClearsInputAndBook(t *testing.T) {
 	if err != nil {
 		t.Skipf("SKIP: no Apple II machine available: %v", err)
 	}
-	if ok, err := m.RunToKeyboard(600_000_000); err != nil || !ok {
+	if ok, err := m.BootToPrompt(600_000_000); err != nil || !ok {
 		t.Fatalf("boot: ok=%v err=%v (PC $%04X)", ok, err, m.CPU.PC())
 	}
 
@@ -952,7 +952,7 @@ func TestDiskQuitReboots(t *testing.T) {
 			t.Skipf("SKIP: no Apple II machine available: %v", err)
 		}
 		t.Logf("booted from disk, ROM = %s", m.ROMName)
-		if ok, err := m.RunToKeyboard(budget); err != nil || !ok {
+		if ok, err := m.BootToPrompt(budget); err != nil || !ok {
 			t.Fatalf("boot: ok=%v err=%v (PC $%04X)", ok, err, m.CPU.PC())
 		}
 		first := *m.Screen()
@@ -1013,7 +1013,7 @@ func TestDiskQuitReboots(t *testing.T) {
 		}
 		t.Logf("Q reached the Standard Delivery copier at $%04X again: the ROM cold "+
 			"start re-read the disk", delivery.CopierOrg)
-		if ok, err := m.RunToKeyboard(budget); err != nil || !ok {
+		if ok, err := m.BootToPrompt(budget); err != nil || !ok {
 			t.Fatalf("reboot: ok=%v err=%v (PC $%04X)\n%v", ok, err, m.CPU.PC(), m.Screen())
 		}
 		got := *m.Screen()
@@ -1051,7 +1051,7 @@ func TestDiskBoardParity(t *testing.T) {
 	if err != nil {
 		t.Skipf("SKIP: no Apple II machine available: %v", err)
 	}
-	ok, err := m.RunToKeyboard(600_000_000)
+	ok, err := m.BootToPrompt(600_000_000)
 	if err != nil {
 		t.Fatalf("booting: %v", err)
 	}
@@ -1148,7 +1148,7 @@ func TestDiskEscapeSwapsScreens(t *testing.T) {
 	if err != nil {
 		t.Skipf("SKIP: no Apple II machine available: %v", err)
 	}
-	if ok, err := m.RunToKeyboard(600_000_000); err != nil || !ok {
+	if ok, err := m.BootToPrompt(600_000_000); err != nil || !ok {
 		t.Fatalf("booting: ok=%v err=%v", ok, err)
 	}
 	if !m.Mem.DHires() || m.Mem.Text {

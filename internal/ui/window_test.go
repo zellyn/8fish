@@ -36,7 +36,7 @@ func bootedDisk(t *testing.T) *ui.DiskMachine {
 	if err != nil {
 		t.Skipf("SKIP: no Apple II machine available: %v", err)
 	}
-	if ok, err := m.RunToKeyboard(600_000_000); err != nil || !ok {
+	if ok, err := m.BootToPrompt(600_000_000); err != nil || !ok {
 		t.Fatalf("boot: ok=%v err=%v (PC $%04X)", ok, err, m.CPU.PC())
 	}
 	if !m.Mem.Mixed {

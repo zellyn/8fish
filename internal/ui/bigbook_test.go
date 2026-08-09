@@ -91,6 +91,13 @@ func TestDiskBigBook(t *testing.T) {
 
 	// ---- 1. the zp protocol, around the boot-time load ---------------------
 	const budget = 2_000_000_000
+	// Dismiss the boot splash (the first keyboard poll) with a keypress, the
+	// way a user taps to begin, so the timing below is the real path and not
+	// the 3.5 s auto-advance timeout.
+	if ok, err := m.RunToKeyboard(budget); err != nil || !ok {
+		t.Fatalf("boot never reached the splash key-wait (ok=%v err=%v PC $%04X)", ok, err, m.CPU.PC())
+	}
+	m.SendKey(' ')
 	ok, err := m.RunUntilPC(m8bigbook, budget)
 	if err != nil || !ok {
 		t.Fatalf("boot never reached m8bigbook (ok=%v err=%v PC $%04X)", ok, err, m.CPU.PC())
@@ -302,7 +309,7 @@ func TestBigBookLoadFailureDegradesHonestly(t *testing.T) {
 		t.Skipf("SKIP: no Apple II machine available: %v", err)
 	}
 	_, _, bookpg := bigBookLabels(t)
-	if ok, err := m.RunToKeyboard(2_000_000_000); err != nil || !ok {
+	if ok, err := m.BootToPrompt(2_000_000_000); err != nil || !ok {
 		t.Fatalf("boot: ok=%v err=%v (PC $%04X)", ok, err, m.CPU.PC())
 	}
 	if got := m.Mem.Main[ui.BIGBOOKOK]; got != 0 {

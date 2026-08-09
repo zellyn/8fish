@@ -386,6 +386,22 @@ func (m *DiskMachine) Key(c byte, maxCycles uint64) error {
 	return nil
 }
 
+// BootToPrompt advances a freshly created DiskMachine from power-on, PAST the
+// auto-advancing boot splash, to the game's first keyboard prompt. On a disk
+// boot the splash title card (asm/m8.s m8splash) is the FIRST keyboard poll,
+// so a bare RunToKeyboard would stop there, before the board is painted and
+// the big book loaded. This presses one key to dismiss the splash — the way a
+// user taps to begin — and runs the board paint and big-book load that follow,
+// returning at the first game prompt. Game-level disk tests call this instead
+// of a bare RunToKeyboard. It reports whether the game prompt was reached.
+func (m *DiskMachine) BootToPrompt(maxCycles uint64) (bool, error) {
+	if ok, err := m.RunToKeyboard(maxCycles); err != nil || !ok {
+		return ok, err
+	}
+	m.SendKey(' ') // dismiss the splash
+	return m.RunToKeyboard(maxCycles)
+}
+
 // Enter types a line and the RETURN that submits it, one key at a time, the
 // way a human does (and the way asm/entropy.inc expects: the arrival time of
 // each keystroke is the engine's only seed material).

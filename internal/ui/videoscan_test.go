@@ -47,7 +47,7 @@ func bootedFrame(t *testing.T) (*videoscan.Frame, *ui.DiskMachine) {
 	if err != nil {
 		t.Skipf("SKIP: no Apple II machine available: %v", err)
 	}
-	ok, err := m.RunToKeyboard(600_000_000)
+	ok, err := m.BootToPrompt(600_000_000)
 	if err != nil {
 		t.Fatalf("booting: %v", err)
 	}

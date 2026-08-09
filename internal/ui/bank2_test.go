@@ -55,15 +55,20 @@ func TestBank2DataResident(t *testing.T) {
 	codeSize := int(u.Lbl["__UICODE_SIZE__"])
 	dataSize := int(u.Lbl["__UIDATA2_SIZE__"])
 	run := int(u.Lbl["__UIDATA2_RUN__"])
-	if codeSize == 0 || dataSize == 0 || run == 0 {
-		t.Fatalf("missing linker symbols in asm/m8t.lbl: UICODE %d, UIDATA2 %d at $%04X",
-			codeSize, dataSize, run)
+	// SPLASH is a third payload segment (the boot title card, delivered to
+	// $F800; see asm/m8.s m8splash). It sits after UIDATA2, so the payload is
+	// UICODE + UIDATA2 + SPLASH, and UIDATA2 is page-aligned so the copier can
+	// find SPLASH where its UIDATA2 copy left off.
+	splashSize := int(u.Lbl["__SPLASH_SIZE__"])
+	if codeSize == 0 || dataSize == 0 || run == 0 || splashSize == 0 {
+		t.Fatalf("missing linker symbols in asm/m8t.lbl: UICODE %d, UIDATA2 %d at $%04X, SPLASH %d",
+			codeSize, dataSize, run, splashSize)
 	}
-	if codeSize+dataSize != len(bin) {
-		t.Fatalf("asm/m8t.bin is %d B but UICODE+UIDATA2 = %d B: the payload file "+
-			"no longer is the two segments back to back", len(bin), codeSize+dataSize)
+	if codeSize+dataSize+splashSize != len(bin) {
+		t.Fatalf("asm/m8t.bin is %d B but UICODE+UIDATA2+SPLASH = %d B: the payload file "+
+			"no longer is the three segments back to back", len(bin), codeSize+dataSize+splashSize)
 	}
-	want := bin[codeSize:]
+	want := bin[codeSize : codeSize+dataSize]
 	bad := 0
 	for i, w := range want {
 		if got := u.M.Mem.MainD000Bank2[run-0xD000+i]; got != w {

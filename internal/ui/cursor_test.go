@@ -64,7 +64,7 @@ func bootCursorDisk(t *testing.T) *ui.DiskMachine {
 	if err != nil {
 		t.Skipf("SKIP: no Apple II machine available: %v", err)
 	}
-	if ok, err := m.RunToKeyboard(curKeyBudget); err != nil || !ok {
+	if ok, err := m.BootToPrompt(curKeyBudget); err != nil || !ok {
 		t.Fatalf("boot: ok=%v err=%v (PC $%04X)", ok, err, m.CPU.PC())
 	}
 	return m

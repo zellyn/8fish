@@ -896,8 +896,12 @@ mbbfile:
                                 ;  directory+index BEFORE its own setaux, so aux
                                 ;  must be on from the first byte.
         jsr RWTS_ENTRY          ; motor on, find the file, read to aux, motor off
-        sta RAMRDOFF            ; force MAIN back (defensive: a driver error exit
-        sta RAMWRTOFF           ;  may skip its own CLRAUX at rdwrdone)
+        sta RAMRDOFF            ; force MAIN back. REQUIRED, not just defensive:
+        sta RAMWRTOFF           ;  the driver's normal exit (rdwrdone) clears
+                               ;  aux, but its file-not-found / no-disk exit
+                               ;  (nodisk) rts's BEFORE setaux is ever reached
+                               ;  and leaves RAMRD/RAMWRT as the caller set them
+                               ;  -- so on that path only this clears them.
         lda RWTS_STATUS
         sta BBST                ; saved across the swap-back
         jsr rwtszp              ; driver zp out, engine zp back
@@ -1024,6 +1028,14 @@ m8splash:
         lda #0
         sta RWTS_SIZELO
         sta RWTS_LDRLO         ; ...landing at main $2000 (BOOKSTAGE)
+        sta RWTS_AUXREQ        ; ★ read to MAIN, not aux. allow_aux makes the
+                               ;  driver read auxreq ($51) on EVERY call, and it
+                               ;  lives in the swapped driver zp -- power-on
+                               ;  garbage, and after any m8bigbook it is left =1
+                               ;  in the held image ($F7D4), which Ctrl-Reset
+                               ;  does NOT wipe. Without this store the splash
+                               ;  read would go to aux on the SECOND boot on,
+                               ;  fail its magic, and load under a black screen.
         lda #>SPLASHSIZE
         sta RWTS_SIZELO+1      ; $1600 = 5632 B = 11 blocks
         lda #>BOOKSTAGE

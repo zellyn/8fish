@@ -137,3 +137,57 @@ func TestDiskSplashShowsThenAdvances(t *testing.T) {
 	}
 	t.Log("splash covered the whole load; board up and painted, big book verified (BIGBOOKOK=1)")
 }
+
+// TestDiskSplashAuxreqPoisonedStillShows guards the one hardware defect the
+// zeroed-RAM emulator structurally cannot see. With allow_aux=1 the driver
+// reads its auxreq flag ($51, inside the swapped zp window) on EVERY call. Its
+// held image is RWTSHOLD ($F7BF) + ($51-$3C)=$15 -> $F7D4, which nothing at
+// boot initialises -- and after any big-book load m8bigbook leaves auxreq=1 in
+// the driver zp, which rwtszp writes back to $F7D4, and Ctrl-Reset does NOT
+// wipe it. So on every boot AFTER the first, m8splash would inherit auxreq=1,
+// read the splash into AUX instead of main $2000, fail its '8F' magic, and load
+// under a black screen. m8splash must force RWTS_AUXREQ=0. Zeroed emulator RAM
+// makes $F7D4=0 and hides this, so we POISON it and require the splash anyway.
+func TestDiskSplashAuxreqPoisonedStillShows(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: boots a disk")
+	}
+	dsk := dskPath(t)
+	m, err := ui.NewDiskMachine(dsk, ui.RomDir())
+	if err != nil {
+		t.Skipf("SKIP: no Apple II machine available: %v", err)
+	}
+	// The auxreq hold byte: RWTSHOLD $F7BF + ($51-$3C). Poison it with 1 --
+	// exactly what a prior m8bigbook leaves there, and the only value that bites
+	// (the driver's setaux does `sta CLRAUXRD,x` with x=auxreq, so only x==1
+	// lands on the real $C003/$C005 aux switches; other values miss).
+	const auxreqHold = 0xF7BF + (0x51 - 0x3C)
+	m.Mem.Main[auxreqHold] = 1
+
+	m8lbl, err := ui.ParseLbl(filepath.Join(root, "asm", "m8.lbl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m8bigbook := m8lbl["m8bigbook"]
+	if m8bigbook == 0 {
+		t.Fatal("label m8bigbook missing from m8.lbl")
+	}
+	// Run to the START of the load: m8splash has run. With the fix it forced
+	// auxreq=0, read the splash to main $2000, and decoded it. Without the fix
+	// the poisoned auxreq sent the read to aux, the magic failed, and the
+	// screen was cleared to black.
+	if ok, err := m.RunUntilPC(m8bigbook, splashBudget); err != nil || !ok {
+		t.Fatalf("boot never reached m8bigbook (ok=%v err=%v PC $%04X)", ok, err, m.CPU.PC())
+	}
+	asset, err := os.ReadFile(filepath.Join(root, "assets", "fish8-splash-dazzledraw-save.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(dhgrScreen(m), asset) {
+		t.Fatal("with the auxreq hold byte ($F7D4) poisoned, the splash did NOT show: " +
+			"m8splash must store 0 to RWTS_AUXREQ so the read lands in main $2000, not aux. " +
+			"Without it the splash reads into aux, fails its magic, and every boot after the " +
+			"first loads under a black screen (a real-hardware defect the zeroed emulator hides).")
+	}
+	t.Log("splash shows despite a poisoned auxreq hold byte: m8splash forces auxreq=0")
+}

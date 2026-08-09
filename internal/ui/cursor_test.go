@@ -8,9 +8,9 @@ package ui_test
 //
 // The model (cursorModel below) mirrors asm/dhgr.s exactly:
 //
-//	the cursor        a two-scanline/two-dot CONTRAST box (dhcursor): dark
-//	                  on a light square, lit on a dark one, keyed off the
-//	                  DISPLAYED shade
+//	the cursor        a two-scanline/two-dot WHITE box (dhcursor): lit on
+//	                  BOTH shades (the light squares are only ~50% dither),
+//	                  so it no longer keys off the displayed shade
 //	the latched FROM  the square repainted in its OPPOSITE shade (dhsq1
 //	                  with DHFLIP — the artwork carries every piece on both
 //	                  shades, so the flip is the other tile over the other

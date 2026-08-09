@@ -91,25 +91,22 @@ func TestDiskBigBook(t *testing.T) {
 
 	// ---- 1. the zp protocol, around the boot-time load ---------------------
 	const budget = 2_000_000_000
-	// Dismiss the boot splash (the first keyboard poll) with a keypress, the
-	// way a user taps to begin, so the timing below is the real path and not
-	// the 3.5 s auto-advance timeout.
-	if ok, err := m.RunToKeyboard(budget); err != nil || !ok {
-		t.Fatalf("boot never reached the splash key-wait (ok=%v err=%v PC $%04X)", ok, err, m.CPU.PC())
-	}
-	m.SendKey(' ')
+	// The splash no longer waits for a key: it shows FULL-SCREEN and the big
+	// book loads straight into aux behind it (asm/m8.s m8main), so m8bigbook is
+	// reached on the boot path with no keypress. Run straight to it.
 	ok, err := m.RunUntilPC(m8bigbook, budget)
 	if err != nil || !ok {
 		t.Fatalf("boot never reached m8bigbook (ok=%v err=%v PC $%04X)", ok, err, m.CPU.PC())
 	}
-	bootToBoard := m.Cycles // the board painted just before the load began
+	bootToLoad := m.Cycles // the splash is up; the aux-direct load is about to begin
 	var zpBefore [256]byte
 	copy(zpBefore[:], m.Mem.Main[:256])
 	// ...and the two regions the reader must never touch: the ENGINE IMAGE
 	// (main $4000-$BBFF) and the UI's own code ($E000-$F6FF; one byte is the
-	// documented exception, the poked digit of f_book). The driver's writes
-	// are dirbuf ($1300), the staging window ($2000-$3FFF), its zp window and
-	// aux — anything else here is corruption.
+	// documented exception, the poked digit of f_book). The aux-direct read's
+	// only writes are AUX (dirbuf at aux $0200-$03FF and the $4000+ book
+	// window) and its zp window: main $2000-$3FFF (the splash's DHGR half) and
+	// everything else in these ranges must be BYTE-IDENTICAL across the load.
 	engBefore := append([]byte(nil), m.Mem.Main[0x4000:0xBC00]...)
 	uiBefore := append([]byte(nil), m.Mem.Main[0xE000:0xF700]...)
 	ok, err = m.RunUntilPC(mloop, budget)
@@ -158,8 +155,9 @@ func TestDiskBigBook(t *testing.T) {
 	}
 	t.Logf("zp protocol: all non-scratch zero page equal across the load "+
 		"(board rows $40-$67 included); engine image and UICODE untouched; "+
-		"board painted at %.2f s, big book loaded +%.2f s (first input at ~%.2f s)",
-		float64(bootToBoard)/1_020_484, float64(loadDone-bootToBoard)/1_020_484,
+		"splash up at %.2f s, big book loaded under it in +%.2f s (board+first "+
+		"input at ~%.2f s)",
+		float64(bootToLoad)/1_020_484, float64(loadDone-bootToLoad)/1_020_484,
 		float64(loadDone)/1_020_484)
 
 	// ---- 2. the load is real, verified, and latched ------------------------

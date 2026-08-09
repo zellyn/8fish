@@ -87,7 +87,13 @@ func (d *DiskMemory) Read(addr uint16) byte {
 		}
 		return d.Card.Read16(reg)
 	}
-	if addr <= 0xC00F && addr >= 0xC000 && !d.Memory.KeyWaiting() {
+	// The keyboard DATA latch is $C000 exactly (KBD; $C010 is the strobe). Key
+	// on that one address, not the whole $C000-$C00F block: the resident
+	// ProRWTS2 driver's allow_aux setaux does `sta $C002,x`/`sta $C004,x`, and
+	// a 6502 indexed store dummy-READS its (unfixed) target first -- $C002-$C005
+	// here -- which is not a keyboard poll. Counting those stalled RunToKeyboard
+	// inside the driver mid-load. 8fish only ever reads the keyboard at $C000.
+	if addr == 0xC000 && !d.Memory.KeyWaiting() {
 		d.waitingKey = true
 	}
 	return d.Memory.Read(addr)
@@ -387,18 +393,14 @@ func (m *DiskMachine) Key(c byte, maxCycles uint64) error {
 }
 
 // BootToPrompt advances a freshly created DiskMachine from power-on, PAST the
-// auto-advancing boot splash, to the game's first keyboard prompt. On a disk
-// boot the splash title card (asm/m8.s m8splash) is the FIRST keyboard poll,
-// so a bare RunToKeyboard would stop there, before the board is painted and
-// the big book loaded. This presses one key to dismiss the splash — the way a
-// user taps to begin — and runs the board paint and big-book load that follow,
-// returning at the first game prompt. Game-level disk tests call this instead
-// of a bare RunToKeyboard. It reports whether the game prompt was reached.
+// boot splash and the big-book load that runs behind it, to the game's first
+// keyboard prompt. The splash no longer waits for a key: it shows full-screen
+// while the big book loads straight into aux, then auto-advances to the board
+// when the load completes (asm/m8.s m8main). So the FIRST keyboard poll is the
+// game's own prompt (mloop), and a single RunToKeyboard reaches it -- no key is
+// pressed here, and none is consumed, so a key a test sends afterward is the
+// game's genuine first input. It reports whether the game prompt was reached.
 func (m *DiskMachine) BootToPrompt(maxCycles uint64) (bool, error) {
-	if ok, err := m.RunToKeyboard(maxCycles); err != nil || !ok {
-		return ok, err
-	}
-	m.SendKey(' ') // dismiss the splash
 	return m.RunToKeyboard(maxCycles)
 }
 

@@ -640,11 +640,19 @@ m8main:
         ; boots to the text screen and ESC is a no-op it can still take.
         jsr dhclear
         jsr dhinit
-        ; THE BOOT SPLASH (disk build only). Show the hand-drawn title card
-        ; before the board, auto-advancing on a key or a ~3.5 s timeout. Gated
-        ; on RWTSDEF: only the disk build has the resident reader that fetches
-        ; it, and a missing or corrupt splash must never block the boot -- so
-        ; m8splash falls through to the board on any failure.
+        ; THE BOOT SPLASH + BIG-BOOK LOAD (disk build only). Show the hand-drawn
+        ; title card FULL-SCREEN, then load the big book DIRECTLY INTO AUX behind
+        ; it: the ~9 s load runs under the logo, not on a "LOADING..." text
+        ; screen, because the read no longer stages through main $2000 (the
+        ; splash's DHGR main half). Only after the book is loaded+verified do we
+        ; wipe the splash and paint the board -- so total boot is ~boot+load,
+        ; not boot+hold+load: there is no separate splash hold any more, the
+        ; load IS the time the logo is up. A key pressed during the load is left
+        ; LATCHED (nothing consumes it) so it becomes the game's first input.
+        ;
+        ; Gated on RWTSDEF: only the disk build has the resident reader. A
+        ; missing/corrupt splash or a failed load never blocks the boot -- each
+        ; degrades to the board (m8splash and m8bigbook self-heal on any error).
         ;
         ; m8splash and its PackBits decoder are the SPLASH segment: the
         ; $E000-$F6FF code budget is FULL, so the copier delivers them into the
@@ -652,25 +660,18 @@ m8main:
         ; by m8new after the splash). They run in the resting bank 1 -- no bank
         ; switching, and the ProRWTS2 driver at $DC00 is right there.
         lda RWTSDEF
-        beq :+
-        jsr m8splash
-:
-        lda UIDHGRDEF
-        sta UIDHGR
-        beq :+
-        jsr uidhon
-:
-        jsr m8new
-        ; Disk build: pull the BIG BOOK into the idle transposition-table
-        ; window. AFTER the first board paint, deliberately -- the load takes
-        ; seconds and the 7.13 s boot-to-board is a shipped number -- so paint
-        ; here, then load, then fall into the loop (whose own paint repaints
-        ; whatever the load's staging scribbled).
-        lda RWTSDEF
+        beq mbnodisk
+        jsr m8splash            ; decode + show the splash full-screen (no hold)
+        jsr m8new               ; new-game state; touches no display bytes
+        jsr m8bigbook           ; load under the splash; mbbshow wipes it after
+        jmp mbreveal
+mbnodisk:
+        jsr m8new               ; BLOAD path: no splash, no reader, no big book
+mbreveal:
+        lda UIDHGRDEF           ; NOW reveal the board (disk: over the wiped
+        sta UIDHGR              ;  splash; BLOAD: the 40-column text board)
         beq mloop
-        jsr uisync
-        jsr uipaint
-        jsr m8bigbook
+        jsr uidhon
 
 ; The main loop. Every position change goes through uisync, and every
 ; iteration repaints the WHOLE screen: a full 40x24 repaint is 23,659 cycles
@@ -835,11 +836,20 @@ rzpl:   ldy RWTS_ZP,x
 ; the latch is already open (a New Game whose previous game never left book
 ; reloads nothing -- the window was never written).
 ;
-; Four driver calls, one per 8 KB file (BOOK0-BOOK3), each staged through
-; main $2000-$3FFF (the DHGR MAIN half -- the largest dead window below the
-; engine) and lifted to aux by copyx under RAMWRT. Because that staging IS
-; half the displayed board, the load runs on the 40-column screen (uidhoff)
-; and the board comes back after; the caller's next full paint repaints it.
+; Four driver calls, one per 8 KB file (BOOK0-BOOK3), each read DIRECTLY into
+; its aux home (aux $4000 + 32*index) via ProRWTS2's allow_aux path -- no
+; main-$2000 staging, no copyx. Because the read never touches DHGR page 1,
+; WHATEVER IS DISPLAYED STAYS UP through the whole load: the boot splash at
+; m8main time, or the board on a mid-game New Game reload. No text screen, no
+; "LOADING..." row. After verify the caller wipes to the board (mbbshow's
+; dhclear + the caller's next full paint).
+;
+; The aux read needs care (docs/loadcover-feasibility.md): allow_aux's setaux
+; switches BOTH RAMRD and RAMWRT on for the whole read loop, and the driver
+; reads its sapling block-list back out of dirbuf mid-loop -- so dirbuf lives
+; in AUX ($0200-$03FF, the low TT, dead before the first search) and this code
+; runs the whole call under SETAUXRD+SETAUXWR, or the block list would be
+; written to main and read back from aux as garbage.
 ;
 ; Failure (empty drive, swapped disk, bad read, bad checksum) can only ever
 ; DEGRADE TO TODAY: the latch stays closed, the probe stays on the resident
@@ -851,17 +861,9 @@ m8bigbook:
         lda BIGBOOKOK           ; already verified and never searched over:
         beq mbbgo               ;  nothing to do
 mbbr0:  rts
-mbbgo:  lda UIDHGR              ; the staging window is the displayed board's
-        sta BBDH                ;  main half: show the text screen while the
-        lda #0                  ;  loader scribbles over it
-        sta UIDHGR
-        jsr uidhoff
-        lda #<m_loading
-        ldx #>m_loading
-        jsr uisetmsg
-        jsr uipaintmsg
-        lda #0
-        sta BBIDX
+mbbgo:  lda #0                  ; the read goes straight to aux, so nothing
+        sta BBIDX               ;  touches the displayed splash/board -- no
+                                ;  screen swap, no message.
 mbbfile:
         lda BBIDX               ; the file names differ in their last byte:
         clc                     ;  "BOOK0".."BOOK3"
@@ -873,36 +875,34 @@ mbbfile:
         sta RWTS_NAMLO
         lda #>f_book
         sta RWTS_NAMLO+1
+        lda #1                  ; auxreq=1 (in the swapped-in driver zp): read
+        sta RWTS_AUXREQ         ;  STRAIGHT into aux memory
         lda #0
-        sta RWTS_SIZELO         ; 8,192 B = 16 blocks per file...
-        sta RWTS_LDRLO
-        lda #$20                ; ...landing at main $2000: >8192 and
-        sta RWTS_SIZELO+1       ;  >BOOKSTAGE are the same $20, shared
-        sta RWTS_LDRLO+1        ;  deliberately (this comment is the tie)
-        jsr RWTS_ENTRY          ; motor on, find the file, read, motor off
+        sta RWTS_SIZELO         ; 8,192 B = 16 blocks per file
+        sta RWTS_LDRLO          ; load address LOW = 0 (page-aligned aux dest)
+        lda BBIDX               ; aux destination PAGE: $40 + 32*index, straight
+        asl                     ;  into the driver's load-address hi byte --
+        asl                     ;  file 0 -> aux $4000, 1 -> $6000, ...
+        asl
+        asl
+        asl
+        adc #>BIGBOOK_BASE      ; C is clear: five ASLs of 0..3 end with 0
+        sta RWTS_LDRLO+1
+        lda #$20
+        sta RWTS_SIZELO+1
+        sta RAMRDON             ; ★ run the WHOLE call under aux read+write:
+        sta RAMWRTON            ;  the driver reads dirbuf's block list (aux
+                                ;  $0200) back mid-loop, and it opens/reads the
+                                ;  directory+index BEFORE its own setaux, so aux
+                                ;  must be on from the first byte.
+        jsr RWTS_ENTRY          ; motor on, find the file, read to aux, motor off
+        sta RAMRDOFF            ; force MAIN back (defensive: a driver error exit
+        sta RAMWRTOFF           ;  may skip its own CLRAUX at rdwrdone)
         lda RWTS_STATUS
         sta BBST                ; saved across the swap-back
         jsr rwtszp              ; driver zp out, engine zp back
         lda BBST
         bne mbbfj               ; no disk / wrong disk / no such file
-        lda #<BOOKSTAGE
-        sta ZPTR
-        lda #>BOOKSTAGE
-        sta ZPTR+1
-        lda #0
-        sta TTPTR
-        lda BBIDX               ; aux destination page: $40 + 32*index
-        asl
-        asl
-        asl
-        asl
-        asl
-        adc #>BIGBOOK_BASE      ; C is clear: five ASLs of 0..3 end with 0
-        sta TTPTR+1
-        ldx #$20                ; 8 KB
-        sta RAMWRTON
-        jsr copyx
-        sta RAMWRTOFF
         inc BBIDX
         lda BBIDX
         cmp #4
@@ -972,18 +972,14 @@ mbbfail:
         ldx #>m_nobigbook
         jsr uisetmsg
 mbbshow:
-        jsr dhclear             ; the staging scribbled ALL of DHGR page 1,
-                                ;  and repaints only cover the board rows --
-                                ;  the border keeps whatever the last file's
-                                ;  bytes were. Clear it back to the boot
-                                ;  state; the caller's next paint draws the
-                                ;  board rows. (Reached only on the disk
-                                ;  build, so the artwork is resident.)
-        lda BBDH                ; ...and the board back, if it was up
-        sta UIDHGR
-        beq mbbrts
-        jsr uidhon
-mbbrts: rts
+        ; WIPE TO THE BOARD. The read went straight to aux, so DHGR page 1 is
+        ; untouched -- but on the boot path it still holds the SPLASH, and on a
+        ; New Game reload it holds the last board. Clear page 1 to the boot
+        ; border either way; the caller reveals the board (m8main: UIDHGR +
+        ; uidhon, then mloop's paint) or repaints it (cmd_new -> mloop). The
+        ; display MODE is the caller's to set -- this routine leaves it alone.
+        ; (Reached only on the disk build, so the artwork is resident.)
+        jmp dhclear             ; tail call: dhclear rts's back to the caller
 
 ; The book files' names, length-prefixed, PLAIN ASCII: the driver compares
 ; these bytes against the directory block's own, and mbbfile pokes the digit.
@@ -1070,8 +1066,12 @@ m8splash:
                                ;  window would show the uninitialised text page
                                ;  as garbage). The board's own uidhon re-sets
                                ;  MIXED when m8main paints it.
-        jsr splhold            ; wait for a key or time out
-        rts
+        rts                    ; return with the splash UP: m8main loads the big
+                               ;  book straight to aux behind it (the load is the
+                               ;  time the logo shows), then wipes to the board.
+                               ;  No hold, and nothing consumes the keyboard, so
+                               ;  a key tapped during the load survives as the
+                               ;  game's first input.
 splbadm:
         sta RAMRDOFF           ; magic mismatch: no decode, fall through
 splskip:
@@ -1151,25 +1151,9 @@ splput: sta (SPLDST),y
         inc SPLDST+1
 :       rts
 
-; splhold: show the splash until a key is pressed or ~3.5 s elapse, then
-; consume the key and clear the strobe. A coarse nested-loop delay (there is no
-; readable clock at boot), polling $C000 so ANY key advances immediately.
-SPLTICKS = 5
-splhold:
-        lda #SPLTICKS
-        sta T0
-sph1:   ldx #0
-sph2:   ldy #0
-sph3:   lda KBD
-        bmi sphkey
-        dey
-        bne sph3
-        dex
-        bne sph2
-        dec T0
-        bne sph1
-sphkey: bit KBDSTROBE          ; consume the key (and clear the strobe) so it
-        rts                    ;  does not leak into the game's first input
+; (There is no separate splash HOLD any more: the big-book load behind the
+; splash is what keeps the logo on screen, and a key tapped during it is left
+; latched for the game's first input rather than consumed here. See m8main.)
 
 ; The splash file's name, length-prefixed ASCII, read by the driver through
 ; (namlo). At $F8xx it is bank-independent LC, so the bank-1 driver reads it
@@ -3963,10 +3947,10 @@ m_side2:    SCRSTR "TWO PLAYERS. S NEXT: YOU PLAY BLACK"
 ; moment it appears — the same discoverability rule cmd_swap learned the
 ; hard way (§16.3). 39 characters is the message row's limit (uisetmsg).
 m_cursor:   SCRSTR "ARROWS MOVE. SPACE SELECTS. ESC CANCELS"
-; The big-book load (m8bigbook): what the seconds of disk activity are, and
-; the one honest sentence when they fail (the game then runs on the resident
-; book, exactly as a diskless 8fish always has).
-m_loading:  SCRSTR "LOADING OPENING LIBRARY..."
+; The big-book load (m8bigbook) now runs behind the splash with no status row
+; (the read goes straight to aux, so there is no "LOADING..." screen to show).
+; Only the failure sentence remains: the game then runs on the resident book,
+; exactly as a diskless 8fish always has.
 m_nobigbook: SCRSTR "DISK NOT READ - USING THE SMALL BOOK"
 
         ; Pad UIDATA2 to a whole number of pages. The copier copies

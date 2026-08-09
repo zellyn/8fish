@@ -15,10 +15,12 @@
 //  1. applies the 8fish CONFIGURATION to the option block (the same
 //     `name = value` lines upstream documents as user-defined options), plus
 //     ONE structural patch: `dirbuf` — the driver's 512-byte directory
-//     buffer — is moved to main-RAM op-time scratch ($1300, inside
-//     MOVESTACK, dead outside a search) instead of the in-bank default that
-//     would collide with the UI at $E000. Upstream explicitly supports
-//     moving these buffers ("there are also buffers that can be moved").
+//     buffer — is moved to AUX op-time scratch ($0200-$03FF, the low
+//     transposition-table window, dead before the first search) instead of
+//     the in-bank default that would collide with the UI at $E000. With
+//     allow_aux=1 dirbuf MUST live in aux (the driver reads it back under
+//     RAMRD mid-loop), so the caller runs the whole call with aux read+write
+//     on. Upstream explicitly supports moving these buffers.
 //  2. assembles it with ACME (the binary a2audit vendors; ACME env var or
 //     -acme overrides).
 //  3. extracts the relocated FLOPPY driver image (the bytes ProRWTS2's own
@@ -63,10 +65,23 @@ const (
 	// tail (the resting bank — no bank switch to call it). Keep in sync with
 	// the region list in internal/delivery's TestLanguageCardBank1Layout.
 	reloc = 0xDC00
-	// dirbufAddr is main-RAM op-time scratch: inside MOVESTACK ($0E00-$1FFF),
-	// which is rebuilt by every search and dead between them. Loads run only
-	// from command dispatch, never during a search or ponder.
-	dirbufAddr = 0x1300
+	// dirbufAddr is the driver's 512-byte directory/index buffer. With
+	// allow_aux=1 it must be an AUX address in the low TT region: the driver's
+	// aux read path switches BOTH RAMRD and RAMWRT on for the whole read loop
+	// (setaux uses auxreq for both), and it reads the sapling block-list back
+	// out of dirbuf MID-LOOP -- so dirbuf must be coherent under aux, i.e. the
+	// caller runs the whole call with SETAUXRD+SETAUXWR on and dirbuf lives in
+	// aux, NOT in main (main $1300 would read aux garbage). aux $0200-$03FF is
+	// the low transposition-table window, dead scratch before the first search
+	// -- and the big book only loads at boot / New Game, before any search.
+	// See docs/loadcover-feasibility.md. HAZARD: a save/load DURING a game
+	// (not at a game boundary) would need to re-home dirbuf or save/restore
+	// these aux bytes, because a mid-game TT is live here.
+	dirbufAddr = 0x0200
+	// auxReq is the driver's aux-request flag ($51, inside the $3C-$67 zp
+	// window rwtszp swaps). allow_aux=1 defines it; set it to 1 in the driver
+	// zp before a call to read straight into aux memory.
+	auxReq = 0x51
 )
 
 // config is the 8fish option set for the RESIDENT READ-ONLY build
@@ -74,7 +89,11 @@ const (
 // multiples) eliminates encbuf; might_exist/poll_drive/check_chksum buy
 // error REPORTING (status) instead of a hang or silent garbage when the
 // drive is empty or the disk swapped; use_smartport=0 because there is no
-// SmartPort init path to keep (init is never run).
+// SmartPort init path to keep (init is never run). allow_aux=1 lets the
+// driver read a file DIRECTLY into aux memory (auxreq=1 in the driver zp),
+// which the big-book loader uses to land each file straight at aux $4000+
+// with no main-$2000 staging, so the boot splash on DHGR page 1 stays up
+// through the load (docs/loadcover-feasibility.md).
 var config = map[string]int{
 	"verbose_info":  1,
 	"enable_floppy": 1,
@@ -88,6 +107,7 @@ var config = map[string]int{
 	"allow_saplings": 1,
 	"load_banked":   1,
 	"lc_bank":       1,
+	"allow_aux":     1,
 }
 
 // slotSiteNames are the self-modifying soft-switch operands inside the
@@ -154,6 +174,9 @@ func main() {
 	}
 	if got := need("dirbuf"); got != dirbufAddr {
 		fatal("genrwts: dirbuf = $%04X, want $%04X (the dirbuf patch did not take)", got, dirbufAddr)
+	}
+	if got := need("auxreq"); got != auxReq {
+		fatal("genrwts: auxreq = $%04X, want $%04X (allow_aux must define it in the driver zp window)", got, auxReq)
 	}
 	if dataEnd > 0xDFC0 {
 		fatal("genrwts: driver data ends at $%04X, past the $DFC0 budget in LC bank 1", dataEnd)
@@ -274,7 +297,9 @@ func configure(src string) string {
 	src = replaceOnce(src, "reloc     = $d000", fmt.Sprintf("reloc     = $%04x", reloc))
 	// dirbuf: the reloc>=$C000, load_high=0 floppy branch computes dirbuf just
 	// above the in-bank data, which for us is the UI's own $E000. Pin it to
-	// main-RAM op-time scratch instead (upstream supports moving it).
+	// AUX low-TT op-time scratch instead (upstream supports moving it); with
+	// allow_aux the caller runs the call under RAMRD+RAMWRT so dirbuf reads
+	// back coherently from aux.
 	src = replaceOnce(src,
 		`      } else { ;load_high = 0
         !pseudopc ((dataend + $ff) & -256) {
@@ -336,10 +361,11 @@ func genGo(codeLen, blobLen, trackd1, slotLo, slotHi int, sites []int) string {
 	fmt.Fprintf(&b, "\tTrackD1   = 0x%04X // self-modifying current-track operand (seed with $41 at boot)\n", trackd1)
 	fmt.Fprintf(&b, "\tSlotLoAddr = 0x%04X // the site table inside the blob: operand lo bytes...\n", slotLo)
 	fmt.Fprintf(&b, "\tSlotHiAddr = 0x%04X // ...and hi bytes (read by m8rwtsinit from bank 1)\n", slotHi)
-	fmt.Fprintf(&b, "\tDirBufAddr = 0x%04X // 512-byte directory buffer, main-RAM op-time scratch\n", dirbufAddr)
+	fmt.Fprintf(&b, "\tDirBufAddr = 0x%04X // 512-byte directory buffer, AUX op-time scratch (low TT)\n", dirbufAddr)
 	b.WriteString("\n\t// The driver's zero-page window (saved/swapped around every call\n")
 	b.WriteString("\t// by asm/m8.s rwtszp), and its API bytes inside it.\n")
 	b.WriteString("\tZPLo    = 0x3C\n\tZPLen   = 0x2C // $3C-$67\n")
+	b.WriteString("\tZPAuxReq = 0x51 // set to 1 to read straight into aux memory (allow_aux)\n")
 	b.WriteString("\tZPStatus = 0x50 // nonzero after a call = error\n")
 	b.WriteString("\tZPSizeLo = 0x52 // 16-bit read size (block multiple)\n")
 	b.WriteString("\tZPLdrLo  = 0x55 // 16-bit load address\n")
@@ -371,7 +397,8 @@ func genInc(codeLen, blobLen, trackd1, slotLo, slotHi int, sites []int) string {
 	fmt.Fprintf(&b, "RWTS_SIZE     = %d     ; blob bytes ($%04X-$%04X)\n", blobLen, reloc, reloc+blobLen-1)
 	fmt.Fprintf(&b, "RWTS_CODE     = %d     ; of which code\n", codeLen)
 	fmt.Fprintf(&b, "RWTS_TRACKD1  = $%04X   ; current-track operand (seed from $41)\n", trackd1)
-	fmt.Fprintf(&b, "RWTS_DIRBUF   = $%04X   ; 512-byte op-time scratch in MOVESTACK\n", dirbufAddr)
+	fmt.Fprintf(&b, "RWTS_DIRBUF   = $%04X   ; 512-byte op-time scratch, AUX low-TT (allow_aux)\n", dirbufAddr)
+	fmt.Fprintf(&b, "RWTS_AUXREQ   = $%04X   ; set to 1 in the driver zp to read into aux\n", auxReq)
 	fmt.Fprintf(&b, "RWTS_NSLOT    = %d      ; slot-poke operand addresses, in the blob:\n", len(sites))
 	fmt.Fprintf(&b, "RWTS_SLOTLO   = $%04X   ; their lo bytes...\n", slotLo)
 	fmt.Fprintf(&b, "RWTS_SLOTHI   = $%04X   ; ...and hi bytes\n", slotHi)

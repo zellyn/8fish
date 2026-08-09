@@ -5,17 +5,18 @@ package rwts
 // Addresses are Language Card bank 1 run-time addresses.
 const (
 	EntryAddr = 0xDC00 // opendir: the read-a-file entry point
-	CodeLen   = 495 // driver code bytes
+	CodeLen   = 508 // driver code bytes
 	BlobLen   = 724 // code + denibble tables + site table ($DC00-$DED3)
-	TrackD1   = 0xDD8F // self-modifying current-track operand (seed with $41 at boot)
+	TrackD1   = 0xDD9C // self-modifying current-track operand (seed with $41 at boot)
 	SlotLoAddr = 0xDEC0 // the site table inside the blob: operand lo bytes...
 	SlotHiAddr = 0xDECA // ...and hi bytes (read by m8rwtsinit from bank 1)
-	DirBufAddr = 0x1300 // 512-byte directory buffer, main-RAM op-time scratch
+	DirBufAddr = 0x0200 // 512-byte directory buffer, AUX op-time scratch (low TT)
 
 	// The driver's zero-page window (saved/swapped around every call
 	// by asm/m8.s rwtszp), and its API bytes inside it.
 	ZPLo    = 0x3C
 	ZPLen   = 0x2C // $3C-$67
+	ZPAuxReq = 0x51 // set to 1 to read straight into aux memory (allow_aux)
 	ZPStatus = 0x50 // nonzero after a call = error
 	ZPSizeLo = 0x52 // 16-bit read size (block multiple)
 	ZPLdrLo  = 0x55 // 16-bit load address
@@ -24,4 +25,4 @@ const (
 
 // SlotSites are the operand addresses whose low byte must be OR'd with the
 // boot slot (slot<<4, the boot ROM's $2B) before the driver's first call.
-var SlotSites = []uint16{0xDC36, 0xDC91, 0xDCE3, 0xDCF2, 0xDD4F, 0xDD62, 0xDD6A, 0xDDB4, 0xDDC2, 0xDDCF}
+var SlotSites = []uint16{0xDC36, 0xDC96, 0xDCF0, 0xDCFF, 0xDD5C, 0xDD6F, 0xDD77, 0xDDC1, 0xDDCF, 0xDDDC}

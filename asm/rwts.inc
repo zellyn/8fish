@@ -8,9 +8,10 @@
 
 RWTS_ENTRY    = $DC00   ; opendir: read the named file
 RWTS_SIZE     = 724     ; blob bytes ($DC00-$DED3)
-RWTS_CODE     = 495     ; of which code
-RWTS_TRACKD1  = $DD8F   ; current-track operand (seed from $41)
-RWTS_DIRBUF   = $1300   ; 512-byte op-time scratch in MOVESTACK
+RWTS_CODE     = 508     ; of which code
+RWTS_TRACKD1  = $DD9C   ; current-track operand (seed from $41)
+RWTS_DIRBUF   = $0200   ; 512-byte op-time scratch, AUX low-TT (allow_aux)
+RWTS_AUXREQ   = $0051   ; set to 1 in the driver zp to read into aux
 RWTS_NSLOT    = 10      ; slot-poke operand addresses, in the blob:
 RWTS_SLOTLO   = $DEC0   ; their lo bytes...
 RWTS_SLOTHI   = $DECA   ; ...and hi bytes

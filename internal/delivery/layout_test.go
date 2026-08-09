@@ -358,6 +358,56 @@ func TestBookClearsTheAuxTextPage(t *testing.T) {
 	}
 }
 
+// TestDirbufAuxReservation pins the driver's 512-byte directory buffer to aux
+// $0200-$03FF and proves that window is disjoint from every live aux structure.
+//
+// The big-book loader reads each file DIRECTLY into aux (allow_aux), and the
+// driver's aux read path switches BOTH RAMRD and RAMWRT on for the whole read
+// loop, reading its sapling block-list back out of dirbuf mid-loop. So dirbuf
+// MUST live in aux, and it must not sit on anything the load has to preserve:
+// the 80-column text page (aux $0400-$07FF), the resident book (aux $0800+),
+// the boot splash / DHGR page 1 (aux $2000-$3FFF), or the big-book / TT window
+// (aux $4000-$BFFF). aux $0200-$03FF -- the low transposition-table region,
+// dead before the first search, and the big book only loads at boot / New Game
+// -- is the one clean home. This is the executable half of the memory-map
+// decision in docs/loadcover-feasibility.md; the splash gate exercises it live
+// (the 32 KB load runs with dirbuf there and the splash survives byte-perfect).
+//
+// HAZARD, gated by the comment above it in cmd/genrwts: a driver call DURING a
+// game (a future save/load, not at a game boundary) would find live data here
+// and need to re-home dirbuf or save/restore it.
+func TestDirbufAuxReservation(t *testing.T) {
+	buildArtefacts(t)
+	rwtsinc := readSyms(t, "asm/rwts.inc")
+	dirbuf := rwtsinc["RWTS_DIRBUF"]
+	if dirbuf == 0 {
+		t.Fatal("RWTS_DIRBUF missing from asm/rwts.inc")
+	}
+	if dirbuf != 0x0200 {
+		t.Fatalf("RWTS_DIRBUF = $%04X, want aux $0200 (the reserved low-TT dirbuf window)", dirbuf)
+	}
+	const dirbufLen = 0x200            // the driver reads whole 512-byte blocks into it
+	lo, hi := dirbuf, dirbuf+dirbufLen // [lo, hi) exclusive
+
+	for _, r := range []struct {
+		name   string
+		lo, hi int
+	}{
+		{"80-column text page (aux half)", 0x0400, 0x0800},
+		{"resident opening book", BookAux, BookAux + fileLen(t, "internal/book/bookblob.bin")},
+		{"boot splash / DHGR page 1 (aux half)", 0x2000, 0x4000},
+		{"big-book / transposition-table window", 0x4000, 0xC000},
+	} {
+		if lo < r.hi && hi > r.lo {
+			t.Fatalf("dirbuf (aux $%04X-$%04X) OVERLAPS %s (aux $%04X-$%04X) -- the "+
+				"aux-direct book load would corrupt it, or it would corrupt the load",
+				lo, hi-1, r.name, r.lo, r.hi-1)
+		}
+	}
+	t.Logf("driver dirbuf reserved at aux $%04X-$%04X, clear of the text page, the "+
+		"resident book, the splash and the TT/big-book window", lo, hi-1)
+}
+
 // TestLanguageCardLayout: the UI's code, its static data and the 6502 vectors
 // tile $E000-$FFFF without overlapping, measured from the linker.
 func TestLanguageCardLayout(t *testing.T) {

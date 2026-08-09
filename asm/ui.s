@@ -154,8 +154,8 @@ BIGBOOKOK = M8VARS+$BB  ; nonzero: the big book is verified in aux $4000 and
                         ;  the game has not yet left it
 BBIDX     = M8VARS+$BC  ; big-book load: which of BOOK0-BOOK3
 BBST      = M8VARS+$BD  ; big-book load: driver status, saved across rwtszp
-BBDH      = M8VARS+$BE  ; big-book load: UIDHGR held while the loader borrows
-                        ;  the DHGR main half as its staging window
+                        ;  (M8VARS+$BE freed: the aux-direct read needs no held
+                        ;   display byte -- the splash/board stays up untouched)
 RWTSHOLD  = M8VARS+$BF  ; $F7BF-$F7EA: the zp window image (RWTS_ZPN = 44 B)
 SPLST     = M8VARS+$EB  ; boot splash: driver status, saved across rwtszp
                         ;  (asm/m8.s m8splash); one byte, disk build only

@@ -1,12 +1,20 @@
 # Feasibility: keep the boot SPLASH up during the big-book load
 
-Status: **PHASE 1 COMPLETE — STOP. An aux-path blocker was found (exactly the
-one the task flagged as "would corrupt it"). The core approach is feasible and
-the size budgets all fit, but the task's Q2 assumption — "dirbuf stays in main
-`$1300`, the driver only toggles `SETAUXWR/CLRAUXWR` around its data stores" —
-is FALSE. There is a small, empirically-supported fix, but it reserves a new
-aux scratch window (a memory-map decision), so this stops for sign-off rather
-than forcing it.**
+Status: **PHASE 2 SHIPPED (2026-08-09).** Phase 1's fix was signed off and
+implemented: the driver reads each book file directly into aux, dirbuf lives at
+aux `$0200-$03FF`, and each driver call runs under `SETAUXRD+SETAUXWR`. The boot
+splash now stays full-screen through the whole ~9 s load and only wipes to the
+board once the book is loaded and verified. Measured: the aux-direct load is
+byte-perfect (0 of 32,768 bytes wrong) and ~0.6 s FASTER than the old
+stage-then-copy path. New driver blob sha256 `9de6808b…`, still **724 B**;
+`engine.bin` md5 `c7998397…` unchanged. See "Phase 2 results" at the bottom.
+
+Phase 1 status (kept for the record): **an aux-path blocker was found (exactly
+the one the task flagged as "would corrupt it"). The size budgets all fit, but
+the task's Q2 assumption — "dirbuf stays in main `$1300`, the driver only
+toggles `SETAUXWR/CLRAUXWR` around its data stores" — was FALSE.** The fix
+(dirbuf → the empirically-free aux `$0200-$03FF`, and the caller brackets each
+call with `SETAUXRD+SETAUXWR`) was signed off and is what shipped.
 
 Goal recap: read each 8 KB book file DIRECTLY into its aux home
 (`$4000 + 32*index`) via ProRWTS2 `allow_aux`, dropping the main-`$2000`
@@ -151,3 +159,47 @@ new aux-scratch reservation before regenerating the committed driver blob.
 - Boot-to-`mloop` aux dump: `$0200-$03FF` all-zero; resident book `$0800-$1E48`;
   text page `$0400-$07FF` in use; old `trackd1` operand = `$22` (track 34).
 </content>
+
+---
+
+## Phase 2 results (2026-08-09, measured)
+
+**Driver blob** (`cmd/genrwts`, now with `allow_aux=1` and `dirbuf`→aux `$0200`):
+- code 495 B → **508 B** (`$DC00-$DDFB`); the +13 bytes fit the padding before
+  the page-aligned nibble tables, so `dataend` stays `$DEC0` and the blob is
+  still **724 B** (`$DC00-$DED3`) — resident footprint unchanged.
+- sha256 `51656c08…` → **`9de6808b495c559411646330ff34bccb0071d5a9dd695de825bc89baa8eda77b`**
+  (changed, as expected — new `setaux`/`auxreq` code). `trackd1` operand moved
+  `$DD8F`→`$DD9C`; `auxreq`=`$51`, `setaux`=`$DC9A`.
+
+**Engine**: `asm/engine.bin` md5 **`c7998397b25986beacaa9a0c8a23159d`**
+(UNCHANGED). FEATURES/FEATURES2 untouched (the reorder is all in m8main /
+m8bigbook, no engine source).
+
+**Timing** (from `TestDiskBigBook`, emulated 1.0205 MHz):
+- splash up and full-screen at **~9.2 s**; the 32 KB big book loads straight
+  into aux BEHIND it in **+8.37 s** (was +8.95 s stage-then-copy — ~0.6 s
+  faster, the dropped `copyx` of 32 KB main→aux); board + first input at
+  **~17.6 s** (was ~18.4 s with the splash). The load now happens UNDER the
+  logo instead of on a "LOADING…" text screen.
+- correctness: the 32 KB window in aux matches `bigbook.bin` **0 of 32,768
+  bytes wrong**, and the splash in DHGR page 1 is **byte-identical** before and
+  after the load (the read never touched `$2000`).
+
+**Files changed**: `cmd/genrwts/main.go` (allow_aux + dirbuf→aux $0200 + auxreq
+emit/assert), regenerated `internal/rwts/rwtsblob.bin` + `internal/rwts/gen.go`
++ `asm/rwts.inc`; `asm/m8.s` (m8main reorder, m8bigbook aux-direct read, drop
+copyx/uidhoff/m_loading/splhold, m8splash no-hold), `asm/ui.s` (BBDH freed);
+`internal/ui/diskboot.go` (RunToKeyboard keys on `$C000` exactly; BootToPrompt
+single-poll); gates `internal/ui/splash_test.go`,
+`internal/ui/bigbook_test.go`, `internal/delivery/layout_test.go`
+(`TestDirbufAuxReservation`).
+
+**Gates + mutations**: `TestDiskSplashShowsThenAdvances` proves the splash is
+full-screen at load start, byte-identical after all four files load to aux, and
+that the board comes up with `BIGBOOKOK=1`. Four mutations verified (each broke
+one assertion, then reverted): (1) scribble main `$2000` in m8bigbook → "load
+SHREDDED the splash" FAIL; (2) `BIGBOOKOK`←0 in verify → "BIGBOOKOK=0, want 1"
+FAIL; (3) `MIXCLR`→`MIXSET` in m8splash → "not full-screen DHGR: Mixed=true"
+FAIL; (4) `RWTS_DIRBUF`→`$0400` → `TestDirbufAuxReservation` "want aux $0200"
+FAIL.

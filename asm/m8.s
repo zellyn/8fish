@@ -153,6 +153,7 @@ NLEVELS = 9
 
         .import __UICODE_SIZE__
         .import __UIDATA2_RUN__, __UIDATA2_SIZE__
+        .import __SPLASH_RUN__, __SPLASH_SIZE__
 
 boot:
 .ifdef SDCHAIN
@@ -207,8 +208,29 @@ btlc:   lda ENG_LCCODE_LOAD,y
         sta TTPTR+1
         ldx #>(__UIDATA2_SIZE__ + 255)
         jsr copyp
-        lda $C08B               ; back to bank 1 -- the resting state, and
-        lda $C08B               ;  the bank the SDCHAIN block below assumes
+.ifndef SDCHAIN
+        lda $C08B               ; back to bank 1 -- the BLOAD path jumps to
+        lda $C08B               ;  $E000 next and everything there assumes it.
+.endif                          ;  The SDCHAIN path re-selects bank 1 with $C08A
+                                ;  in the stage-2 block below, so it skips this;
+                                ;  the SPLASH copy that follows runs under bank 2
+                                ;  there, which is fine -- $F800 is the single
+                                ;  $E000+ bank, written the same in either.
+
+        ; The boot SPLASH code (the SPLASH segment): staged right after UIDATA2
+        ; in the payload (UIDATA2 is page-aligned by a .align at its end, so the
+        ; source is exactly where the UIDATA2 copyp above left ZPTR -- one fewer
+        ; pointer to set up), copied to the still-dead ply-history region at
+        ; $F800. It is
+        ; bank-independent LC ($E000+ is one bank), so m8splash runs in the
+        ; resting bank 1 with no switching, and m8new reclaims the region for the
+        ; game history AFTER the splash has shown.
+        lda #<__SPLASH_RUN__
+        sta TTPTR
+        lda #>__SPLASH_RUN__
+        sta TTPTR+1
+        ldx #>(__SPLASH_SIZE__ + 255)
+        jsr copyp
 
 .ifdef SDCHAIN
         ; ---- STAGE 2: re-enter the loader with a fresh page table ----------
@@ -259,10 +281,10 @@ sd2done:
         ; because nothing here needs LC RAM to read.
         lda $C081
         lda $C081
-        lda #<SD2NAMES
-        sta ZPTR
-        lda #>SD2NAMES
-        sta ZPTR+1
+        ; ZPTR already points at SD2NAMES: the name table abuts the artwork
+        ; (SD2NAMES = SD2TILES + SD2TILEN*256), and the tile copyp above left
+        ; ZPTR exactly SD2TILEN pages past SD2TILES. Reusing it is what pays for
+        ; the SPLASH copy's page below.
         lda #<BOOK_NAMES
         sta TTPTR
         lda #>BOOK_NAMES
@@ -618,6 +640,21 @@ m8main:
         ; boots to the text screen and ESC is a no-op it can still take.
         jsr dhclear
         jsr dhinit
+        ; THE BOOT SPLASH (disk build only). Show the hand-drawn title card
+        ; before the board, auto-advancing on a key or a ~3.5 s timeout. Gated
+        ; on RWTSDEF: only the disk build has the resident reader that fetches
+        ; it, and a missing or corrupt splash must never block the boot -- so
+        ; m8splash falls through to the board on any failure.
+        ;
+        ; m8splash and its PackBits decoder are the SPLASH segment: the
+        ; $E000-$F6FF code budget is FULL, so the copier delivers them into the
+        ; still-dead ply-history region at $F800 (bank-independent LC, reclaimed
+        ; by m8new after the splash). They run in the resting bank 1 -- no bank
+        ; switching, and the ProRWTS2 driver at $DC00 is right there.
+        lda RWTSDEF
+        beq :+
+        jsr m8splash
+:
         lda UIDHGRDEF
         sta UIDHGR
         beq :+
@@ -953,6 +990,187 @@ mbbrts: rts
 ; In UICODE (not UIDATA2) because the driver reads them through (namlo) from
 ; bank-1-resting state, and bank 2 would be switched out under it.
 f_book: .byte 5, "BOOK0"
+
+        .segment "SPLASH"       ; the splash lives in the SPLASH segment: the
+                                ;  $E000-$F6FF UICODE budget is full, so the
+                                ;  copier delivers this to the transient
+                                ;  ply-history region at $F800 (bank-independent
+                                ;  LC; m8new reclaims it after the splash runs).
+; ---------------------------------------------------------------------------
+; m8splash: show the boot TITLE CARD (disk build only; the caller gates on
+; RWTSDEF). Read the SPLASH file, decode the per-bank PackBits blob straight
+; into DHGR page 1, show it, and HOLD until a key or a ~3.5 s timeout. A
+; missing or corrupt splash NEVER blocks the boot: every skip path falls
+; through to the board, re-clearing the staging window it borrowed.
+;
+; The blob (internal/splash) is 'magic + auxStream + mainStream', each stream
+; decoding to exactly 8192 bytes. It is read to main $2000 (BOOKSTAGE) like a
+; BOOK file, copied to aux $4000 (BIGBOOK_BASE, idle until m8bigbook) so the
+; decode's SOURCE survives while it overwrites main $2000, its magic checked,
+; then decoded: aux $2000 gets the first 8192 output bytes, main $2000 the
+; next. The big-book load's own dhclear later wipes the splash for the board;
+; on a disk boot m8bigbook always runs (even on a book failure), so the board
+; always comes up over a cleared page.
+;
+; SPLASHSIZE / SPLASHPAGES are the on-disk SPLASH file size: 5632 B = 11
+; blocks = 22 pages, == internal/splash.DiskBytes. internal/ui's splash gate
+; boots the disk and checks the decoded bytes, so a drift fails there.
+; ---------------------------------------------------------------------------
+SPLASHSIZE  = $1600            ; 5632 B = 11 blocks (splash.DiskBytes)
+SPLASHPAGES = $16              ; 22 pages
+m8splash:
+        jsr rwtszp             ; engine zp (incl. board rows $40-$67) out,
+                               ;  driver zp in
+        lda #<f_splash         ; f_splash is at $F8xx (bank-independent LC), so
+        sta RWTS_NAMLO         ;  the bank-1 driver reads it directly
+        lda #>f_splash
+        sta RWTS_NAMLO+1
+        lda #0
+        sta RWTS_SIZELO
+        sta RWTS_LDRLO         ; ...landing at main $2000 (BOOKSTAGE)
+        lda #>SPLASHSIZE
+        sta RWTS_SIZELO+1      ; $1600 = 5632 B = 11 blocks
+        lda #>BOOKSTAGE
+        sta RWTS_LDRLO+1
+        jsr RWTS_ENTRY         ; motor on, find the file, read, motor off
+        lda RWTS_STATUS
+        sta SPLST              ; saved across the swap-back
+        jsr rwtszp             ; driver zp out, engine zp back
+        lda SPLST
+        bne splskip            ; no disk / no such file / bad read: skip
+        ; --- copy the compressed blob main $2000 -> aux $4000 ---
+        lda #<BOOKSTAGE
+        sta ZPTR
+        lda #>BOOKSTAGE
+        sta ZPTR+1
+        lda #<BIGBOOK_BASE
+        sta TTPTR
+        lda #>BIGBOOK_BASE
+        sta TTPTR+1
+        ldx #SPLASHPAGES
+        sta RAMWRTON
+        jsr copyx
+        sta RAMWRTOFF
+        ; --- check the '8','F' magic in the aux copy (RAMRD reads aux) ---
+        sta RAMRDON
+        lda BIGBOOK_BASE
+        cmp #'8'
+        bne splbadm
+        lda BIGBOOK_BASE+1
+        cmp #'F'
+        bne splbadm
+        sta RAMRDOFF
+        jsr spldecode          ; PackBits -> aux $2000 then main $2000
+        lda #1                 ; show DHGR page 1: the splash
+        sta UIDHGR
+        jsr uidhon
+        jsr splhold            ; wait for a key or time out
+        rts
+splbadm:
+        sta RAMRDOFF           ; magic mismatch: no decode, fall through
+splskip:
+        jsr dhclear            ; the read dirtied main $2000 (DHGR page 1 main
+                               ;  half); restore black so the board paints over
+                               ;  a clean border
+        rts
+
+; spldecode: decode the per-bank PackBits blob at aux $4000+2 (past the magic)
+; into DHGR page 1 -- aux $2000 for the first 8192 output bytes, then main
+; $2000 for the next. Runs at $E000 (LC), so RAMRD steers only the (SPLSRC),y
+; SOURCE reads (always aux) and RAMWRT only the (SPLDST),y WRITES (the current
+; dest bank); the zero-page pointers follow ALTZP and are untouched by either.
+; The source stream is CONTINUOUS across the bank switch. Control byte c:
+; c<128 copies the next c+1 bytes; c>=128 repeats the next byte 257-c times.
+SPLSRC = ZPTR                  ; source pointer (aux $4000+)
+SPLDST = TTPTR                 ; dest pointer (DHGR page 1, bank per RAMWRT)
+spldecode:
+        lda #<(BIGBOOK_BASE+2) ; source: past the 2-byte magic
+        sta SPLSRC
+        lda #>(BIGBOOK_BASE+2)
+        sta SPLSRC+1
+        sta RAMRDON            ; source is aux for the whole decode
+        lda #<BOOKSTAGE        ; bank 0: aux $2000
+        sta SPLDST
+        lda #>BOOKSTAGE
+        sta SPLDST+1
+        sta RAMWRTON
+        jsr splbank
+        lda #<BOOKSTAGE        ; bank 1: main $2000 (source continues)
+        sta SPLDST
+        lda #>BOOKSTAGE
+        sta SPLDST+1
+        sta RAMWRTOFF
+        jsr splbank
+        sta RAMRDOFF
+        rts
+
+; splbank: decode one 8192-byte bank into (SPLDST), stopping when SPLDST
+; reaches $4000 (BOOKSTAGE + $2000). Y stays 0 throughout.
+splbank:
+        ldy #0
+splctl: jsr splget             ; control byte
+        cmp #128
+        bcc spllit
+        eor #$FF               ; run of 257-c: 255-c...
+        clc
+        adc #2                ;  ...+2 = 257-c (2..128); clc clears cmp's carry
+        tax
+        jsr splget             ; the byte to repeat
+splrun: jsr splput
+        dex
+        bne splrun
+        jmp splchk
+spllit: tax                    ; c
+        inx                    ;  c+1 literals (1..128)
+splitl: jsr splget
+        jsr splput
+        dex
+        bne splitl
+splchk: lda SPLDST+1
+        cmp #>(BOOKSTAGE+$2000) ; $40: this bank's 8192 output bytes are done
+        bne splctl
+        rts
+
+; splget: A = next source byte (aux), advance SPLSRC. Y must be 0.
+splget: lda (SPLSRC),y
+        inc SPLSRC
+        bne :+
+        inc SPLSRC+1
+:       rts
+
+; splput: store A to (SPLDST) (dest bank), advance SPLDST. Y must be 0.
+splput: sta (SPLDST),y
+        inc SPLDST
+        bne :+
+        inc SPLDST+1
+:       rts
+
+; splhold: show the splash until a key is pressed or ~3.5 s elapse, then
+; consume the key and clear the strobe. A coarse nested-loop delay (there is no
+; readable clock at boot), polling $C000 so ANY key advances immediately.
+SPLTICKS = 5
+splhold:
+        lda #SPLTICKS
+        sta T0
+sph1:   ldx #0
+sph2:   ldy #0
+sph3:   lda KBD
+        bmi sphkey
+        dey
+        bne sph3
+        dex
+        bne sph2
+        dec T0
+        bne sph1
+sphkey: bit KBDSTROBE          ; consume the key (and clear the strobe) so it
+        rts                    ;  does not leak into the game's first input
+
+; The splash file's name, length-prefixed ASCII, read by the driver through
+; (namlo). At $F8xx it is bank-independent LC, so the bank-1 driver reads it
+; directly -- the same reason f_book sits bank-independent.
+f_splash: .byte 6, "SPLASH"
+
+        .segment "UICODE"       ; back to the resident code bank
 
 ; ---------------------------------------------------------------------------
 ; m8machine: this program needs a 128K Apple IIe. Prove it, or refuse.
@@ -3744,6 +3962,14 @@ m_cursor:   SCRSTR "ARROWS MOVE. SPACE SELECTS. ESC CANCELS"
 ; book, exactly as a diskless 8fish always has).
 m_loading:  SCRSTR "LOADING OPENING LIBRARY..."
 m_nobigbook: SCRSTR "DISK NOT READ - USING THE SMALL BOOK"
+
+        ; Pad UIDATA2 to a whole number of pages. The copier copies
+        ; >(__UIDATA2_SIZE__+255) pages of it and then finds the SPLASH segment
+        ; exactly where that copy left ZPTR -- which only holds if UIDATA2's
+        ; size IS that page count, i.e. page-aligned. This .align makes it so and
+        ; auto-tracks any growth, so the copier's SPLASH copy needs no source
+        ; pointer of its own (asm/m8.s boot, the reused ZPTR).
+        .align 256
 
         .segment "UICODE"
 

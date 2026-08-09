@@ -27,6 +27,7 @@
 !internal/book/bigbook.bin
 !internal/rwts/rwtsblob.bin
 !internal/tiles/tileblob.bin
+!internal/splash/splashblob.bin
 
 # stray binaries from `go build ./cmd/...` in the repo root
 /genbook

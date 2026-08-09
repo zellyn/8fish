@@ -142,7 +142,8 @@ dsk: asm/8fish.dsk
 
 asm/8fish.dsk: asm/m8sdboot.bin asm/m8.bin asm/engine.bin internal/book/bookblob.bin \
                internal/book/bigbook.bin internal/rwts/rwtsblob.bin \
-               internal/tiles/tileblob.bin cmd/mkdsk/main.go internal/delivery/delivery.go \
+               internal/tiles/tileblob.bin internal/splash/splashblob.bin \
+               cmd/mkdsk/main.go internal/delivery/delivery.go \
                internal/delivery/bookregion.go
 	@command -v $(DISKII) >/dev/null 2>&1 || { \
 	  echo "$(DISKII) not found on PATH: it builds the Standard Delivery boot disk." >&2; \
@@ -186,6 +187,14 @@ internal/tiles/tileblob.bin: assets/chess2-dazzledraw-save.bin cmd/gentiles/main
 
 asm/tiledefs.inc asm/tiles.inc: internal/tiles/tileblob.bin
 	@:
+
+# The boot SPLASH: the hand-drawn 16 KB double-hi-res logo, PackBits-compressed
+# per bank into the committed blob that package splash embeds and the disk
+# carries as its SPLASH file (asm/m8.s m8splash decodes it at boot). The asset
+# is the single source of truth; gensplash round-trips its own output and fails
+# if the logo no longer fits its block budget, so a bad redraw stops HERE.
+internal/splash/splashblob.bin: assets/fish8-splash-dazzledraw-save.bin cmd/gensplash/main.go internal/splash/splash.go
+	go run ./cmd/gensplash
 
 asm/perft.bin: asm/perft.s asm/board.s asm/movegen.s asm/defs.inc asm/tables.s asm/perft.cfg
 	cd asm && $(CA65) perft.s -o perft.o

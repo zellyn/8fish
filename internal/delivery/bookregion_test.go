@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/zellyn/chess6502/internal/rwts"
+	"github.com/zellyn/chess6502/internal/splash"
 )
 
 // TestBlockOffsetsMatchTheCanonicalSkew pins BlockOffsets — which mirrors
@@ -61,6 +62,65 @@ func TestBookRegionRoundTrip(t *testing.T) {
 	}
 	t.Logf("book region: dir block %d, %d files x %d B, %d sectors total",
 		BookDirBlock, BookFiles, BookFileBytes, BookRegionSectors())
+}
+
+// TestSplashRegionRoundTrip writes the region and reads the SPLASH file back
+// through the directory chain, then decodes it to the raw asset — the same
+// path the booted machine walks (driver read -> asm/m8.s decode). It also
+// pins the layout facts asm/m8.s and the disk depend on: the 5th directory
+// entry is SPLASH, its data blocks sit BELOW the directory and clear of the
+// book, and the file is exactly the padded blob.
+func TestSplashRegionRoundTrip(t *testing.T) {
+	big, err := os.ReadFile(filepath.Join("..", "..", "internal", "book", "bigbook.bin"))
+	if err != nil {
+		t.Fatalf("%v (run `go run ./cmd/genbook`)", err)
+	}
+	dsk := make([]byte, SectorsPerDisk*SectorBytes)
+	if err := writeBookRegion(dsk, big); err != nil {
+		t.Fatal(err)
+	}
+
+	// The FILE_COUNT header now names five files (four BOOK + SPLASH).
+	blocks, err := buildBookRegion(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := blocks[BookDirBlock][4+0x21]; got != BookFiles+1 {
+		t.Fatalf("directory FILE_COUNT = %d, want %d (books + splash)", got, BookFiles+1)
+	}
+
+	// The splash reads back byte-for-byte and decodes to the asset.
+	got, err := ExtractSplashFile(dsk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, splash.Disk()) {
+		t.Fatal("SPLASH does not read back through the directory chain")
+	}
+	rawScreen, err := splash.Decode(got)
+	if err != nil {
+		t.Fatalf("the SPLASH file on the disk did not decode: %v", err)
+	}
+	asset, err := os.ReadFile(filepath.Join("..", "..", "assets", "fish8-splash-dazzledraw-save.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rawScreen, asset) {
+		t.Fatal("the SPLASH file decodes to something other than the hand-drawn asset")
+	}
+
+	// The splash blocks sit BELOW the directory and do not overlap the book's
+	// blocks (which run at 209.. above it), and stay on the disk.
+	if splashDataBase+splashDataBlocks-1 >= BookDirBlock {
+		t.Fatalf("splash data (%d..%d) overlaps the directory at %d",
+			splashDataBase, splashDataBase+splashDataBlocks-1, BookDirBlock)
+	}
+	if splashIndexBlock < 0 {
+		t.Fatalf("splash index block %d is off the disk", splashIndexBlock)
+	}
+	t.Logf("splash region: index block %d, data %d..%d (%d B in %d blocks, below dir block %d)",
+		splashIndexBlock, splashDataBase, splashDataBase+splashDataBlocks-1,
+		SplashFileBytes, splashDataBlocks, BookDirBlock)
 }
 
 // TestBookRegionDoesNotTouchTheSDRegion: the ProRWTS2-shaped region and the

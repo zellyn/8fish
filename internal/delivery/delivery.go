@@ -85,6 +85,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/zellyn/chess6502/internal/splash"
 )
 
 // The delivery layout. Addresses are load addresses in main RAM.
@@ -606,6 +608,12 @@ func Build(root, imgPath, dskPath string) (Ledger, error) {
 		if want := padded[i*BookFileBytes : (i+1)*BookFileBytes]; !bytes.Equal(got, want) {
 			return l, fmt.Errorf("delivery: %s does not read back from %s", BookFileName(i), dskPath)
 		}
+	}
+	// ...and the SPLASH file, the same way (directory -> index -> data).
+	if got, err := ExtractSplashFile(written); err != nil {
+		return l, err
+	} else if !bytes.Equal(got, splash.Disk()) {
+		return l, fmt.Errorf("delivery: %s does not read back from %s", SplashFileName, dskPath)
 	}
 	return l, nil
 }

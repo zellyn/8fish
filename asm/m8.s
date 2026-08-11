@@ -2155,9 +2155,9 @@ PPMAXDEPTH = 20         ; deep-ponder depth cap (the clock/keypress stops it
 ; exactly as before. While ABORT is set the re-arm is 1, preserving
 ; checkclock's every-node unwind; a keystroke also arms 1 directly, so the
 ; abort unwinds immediately instead of coasting to the next 128-node poll.
-; ~26 cycles per extra poll = ~0.1% of ponder throughput; the own-move
-; search never runs this code (ccsite -> ENG_checkclocks, cadence 128,
-; byte-identical).
+; ~40 cycles per extra poll x 15 extra polls per 128 nodes = ~0.2% of ponder
+; throughput; the own-move search never runs this code (ccsite ->
+; ENG_checkclocks, cadence 128, byte-identical).
 PKQUANT = 8             ; ponder keyboard-poll cadence, in nodes (~30 ms)
 pkclk:  dec PKDIV               ; charge the soft clock every 16th poll —
         bne pknc                ;  the same 128-node quantum PCOST prices

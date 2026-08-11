@@ -38,6 +38,6 @@ BOOK_E_NAMEID  = 8    ; name-table index -> current-opening byte
 
 ; build stats:
 BOOK_ENTRY_COUNT = 633
-BOOK_NAME_COUNT  = 80
+BOOK_NAME_COUNT  = 88    ; shipped table: 80 curated + 8 big-book eco
 BOOK_BLOB_SIZE   = 5705
-BOOK_NAMES_SIZE  = 1702
+BOOK_NAMES_SIZE  = 1780

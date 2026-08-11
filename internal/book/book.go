@@ -166,6 +166,16 @@ func Encode(entries []Entry, names []string) (entriesBlob, namesBlob []byte) {
 		b[eNameID] = e.NameID
 	}
 
+	return blob, EncodeNames(names)
+}
+
+// EncodeNames builds the NAMES piece alone: the length-prefixed string run
+// that goes resident in Language Card bank 2 at NamesAddr. Split out of
+// Encode because the SHIPPED table is the BIG book's (curated names first,
+// byte-identical, then the eco names BuildBig appends) while the small blob's
+// header keeps its own curated-only name count — asm/m8.s's uibookname walks
+// the table positionally by NameID, so a superset table serves both books.
+func EncodeNames(names []string) []byte {
 	total := 0
 	for _, n := range names {
 		total += 1 + len(n)
@@ -177,7 +187,7 @@ func Encode(entries []Entry, names []string) (entriesBlob, namesBlob []byte) {
 		copy(nb[p+1:], n)
 		p += 1 + len(n)
 	}
-	return blob, nb
+	return nb
 }
 
 // EncodeBig builds the BIG BOOK blob: the identical header + sorted entry

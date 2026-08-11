@@ -48,7 +48,25 @@ func main() {
 		fmt.Fprintln(os.Stderr, "genbook: build failed:", err)
 		os.Exit(1)
 	}
-	blob, nameBlob := book.Encode(entries, names)
+	blob, _ := book.Encode(entries, names)
+
+	// The BIG BOOK's content: the same curated entries, byte-identical, plus
+	// the vendored lichess ECO dataset (internal/book/lichess, CC0) imported
+	// as breadth until the window is full. BuildBig appends the eco names
+	// AFTER the curated ones, so the shipped name table (written below) is a
+	// superset the small blob's own 80-name header count simply stops short
+	// of — uibookname walks it positionally either way.
+	ecoLines, err := book.ECOLines()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "genbook: lichess dataset failed:", err)
+		os.Exit(1)
+	}
+	bigEntries, bigNames, bigStats, err := book.BuildBig(lines, ecoLines)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "genbook: big-book build failed:", err)
+		os.Exit(1)
+	}
+	nameBlob := book.EncodeNames(bigNames)
 
 	// Round-trip sanity: both pieces must parse back to the same counts.
 	bk, err := book.Load(blob, nameBlob)
@@ -57,7 +75,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	rawNames, tokNames := measureNameTables(names)
+	rawNames, tokNames := measureNameTables(bigNames)
 
 	if err := os.WriteFile("internal/book/bookblob.bin", blob, 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "genbook:", err)
@@ -67,14 +85,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "genbook:", err)
 		os.Exit(1)
 	}
-	// The BIG BOOK (docs/prorwts2-design.md §3): the same entries in the same
-	// layout plus a checksum trailer, loaded from disk into the idle
-	// transposition-table window at aux $4000. Today it carries the same
-	// curated lines as the resident blob — the MECHANISM supports
-	// book.BigMaxEntries (3,639); filling it is the follow-on content task.
-	// Its names are the resident name table (shared; one-byte NameIDs), so
-	// growing the big book must stay inside the same 255-name budget.
-	bigBlob, err := book.EncodeBig(entries, names)
+	// The BIG BOOK (docs/prorwts2-design.md §3): the curated entries in the
+	// same layout, plus the lichess ECO breadth import (BuildBig above), plus
+	// a checksum trailer, loaded from disk into the idle transposition-table
+	// window at aux $4000. Its names are the resident name table (shared;
+	// one-byte NameIDs), which is why booknames.bin is written from bigNames.
+	bigBlob, err := book.EncodeBig(bigEntries, bigNames)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "genbook:", err)
 		os.Exit(1)
@@ -84,7 +100,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := os.WriteFile("asm/book.inc",
-		[]byte(asmHeader(len(entries), len(names), len(blob), len(nameBlob))), 0o644); err != nil {
+		[]byte(asmHeader(len(entries), len(names), len(bigNames), len(blob), len(nameBlob))), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "genbook:", err)
 		os.Exit(1)
 	}
@@ -94,19 +110,25 @@ func main() {
 		openingsPath, len(lines), len(entries), entriesBytes, len(names))
 	fmt.Printf("  ENTRIES: header %d B + entries %d B = %d B -> AUX $%04X\n",
 		book.HeaderSize, entriesBytes, len(blob), book.BaseAddr)
-	fmt.Printf("  NAMES:   %d names, %d B (raw) -> LANGUAGE CARD BANK 2 $%04X\n",
-		len(names), len(nameBlob), book.NamesAddr)
+	fmt.Printf("  NAMES:   %d names (%d curated + %d eco), %d B (raw) -> LANGUAGE CARD BANK 2 $%04X\n",
+		len(bigNames), len(names), len(bigNames)-len(names), len(nameBlob), book.NamesAddr)
 	fmt.Printf("  name-table measurement: raw=%d B  word-tokenized=%d B  -> using RAW\n",
 		rawNames, tokNames)
 	fmt.Printf("  resident footprint: entries %d / %d B aux $%04X-$1FFF (%.1f%%), "+
-		"names %d / %d B in LC bank 2 (%.1f%%)\n",
+		"names %d / %d B of the stage-2 window (%.1f%%; LC bank 2 holds %d)\n",
 		len(blob), book.MaxSize, book.BaseAddr, 100*float64(len(blob))/float64(book.MaxSize),
-		len(nameBlob), book.NamesMaxSize, 100*float64(len(nameBlob))/float64(book.NamesMaxSize))
+		len(nameBlob), book.NamesStageMax, 100*float64(len(nameBlob))/float64(book.NamesStageMax),
+		book.NamesMaxSize)
 	fmt.Printf("  reload OK: %d entries, %d names\n", len(bk.Entries()), len(names))
 	fmt.Printf("  BIGBOOK: %d B (header + %d entries + checksum) -> AUX $%04X via ProRWTS2; "+
 		"capacity %d entries (%.1f%% full)\n",
-		len(bigBlob), len(entries), book.BigBase, book.BigMaxEntries,
-		100*float64(len(entries))/float64(book.BigMaxEntries))
+		len(bigBlob), len(bigEntries), book.BigBase, book.BigMaxEntries,
+		100*float64(len(bigEntries))/float64(book.BigMaxEntries))
+	fmt.Printf("  BIGBOOK content: %d curated (byte-identical to the resident book) + %d eco "+
+		"breadth entries from %d lichess lines; %d distinct positions DROPPED by the "+
+		"entry cap; names %d curated + %d family + %d bucket = %d\n",
+		bigStats.CuratedEntries, bigStats.ECOEntries, len(ecoLines), bigStats.DroppedByCap,
+		len(names), bigStats.FamilyNames, bigStats.BucketNames, len(bigNames))
 
 	// The budget checks come LAST and after the breakdown is printed: when a
 	// book overflows you need to see WHERE the bytes went (entries vs names)
@@ -122,6 +144,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "genbook: the name table is %d bytes, %d MORE than all of "+
 			"Language Card bank 2 (%d B)\n",
 			len(nameBlob), len(nameBlob)-book.NamesMaxSize, book.NamesMaxSize)
+		bad = true
+	}
+	if len(nameBlob) > book.NamesStageMax {
+		fmt.Fprintf(os.Stderr, "genbook: the name table is %d bytes, %d MORE than the stage-2 "+
+			"window at $1600-$1CFF (%d B). Over 7 pages it moves asm/m8.s's SD2RWTS and "+
+			"delivery.RwtsOrg — a delivery change, not a book change\n",
+			len(nameBlob), len(nameBlob)-book.NamesStageMax, book.NamesStageMax)
 		bad = true
 	}
 	if bad {
@@ -156,7 +185,12 @@ func measureNameTables(names []string) (raw, tok int) {
 	return raw, tok
 }
 
-func asmHeader(entryCount, nameCount, blobSize, nameSize int) string {
+// asmHeader renders asm/book.inc. nameCount is the SMALL book header's name
+// count (curated only — the byte at BOOK_NAMECT); totalNames is the shipped
+// table's count, curated + the big book's eco names (BuildBig appends them, so
+// curated IDs are unchanged and uibookname's positional walk serves both
+// books).
+func asmHeader(entryCount, nameCount, totalNames, blobSize, nameSize int) string {
 	var b strings.Builder
 	b.WriteString("; Generated by cmd/genbook. DO NOT EDIT.\n")
 	b.WriteString("; Resident opening book layout. The book is delivered in TWO pieces by\n")
@@ -195,7 +229,8 @@ func asmHeader(entryCount, nameCount, blobSize, nameSize int) string {
 	b.WriteString("BOOK_E_NAMEID  = 8    ; name-table index -> current-opening byte\n\n")
 	b.WriteString("; build stats:\n")
 	fmt.Fprintf(&b, "BOOK_ENTRY_COUNT = %d\n", entryCount)
-	fmt.Fprintf(&b, "BOOK_NAME_COUNT  = %d\n", nameCount)
+	fmt.Fprintf(&b, "BOOK_NAME_COUNT  = %d    ; shipped table: %d curated + %d big-book eco\n",
+		totalNames, nameCount, totalNames-nameCount)
 	fmt.Fprintf(&b, "BOOK_BLOB_SIZE   = %d\n", blobSize)
 	fmt.Fprintf(&b, "BOOK_NAMES_SIZE  = %d\n", nameSize)
 	return b.String()

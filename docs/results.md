@@ -3,6 +3,42 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-10 — ★ BIG BOOK FILLED to 100% (633 → 3,639 entries) from lichess ECO; small book, engine, driver all byte-identical
+
+The big book was 17% full — the same 633 curated entries as the resident book,
+so the disk load bought validation but zero extra breadth. Now it's **3,639 /
+3,639 (100%)**: the 633 curated entries ride byte-identical, plus **3,006
+lichess chess-openings (CC0) entries** imported as breadth. **Zero load-time
+cost** — the load reads a fixed 32 KB regardless of fill.
+
+- **Coverage** (`TestBookOpponentCoverage`, % of an opponent's legal replies the
+  book can answer; reachable book nodes in parens):
+  - Book plays **White**: ply 3 **6.5 → 11.3%**, ply 5 **3.4 → 5.0%**; reachable
+    nodes **263 → 691**.
+  - Book plays **Black**: ply 2 **11.9 → 18.5%**, ply 4 **4.5 → 6.0%**;
+    reachable nodes **→ 864**.
+  - This is the dataset's ceiling at plies ≤ 10 (every lichess position that
+    shallow is in); the cap dropped 2,112 positions, all at ply ≥ 11.
+- **Design**: a NEW permissive `book.BuildBig` (the strict `Build` that guards
+  the hand-curated file is untouched). Curated MAIN lines win — they define the
+  repertoire and weights; ECO fills only EMPTY engine-to-move positions
+  (skip-not-error on a curated conflict), one move per position, both colors,
+  shallow-plies-first, capped at 3,639. `TestBigBookCuratedPreserved` proves the
+  curated entries are byte-identical inside the big book, so the engine's own
+  repertoire (incl. its first move) is provably unchanged.
+- **Names**: 88 distinct (80 curated + "Sicilian/English/French Defense" + 5
+  "ECO A"–"ECO E" buckets). The real budget wasn't the 256 NameIDs but the
+  **90-byte** `booknames.bin` staging window (`uibookname` walks the RESIDENT
+  table positionally, unbounded) — it grew 1,702 → 1,780 B (≤ 1,792), curated
+  prefix byte-identical, so `m8.bin` reassembles byte-identical and boot timing
+  is unchanged. New `book.NamesStageMax` enforces it at build time,
+  cross-checked in `delivery.TestMainMemoryLayout`.
+- **Untouched (md5)**: `engine.bin` `c7998397…`, `rwtsblob.bin` `7835a1a6…`,
+  small `bookblob.bin` `de61005f…`. Source vendored under
+  `internal/book/lichess/` (5 TSVs + COPYING.txt, CC0, commit-pinned). 10
+  mutation checks; `internal/book` + `internal/delivery` + `internal/ui`
+  (`TestDiskBigBook`, `TestDiskSplashShowsThenAdvances`) green.
+
 ## 2026-08-09 — Splash now COVERS the ~9 s big-book load (aux-direct read); driver blob changes, engine still byte-identical
 
 Supersedes the "Deferred, on purpose" note in the title-card entry below. The

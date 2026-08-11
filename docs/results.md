@@ -3,6 +3,36 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-11 — Ponder IN THE GAPS between keystrokes (no more idle while the human doodles/thinks); engine byte-identical
+
+The owner noticed a real waste: while it's the human's turn the engine ponders
+on his clock, but the FIRST keystroke aborted the ponder and `uiread` then
+blocked for the whole move entry — so a player who nudges the arrows to look
+around and then sits thinking had the engine IDLE the entire time. Now the
+human's turn ponders in BURSTS between keystrokes: `uiread`'s per-key wait
+(`urdkey`) runs one `m8ponder` burst, a keystroke aborts it in a poll quantum
+(key latched), the key is handled, and a fresh burst starts. Only a COMMITTED
+move (or a real ESC screen-swap) ends pondering. Strictly ALTERNATING, so the
+search/renderer zero-page sharing is never violated.
+
+- **Responsiveness**: the naive version measured 0.5–1.2 s key-to-handled. Fixed
+  with `PKQUANT`: while pondering, pkclk re-arms the keyboard poll every 8 nodes
+  (~30 ms) but still charges the soft clock every 16th poll (16×8 = 128), so the
+  clock *rate* is unchanged (a constant +1-quantum offset, <0.05% of the ~8 s
+  backstop, that never reaches the own-move search). Measured key response now
+  **72–165 ms** (`TestPonderKeyResponse`); ~0.2% ponder-throughput cost.
+- **Correctness**: `asm/engine.bin` md5 `c7998397…` UNCHANGED (UI-layer only);
+  the own-move search is byte-identical (the whole PKQUANT/pkclk block is gated
+  behind PONDERING). `m8ponder`'s restore-to-root+M invariant holds on every
+  exit path (verified), so repeated bursts start clean. Entropy double-fold
+  preserved (pkclk reads status only, key still reaches `entkey` once).
+- **Gates**: new `TestPonderBetweenKeystrokes` (engine ponders in every gap;
+  cursor pop/move, ESC-cancel, typing all park+resume a burst; commit/real-ESC
+  end it), `TestPonderKeyResponse`, `TestPonderBurstsGated` (game-over,
+  two-player, in-book, first move all correctly DON'T ponder). Full `internal/ui`
+  green; `cmd/ponder-match` benefit preserved. Independent adversarial review:
+  no confirmed bugs (two comment-accuracy nits fixed).
+
 ## 2026-08-10 — ★ BIG BOOK FILLED to 100% (633 → 3,639 entries) from lichess ECO; small book, engine, driver all byte-identical
 
 The big book was 17% full — the same 633 curated entries as the resident book,

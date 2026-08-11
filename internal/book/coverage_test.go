@@ -256,51 +256,110 @@ func joinLine(line string, ply int, san string) string {
 }
 
 func TestBookOpponentCoverage(t *testing.T) {
-	b, err := Default()
+	small, err := Default()
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx := keyIndex(b)
-	for _, side := range []struct {
-		name  string
-		color byte
-	}{{"BOOK PLAYS WHITE", 0}, {"BOOK PLAYS BLACK", 1}} {
-		nodes := collectOppNodes(t, b, idx, side.color)
-		t.Logf("=== %s: %d opponent-to-move nodes reachable in book ===", side.name, len(nodes))
+	big, err := DefaultBigBook()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The BIG book's coverage floors, per color and ply — the GATE on the
+	// lichess ECO import (book.BuildBig). The 633-entry curated book measured
+	// (playing White) 6.5% at ply 3, 3.4% at ply 5, 2.4% at ply 7; with the
+	// import the same walk measures 11.3% / 5.0% / 4.1%, and playing Black
+	// (even plies) 18.5% / 6.0% / 3.9% at plies 2 / 4 / 6.
+	//
+	// Those post-fill numbers are the DATASET'S CEILING, not a tuning choice:
+	// the fill is shallow-first and the 3,639-entry cap only starts dropping
+	// positions at ply 11, so every position the lichess dataset knows at
+	// plies <= 10 is in the book — coverage at these plies depends only on
+	// which positions carry entries, and all of them do. The rest of the
+	// opponent's legal replies are moves no named opening plays, which a
+	// popularity dataset cannot answer (curated /w and /b lines are how those
+	// get covered, one junk move at a time).
+	//
+	// Floors sit between the curated-only baseline and the measured ceiling:
+	// under the ceiling so openings.txt edits (which shift the reachable-node
+	// mix) don't trip them, far enough above the baseline that "the import
+	// quietly stopped working" cannot pass.
+	floors := map[byte]map[int]float64{
+		0: {3: 9, 5: 4, 7: 3},
+		1: {2: 15, 4: 5, 6: 3},
+	}
+	for _, bk := range []struct {
+		label  string
+		b      *Book
+		assert bool
+	}{{"SMALL (resident) book", small, false}, {"BIG (disk) book", big, true}} {
+		idx := keyIndex(bk.b)
+		for _, side := range []struct {
+			name  string
+			color byte
+		}{{"BOOK PLAYS WHITE", 0}, {"BOOK PLAYS BLACK", 1}} {
+			nodes := collectOppNodes(t, bk.b, idx, side.color)
+			t.Logf("=== %s, %s: %d opponent-to-move nodes reachable in book ===",
+				bk.label, side.name, len(nodes))
 
-		// Per-ply aggregate.
-		byPly := map[int][]oppNode{}
-		for _, n := range nodes {
-			byPly[n.ply] = append(byPly[n.ply], n)
-		}
-		plies := make([]int, 0, len(byPly))
-		for p := range byPly {
-			plies = append(plies, p)
-		}
-		sort.Ints(plies)
-		for _, p := range plies {
-			ns := byPly[p]
-			var cov, tot int
-			dead := 0
-			for _, n := range ns {
-				cov += len(n.covered)
-				tot += n.total
-				if len(n.covered) == 0 {
-					dead++
+			// Per-ply aggregate.
+			byPly := map[int][]oppNode{}
+			for _, n := range nodes {
+				byPly[n.ply] = append(byPly[n.ply], n)
+			}
+			plies := make([]int, 0, len(byPly))
+			for p := range byPly {
+				plies = append(plies, p)
+			}
+			sort.Ints(plies)
+			pct := map[int]float64{}
+			for _, p := range plies {
+				ns := byPly[p]
+				var cov, tot int
+				dead := 0
+				for _, n := range ns {
+					cov += len(n.covered)
+					tot += n.total
+					if len(n.covered) == 0 {
+						dead++
+					}
+				}
+				pct[p] = 100 * float64(cov) / float64(tot)
+				t.Logf("  ply %2d: %3d nodes, %4d/%4d legal replies covered (%.1f%%), %d nodes with ZERO covered replies",
+					p, len(ns), cov, tot, pct[p], dead)
+			}
+			if bk.assert {
+				for _, p := range sortedKeys(floors[side.color]) {
+					if got, want := pct[p], floors[side.color][p]; got < want {
+						t.Errorf("%s, %s: ply %d opponent-reply coverage %.1f%% is under the "+
+							"%.0f%% floor — the ECO breadth import has regressed "+
+							"(curated-only baseline was ~6.5%% at ply 3)",
+							bk.label, side.name, p, got, want)
+					}
 				}
 			}
-			t.Logf("  ply %2d: %3d nodes, %4d/%4d legal replies covered (%.1f%%), %d nodes with ZERO covered replies",
-				p, len(ns), cov, tot, 100*float64(cov)/float64(tot), dead)
-		}
-		// The shallow nodes verbatim — these are the ones every game hits.
-		for _, n := range nodes {
-			if n.ply > 3 {
-				continue
+			if !bk.assert {
+				// The shallow nodes verbatim — the ones every game hits. Small
+				// book only: the big book has hundreds of shallow nodes.
+				for _, n := range nodes {
+					if n.ply > 3 {
+						continue
+					}
+					t.Logf("  [ply %d] after %-24s : %2d/%2d covered: %s",
+						n.ply, orDash(n.line), len(n.covered), n.total, strings.Join(n.covered, " "))
+				}
 			}
-			t.Logf("  [ply %d] after %-24s : %2d/%2d covered: %s",
-				n.ply, orDash(n.line), len(n.covered), n.total, strings.Join(n.covered, " "))
 		}
 	}
+}
+
+// sortedKeys returns m's keys ascending (deterministic assertion order).
+func sortedKeys(m map[int]float64) []int {
+	var ks []int
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Ints(ks)
+	return ks
 }
 
 func orDash(s string) string {

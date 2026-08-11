@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/zellyn/chess6502/internal/asmbuild"
+	bookpkg "github.com/zellyn/chess6502/internal/book"
 	"github.com/zellyn/chess6502/internal/rwts"
 )
 
@@ -192,6 +193,13 @@ func TestMainMemoryLayout(t *testing.T) {
 	if RwtsOrg+rwtsblob > BookOrg {
 		t.Errorf("the staged reader blob ($%04X+%d) runs into the book's landing "+
 			"zone at $%04X", RwtsOrg, rwtsblob, BookOrg)
+	}
+	// bookpkg.NamesStageMax is this window, restated where BuildBig can enforce
+	// it at build time (the big book's eco names grow the table toward it).
+	// If the window ever moves, both sides must move together.
+	if bookpkg.NamesStageMax != RwtsOrg-NamesOrg {
+		t.Errorf("bookpkg.NamesStageMax is %d but the staging window $%04X-$%04X is %d bytes",
+			bookpkg.NamesStageMax, NamesOrg, RwtsOrg, RwtsOrg-NamesOrg)
 	}
 
 	// The BLOAD layout carries NO staged opening book any more (2026-08-08):

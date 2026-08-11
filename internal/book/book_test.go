@@ -2,6 +2,7 @@ package book
 
 import (
 	"bufio"
+	"bytes"
 	"os"
 	"path/filepath"
 	"sort"
@@ -141,9 +142,13 @@ func TestBlobSize(t *testing.T) {
 		t.Errorf("embedded entries blob %d bytes != freshly built %d; run "+
 			"`go run ./cmd/genbook`", got, want)
 	}
-	if got, want := len(DefaultNames()), bk.NamesSize(); got != want {
-		t.Errorf("embedded name table %d bytes != freshly built %d; run "+
-			"`go run ./cmd/genbook`", got, want)
+	// The embedded name table is the BIG book's (curated names first, then the
+	// eco names BuildBig appends — see EncodeNames); the curated table must be
+	// its exact PREFIX, so the small book's 80 NameIDs read the same text.
+	if got, want := DefaultNames(), bk.NamesBlob(); len(got) < len(want) ||
+		!bytes.Equal(got[:len(want)], want) {
+		t.Errorf("embedded name table does not start with the freshly built curated "+
+			"table (%d B vs %d B prefix); run `go run ./cmd/genbook`", len(got), len(want))
 	}
 }
 

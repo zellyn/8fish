@@ -159,13 +159,21 @@ BBST      = M8VARS+$BD  ; big-book load: driver status, saved across rwtszp
 RWTSHOLD  = M8VARS+$BF  ; $F7BF-$F7EA: the zp window image (RWTS_ZPN = 44 B)
 SPLST     = M8VARS+$EB  ; boot splash: driver status, saved across rwtszp
                         ;  (asm/m8.s m8splash); one byte, disk build only
+PONDEROK  = M8VARS+$EC  ; nonzero: uiread's per-key wait may run ponder BURSTS
+                        ;  between keystrokes (asm/m8.s urdkey). Set by mloop
+                        ;  only when the HUMAN is on move in a live game;
+                        ;  cleared for the game-over command prompt and by the
+                        ;  ESC screen-swap (leaving the input ends pondering
+                        ;  for the turn). Distinct from PONDERON (the player-
+                        ;  visible enable) and PONDERING (a search is live).
 UIBUF     = M8VARS+$20  ; input line (UIBUFMAX bytes)
 UITHINK   = M8VARS+$30  ; think line: depth / score / best move
 UIMSGB    = M8VARS+$50  ; message row (40 B + terminator)
 UIBOOKB   = M8VARS+$80  ; opening-name row (40 B + terminator)
                         ; UIHFULL is $F7AA, UIDHGR $F7AB; PP* run $F7AC-$F7B5;
                         ; CUR*/DHFLIP $F7B6-$F7BA; BIGBOOKOK/BB*/RWTSHOLD
-                        ; $F7BB-$F7EA; SPLST $F7EB; $F7EC-$F7FF free
+                        ; $F7BB-$F7EA; SPLST $F7EB; PONDEROK $F7EC;
+                        ; $F7ED-$F7FF free
 
 ; The game history is three PARALLEL 256-byte arrays so a ply index fits in
 ; X with no multiply: 256 plies = 128 full moves (Sargon III's own move list

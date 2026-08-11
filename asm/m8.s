@@ -620,6 +620,9 @@ m8main:
         lda #0                  ; ...but never mid-ponder at boot
         sta PONDERING
         sta PONDERKEY
+        sta PONDEROK            ; no bursts until mloop grants them (it writes
+                                ;  this before every uiread; cleared here only
+                                ;  so the byte is never power-on garbage)
         sta BIGBOOKOK           ; the big-book latch opens only on a VERIFIED
                                 ;  load (m8bigbook); until then this LC byte
                                 ;  is power-on garbage
@@ -680,14 +683,20 @@ mbreveal:
 ; designed out of existence.
 mloop:  jsr uisync
         jsr uipaint
+        lda #0                  ; default: uiread's per-key wait blocks plain
+        sta PONDEROK
         lda UIRESULT
-        bne mcmd                ; game over: commands only
+        bne mcmd                ; game over: commands only, never a ponder
         jsr uimyturn
         bcc mengine
-        jsr m8ponder            ; the human is on move: think on his clock,
-                                ;  warming the aux TT for the line a ponder hit
-                                ;  will reach. Leaves the board at root+M and
-                                ;  the interrupting key buffered for uiread.
+        inc PONDEROK            ; the human is on move: uiread ponders on his
+                                ;  clock in BURSTS between his keystrokes
+                                ;  (urdkey), warming the aux TT for the line a
+                                ;  ponder hit will reach. Each burst leaves the
+                                ;  board at root+M and the interrupting key
+                                ;  latched for entkey. m8ponder's own guards
+                                ;  (PONDERON, two-player, in-book, first move)
+                                ;  still gate every burst.
 mcmd:   jsr uiread
         jsr uidispatch
         jmp mloop
@@ -2139,11 +2148,17 @@ pkclk:  jsr ENG_checkclocks
         sta PONDERKEY           ; -> uidrive's tail discards, does not recover
 pkdone: rts
 
-; m8ponder: one pondering interval, called from mloop while the human is on
-; move. No-op when disabled or in two-player mode (no engine opponent). On
-; entry the board is root+M (the engine's move already applied), human to
-; move; on exit it is root+M again, with the aux TT warmed and the human's
-; interrupting key still buffered for uiread.
+; m8ponder: ONE pondering burst, called from uiread's per-key wait (urdkey)
+; while the human is on move — once per gap between his keystrokes, so a
+; player who navigates the cursor and then sits thinking keeps the engine
+; working the whole time, not just until his first key. No-op when disabled
+; or in two-player mode (no engine opponent). On entry the board is root+M
+; (the engine's move already applied), human to move; on exit it is root+M
+; again ON EVERY PATH — the guards touch nothing, a predictor abort unwinds
+; through search's unmake-on-abort, and the deep ponder restores from the
+; ppsave snapshot unconditionally — with the aux TT warmed and the human's
+; interrupting key still latched for entkey. That restore-on-exit invariant
+; is what makes calling it REPEATEDLY between keystrokes sound.
 m8ponder:
         lda BIGBOOKOK           ; in the big book, pondering is OFF: a ponder
         bne mprts               ;  search writes the TT, and the TT is the
@@ -2303,11 +2318,38 @@ pprsp:  lda PPPIECE,y
 ; Input
 ; ===========================================================================
 
+; urdkey: uiread's per-key wait — the ponder-in-the-gaps integration point.
+; While the human is deciding what to press, run ONE ponder burst: m8ponder
+; searches until the keystroke lands (pkclk's non-destructive poll raises
+; ABORT within a poll quantum, the unwind unmakes back to root+M, and the key
+; is left LATCHED), then fall into the ordinary blocking entkey, which reads
+; and TIMES that same key for the entropy collector. Strictly ALTERNATING
+; with the key handlers, never concurrent: the burst has finished or aborted
+; before any cursor/text redraw runs, so the search/renderer zero-page
+; sharing is never violated, and the burst itself paints nothing.
+;
+; ONE burst per wait, not a loop: if the burst runs to its walk-away backstop
+; (the human left), we block in entkey exactly as before, so the backstop
+; still bounds the free time per keystroke. When PONDEROK is off (game-over
+; command prompt, engine's turn context, ESC left the input) — or m8ponder's
+; own guards decline (PONDERON off, two-player, in-book, no engine move yet)
+; — this is precisely the old `jsr entkey` and nothing else runs.
+;
+; entkey itself is never re-entered from a burst (m8ponder reads no keys),
+; and the other blocking prompts (uiaskpromo, cllk) call entkey directly, so
+; a burst can never fire mid-dispatch after a move has been committed.
+urdkey: lda PONDEROK
+        beq :+
+        jsr m8ponder            ; ponder the gap; aborts with the key latched
+:       jmp entkey              ; blocking read + entropy fold (A = the key)
+
 ; uiread: read one line into UIBUF. EVERY key the UI reads goes through
-; entkey, so every keystroke folds its arrival time into the entropy
-; accumulator — that collector is the shipped engine's only source of
-; randomness on a machine with no clock, and a plain keyboard poll here
-; would silently destroy it.
+; entkey (via urdkey above), so every keystroke folds its arrival time into
+; the entropy accumulator — that collector is the shipped engine's only
+; source of randomness on a machine with no clock, and a plain keyboard poll
+; here would silently destroy it. (A burst that a keystroke aborts ALSO folds
+; the interruption timing — pkclk — before entkey times the key itself: the
+; double fold is intended, and the strobe is untouched in between.)
 ;
 ; ★ TWO INPUT MODES, ONE READER (docs/ui-design.md §18). Typed entry is
 ; unchanged: letters compose a line, RETURN submits it, left-arrow/DELETE
@@ -2329,7 +2371,7 @@ pprsp:  lda PPPIECE,y
 uiread: lda #0
         sta UIBLEN
 urdl:   jsr uiprompt
-        jsr entkey
+        jsr urdkey              ; ponder burst while waiting, then the key
         cmp #$0D                ; RETURN
         beq urdx
         cmp #$1B                ; ESC: cancel the cursor, or swap screens
@@ -2372,6 +2414,8 @@ urdbs:  lda UIBLEN
 urdesc: lda CURACT
         bne urdcan
         jsr uiswap              ; no cursor: ESC swaps the screens, as ever
+                                ;  (a REAL swap also ends this turn's ponder
+                                ;  bursts — see uiswap)
         jmp urdl
 urdcan: jsr curoff              ; ESC cancels the WHOLE cursor interaction —
         jmp urdl                ;  latch and all — and nothing is played
@@ -2671,6 +2715,11 @@ uicux:  rts
 uiswap:
         lda UIDHGRDEF           ; no artwork resident => there is no board to
         beq uiswx               ;  swap to (see m8main); ESC does nothing
+        lda #0                  ; LEAVING THE INPUT: a real screen swap ends
+        sta PONDEROK            ;  this turn's between-keystroke ponder bursts
+                                ;  (urdkey); mloop re-grants them next turn.
+                                ;  Past the gate above, so a no-op ESC on the
+                                ;  BLOAD build keeps pondering.
         lda UIDHGR
         eor #1
         sta UIDHGR

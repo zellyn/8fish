@@ -508,6 +508,10 @@ const (
 	PPFROM    = 0xF7AF
 	PPTO      = 0xF7B0
 	PPFLAGS   = 0xF7B1
+	// PONDEROK gates uiread's between-keystroke ponder bursts (asm/m8.s
+	// urdkey): mloop sets it only when the human is on move in a live game,
+	// and the ESC screen-swap clears it for the rest of the turn.
+	PONDEROK = 0xF7EC
 	// Arrow-key cursor entry (asm/m8.s curpop and friends).
 	CURACT  = 0xF7B6 // nonzero: the cursor is up on the board
 	CURSQ   = 0xF7B7 // the cursor's 0x88 square

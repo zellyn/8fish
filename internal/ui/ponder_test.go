@@ -70,7 +70,8 @@ func setupRootM(t *testing.T, u *ui.Machine, fen string) {
 // reply P, and the aux TT is warm for root+M+P.
 func runPonderToCap(t *testing.T, u *ui.Machine) {
 	t.Helper()
-	// A RETURN re-enters mloop, which reaches m8ponder on the human's turn.
+	// A RETURN re-enters mloop; on the human's turn uiread's per-key wait
+	// (urdkey) runs the ponder burst.
 	u.M.SendInput([]byte{0x0D})
 	if err := u.RunToInput(); err != nil { // parks at the predictor's first poll
 		t.Fatalf("reaching the ponder: %v", err)
@@ -385,7 +386,13 @@ func TestDevicePonderInterruptDiscardsAndTimesKey(t *testing.T) {
 			}
 
 			// The human plays a real move S. Its first keystroke interrupts the
-			// deep ponder search through pkclk.
+			// deep ponder search through pkclk. PONDERON goes off FIRST so the
+			// per-key wait does not start the NEXT burst after the interrupt —
+			// the running ponder is unaffected (PONDERON only gates entry), and
+			// the machine parks in entkey where the restored board is
+			// observable. (Between-burst pondering has its own gate:
+			// TestPonderBetweenKeystrokes.)
+			u.Poke(ui.PONDERON, 0)
 			s := legalMoveOtherThan(t, tc.fen, "")
 			if err := u.Key(s[0]); err != nil { // interrupts the ponder
 				t.Fatal(err)
@@ -407,8 +414,7 @@ func TestDevicePonderInterruptDiscardsAndTimesKey(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			u.Poke(ui.PONDERON, 0) // no further ponders while we finish the move
-			if err := u.Enter(""); err != nil {
+			if err := u.Enter(""); err != nil { // PONDERON already off above
 				t.Fatal(err)
 			}
 
@@ -427,6 +433,262 @@ func TestDevicePonderInterruptDiscardsAndTimesKey(t *testing.T) {
 				tc.name, s, entBefore, entAfter)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Ponder-in-the-gaps (asm/m8.s urdkey): while the human is on move, the
+// engine ponders in BURSTS between his keystrokes instead of once-then-idle.
+// Before this change the FIRST keystroke of the turn aborted the (single)
+// mloop ponder and the engine then sat idle for the whole move entry; now
+// every gap — cursor navigation, mid-line typing, plain thinking — is a live
+// ponder search, aborted sub-quantum by the next key through the existing
+// pkclk poll.
+//
+// The park-point is the sensor: with the harness input trap enabled, Run
+// breaks at the first EMPTY keyboard poll after a key is handled. If the
+// per-key wait started a burst, that poll is pkclk's — INSIDE m8ponder, with
+// PONDERING=1. If the wait just blocked (the old behaviour, or a gated
+// burst), the poll is entkey's, with PONDERING=0. So "PONDERING after Key()"
+// distinguishes pondering-between-keys from idle-between-keys directly.
+// ---------------------------------------------------------------------------
+
+// IIe key codes (asm/m8.s uiread), local to this file's gates.
+const (
+	pkeyUp   = 0x0B
+	pkeyDown = 0x0A
+	pkeyEsc  = 0x1B
+	psqE4    = 0x34 // 0x88 squares
+	psqE5    = 0x44
+)
+
+// keyParked sends one key and reports PONDERING at the resulting park.
+func keyParked(t *testing.T, u *ui.Machine, c byte, what string) byte {
+	t.Helper()
+	if err := u.Key(c); err != nil {
+		t.Fatalf("%s (key %#02x): %v", what, c, err)
+	}
+	return u.Peek(ui.PONDERING)
+}
+
+// finishBurst models the hardware keyboard for one interval, exactly like
+// runPonderToCap: the live burst runs to its walk-away backstop and the
+// machine falls into the blocking entkey wait.
+func finishBurst(t *testing.T, u *ui.Machine) {
+	t.Helper()
+	savedStat, savedIn := u.M.Mem.InStatusAddr, u.M.Mem.InAddr
+	u.M.Mem.InStatusAddr, u.M.Mem.InAddr = 0, 0
+	_, _, err := u.M.Run(80_000_000)
+	u.M.Mem.InStatusAddr, u.M.Mem.InAddr = savedStat, savedIn
+	if err != nil {
+		t.Fatalf("running the burst out: %v", err)
+	}
+	if got := u.Peek(ui.PONDERING); got != 0 {
+		t.Fatalf("burst did not finish within the backstop (PONDERING=%d)", got)
+	}
+}
+
+// TestPonderBetweenKeystrokes is the ponder-in-the-gaps gate. It drives the
+// exact scenario the change exists for — the human pops the arrow cursor and
+// navigates, with think-gaps between the keys — and asserts the engine is
+// PONDERING at every between-key park, that the bursts do real TT work, that
+// the board/cursor/entropy invariants all hold across them, that a typed
+// move still composes and commits mid-bursts, and that a real ESC screen
+// swap ends the bursts for the turn.
+//
+// Mutation sensors (each verified by reverting the corresponding change):
+//   - restoring the old `jsr entkey` wait (no urdkey) fails every
+//     PONDERING=1 assertion — that IS the old idle-between-keys behaviour;
+//   - restoring the old standalone mloop `jsr m8ponder` on top of it still
+//     fails them (the first key aborts the one ponder and the rest is idle);
+//   - dropping urdkey's PONDEROK gate fails TestPonderBurstsGated's
+//     game-over case; dropping uiswap's PONDEROK clear fails the ESC leg.
+func TestPonderBetweenKeystrokes(t *testing.T) {
+	tc := devPonderFENs[0]
+	u := boot(t)
+	enablePonder(u)
+	setupRootM(t, u, tc.fen)
+	u.Poke(ui.UIHTO, psqE4) // ply-0 destination: where the cursor pops
+	rootMFEN := u.FEN()     // the UI's own rendering (fullmove always 1)
+	entAddr := u.Defs["ENTROPY"]
+	entBefore := uint16(u.Peek(entAddr)) | uint16(u.Peek(entAddr+1))<<8
+
+	// (1) The first arrow pops the cursor AND parks inside a live burst.
+	if got := keyParked(t, u, pkeyUp, "pop the cursor"); got != 1 {
+		t.Fatalf("after the cursor-pop arrow the machine is not pondering "+
+			"(PONDERING=%d, want 1): the engine is idle between keystrokes", got)
+	}
+	if got := u.Peek(ui.CURACT); got != 1 {
+		t.Fatalf("CURACT = %d after the first arrow, want 1", got)
+	}
+	if got := u.Peek(ui.CURSQ); got != psqE4 {
+		t.Fatalf("cursor popped on $%02X, want the last destination e4 ($%02X)", got, psqE4)
+	}
+
+	// (2) The next arrow aborts that burst, moves the cursor, and a FRESH
+	// burst is live at the park — pondering between EVERY pair of keys.
+	if got := keyParked(t, u, pkeyUp, "cursor to e5"); got != 1 {
+		t.Fatalf("no fresh burst after the second arrow (PONDERING=%d, want 1)", got)
+	}
+	if got := u.Peek(ui.CURSQ); got != psqE5 {
+		t.Fatalf("CURSQ = $%02X after up, want e5 ($%02X): the key was not handled", got, psqE5)
+	}
+	entAfter := uint16(u.Peek(entAddr)) | uint16(u.Peek(entAddr+1))<<8
+	if entAfter == entBefore {
+		t.Errorf("ENTROPY did not advance across ponder-interrupted keystrokes (%#04x)", entBefore)
+	}
+
+	// (3) Let the live burst run out on the modelled hardware keyboard: it
+	// predicts P, deep-ponders root+M+P to the backstop, and restores.
+	finishBurst(t, u)
+	if got := u.FEN(); got != rootMFEN {
+		t.Fatalf("board not restored to root+M after a between-keys burst:\n got %q\nwant %q", got, rootMFEN)
+	}
+	if got := u.Peek(ui.CURACT); got != 1 {
+		t.Errorf("CURACT = %d after the burst, want 1: the cursor overlay must survive", got)
+	}
+	if got := u.Peek(ui.CURSQ); got != psqE5 {
+		t.Errorf("CURSQ = $%02X after the burst, want e5 ($%02X)", got, psqE5)
+	}
+	if got := u.Peek(ui.UITHINK); got != 0 {
+		t.Errorf("a ponder burst painted the think line (UITHINK=%#02x)", got)
+	}
+	// ...and it did real work: the aux TT holds a verified entry for the
+	// pondered position root+M+P. THIS is the compute the old code threw
+	// away while the player navigated.
+	p := chesstest.MoveUCI(u.Peek(ui.PPFROM), u.Peek(ui.PPTO), u.Peek(ui.PPFLAGS))
+	childFEN := childFENAfter(t, tc.fen, p)
+	if _, _, ok := ttWarmMove(t, &u.M.Mem.Aux, childFEN); !ok {
+		t.Errorf("no verified aux-TT entry for root+M+P (%s): the between-keys burst warmed nothing", childFEN)
+	}
+
+	// (4) Bursts continue after a backstopped one: the next key gets a new one.
+	if got := keyParked(t, u, pkeyDown, "cursor back to e4"); got != 1 {
+		t.Fatalf("no burst after a backstopped interval (PONDERING=%d, want 1)", got)
+	}
+	if got := u.Peek(ui.CURSQ); got != psqE4 {
+		t.Fatalf("CURSQ = $%02X after down, want e4 ($%02X)", got, psqE4)
+	}
+
+	// (5) ESC with the cursor up CANCELS the cursor — and pondering carries
+	// on: only a commit or a real screen swap ends it.
+	if got := keyParked(t, u, pkeyEsc, "cancel the cursor"); got != 1 {
+		t.Fatalf("ESC cursor-cancel stopped the bursts (PONDERING=%d, want 1)", got)
+	}
+	if got := u.Peek(ui.CURACT); got != 0 {
+		t.Fatalf("CURACT = %d after ESC, want 0 (cancelled)", got)
+	}
+
+	// (6) Typed entry composes mid-bursts: each character of the human's
+	// real move is handled between live bursts, and RETURN commits it
+	// through uidispatch exactly as before.
+	for _, c := range []byte("b8c6") {
+		if got := keyParked(t, u, c, "typing b8c6"); got != 1 {
+			t.Fatalf("no burst while typing %q (PONDERING=%d, want 1)", c, got)
+		}
+	}
+	u.Poke(ui.UILEVEL, 2) // fixed depth: a fast deterministic reply
+	if err := u.Key(0x0D); err != nil {
+		t.Fatalf("RETURN: %v", err)
+	}
+	if got := u.Peek(ui.UIHCNT); got != 3 {
+		t.Fatalf("UIHCNT = %d after b8c6 + reply, want 3: the move did not commit "+
+			"and play through the engine", got)
+	}
+	// The reply's turn ended in the next human interval: parked pondering.
+	if got := u.Peek(ui.PONDERING); got != 1 {
+		t.Errorf("after the engine's reply the new turn is not pondering (PONDERING=%d)", got)
+	}
+
+	// (7) A REAL ESC screen swap ends pondering for the turn. The harness
+	// image boots with UIDHGRDEF=0 (BLOAD path: ESC is a no-op and bursts
+	// must survive it); poking it on arms the swap the disk build has.
+	dhgrdef, ok := u.Lbl["UIDHGRDEF"]
+	if !ok {
+		t.Fatal("no UIDHGRDEF label in m8t.lbl")
+	}
+	if got := keyParked(t, u, pkeyEsc, "no-op ESC (BLOAD build)"); got != 1 {
+		t.Fatalf("a NO-OP ESC (no artwork) ended the bursts (PONDERING=%d, want 1)", got)
+	}
+	u.Poke(dhgrdef, 1)
+	if got := keyParked(t, u, pkeyEsc, "real ESC swap"); got != 0 {
+		t.Fatalf("a real ESC screen swap did not end the bursts (PONDERING=%d, want 0)", got)
+	}
+	if got := u.Peek(ui.PONDEROK); got != 0 {
+		t.Errorf("PONDEROK = %d after the swap, want 0", got)
+	}
+	if got := keyParked(t, u, pkeyUp, "arrow after the swap"); got != 0 {
+		t.Fatalf("bursts resumed within the turn after an ESC swap (PONDERING=%d, want 0)", got)
+	}
+	t.Log("the engine ponders in every between-keystroke gap: cursor pops/moves, " +
+		"ESC-cancel and typing all park mid-burst; the burst warms the TT and " +
+		"restores; commit and a real ESC swap end it")
+}
+
+// TestPonderBurstsGated proves the bursts stay OFF everywhere they must:
+// the game-over command prompt (the PONDEROK gate itself — m8ponder's own
+// guards would all pass there), two-player mode, in the big book, and before
+// the first engine move. Each leg ends with a control that flips the gate
+// back and sees a burst, so a vacuous sensor cannot pass.
+func TestPonderBurstsGated(t *testing.T) {
+	tc := devPonderFENs[0]
+
+	t.Run("game over", func(t *testing.T) {
+		u := boot(t)
+		enablePonder(u)
+		setupRootM(t, u, tc.fen)
+		// Resign: UIRESULT latches and the main loop re-enters uiread on the
+		// game-over path with PONDEROK off. Every m8ponder guard still
+		// passes here (PONDERON=1, UIHCNT=1, UIHUMAN=side, no big book), so
+		// only urdkey's PONDEROK gate keeps the burst from firing.
+		if err := u.Enter("r"); err != nil {
+			t.Fatalf("resign: %v", err)
+		}
+		if got := u.Peek(ui.UIRESULT); got != ui.ResResign {
+			t.Fatalf("UIRESULT = %d after resign, want %d", got, ui.ResResign)
+		}
+		if got := keyParked(t, u, pkeyUp, "arrow at the game-over prompt"); got != 0 {
+			t.Fatalf("the engine ponders at the GAME-OVER prompt (PONDERING=%d, want 0)", got)
+		}
+	})
+
+	t.Run("two player", func(t *testing.T) {
+		u := boot(t)
+		enablePonder(u)
+		setupRootM(t, u, tc.fen)
+		u.Poke(ui.UIHUMAN, 0xFF)
+		if got := keyParked(t, u, pkeyUp, "arrow in two-player mode"); got != 0 {
+			t.Fatalf("the engine ponders in TWO-PLAYER mode (PONDERING=%d, want 0)", got)
+		}
+	})
+
+	t.Run("in book", func(t *testing.T) {
+		u := boot(t)
+		enablePonder(u)
+		setupRootM(t, u, tc.fen)
+		u.Poke(ui.BIGBOOKOK, 1) // in the big book: a ponder would write the
+		if got := keyParked(t, u, pkeyUp, "arrow while in book"); got != 0 {
+			t.Fatalf("the engine ponders IN BOOK (PONDERING=%d, want 0) — "+
+				"the TT it writes IS the book", got)
+		}
+		u.Poke(ui.BIGBOOKOK, 0) // control: out of book the same key ponders
+		if got := keyParked(t, u, pkeyUp, "arrow out of book"); got != 1 {
+			t.Fatalf("control failed: out of book the arrow should ponder "+
+				"(PONDERING=%d, want 1) — the sensor is vacuous", got)
+		}
+	})
+
+	t.Run("first move", func(t *testing.T) {
+		u := boot(t) // start position, human White on move, UIHCNT=0
+		enablePonder(u)
+		if got := keyParked(t, u, pkeyUp, "arrow before any move"); got != 0 {
+			t.Fatalf("the engine ponders before its first move (PONDERING=%d, want 0)", got)
+		}
+		u.Poke(ui.UIHCNT, 1) // control: with a move on the books it ponders
+		if got := keyParked(t, u, pkeyUp, "arrow with UIHCNT=1"); got != 1 {
+			t.Fatalf("control failed: with UIHCNT=1 the arrow should ponder "+
+				"(PONDERING=%d, want 1) — the sensor is vacuous", got)
+		}
+	})
 }
 
 // childFENAfter returns the FEN after playing uciMove in fen, using the same

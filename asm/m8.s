@@ -2150,9 +2150,14 @@ PPMAXDEPTH = 20         ; deep-ponder depth cap (the clock/keypress stops it
 ; be on every arrow of a cursor walk, not once per turn (measured 0.5-1.2 s
 ; key-to-handled, internal/ui TestPonderKeyResponse). So while PONDERING,
 ; pkclk re-arms NODECNT to PKQUANT itself and calls ENG_checkclocks only
-; every 16th poll: 16*PKQUANT = 128, so the soft clock still accrues one
-; PCOST quantum per 128 nodes and the ABORTL walk-away backstop is priced
-; exactly as before. While ABORT is set the re-arm is 1, preserving
+; every 16th poll: 16*PKQUANT = 128, so the soft clock accrues one PCOST
+; quantum per 128 nodes at the SAME RATE as before. (One caveat, and it is
+; tiny: the first charge of a burst lands at node 128, where native's
+; NODECNT=0 lead-in puts it at node 256 — so a ponder estimate runs a
+; constant +1 quantum "ahead" of native for equal node counts, < 0.05% of
+; the ~8 s walk-away backstop, and it never leaks to the own-move search,
+; which re-primes CLOCK_TRAP and NODECNT from scratch.) While ABORT is set
+; the re-arm is 1, preserving
 ; checkclock's every-node unwind; a keystroke also arms 1 directly, so the
 ; abort unwinds immediately instead of coasting to the next 128-node poll.
 ; ~40 cycles per extra poll x 15 extra polls per 128 nodes = ~0.2% of ponder
@@ -2379,8 +2384,12 @@ urdkey: lda PONDEROK
 ; the entropy accumulator — that collector is the shipped engine's only
 ; source of randomness on a machine with no clock, and a plain keyboard poll
 ; here would silently destroy it. (A burst that a keystroke aborts ALSO folds
-; the interruption timing — pkclk — before entkey times the key itself: the
-; double fold is intended, and the strobe is untouched in between.)
+; the interruption timing — pkclk — before entkey times the key itself. In
+; fact pkclk re-folds once per unwind node while ABORT is set, so it is an
+; N+2 fold, not a literal double; that is harmless — entfold's Galois LFSR
+; has no fixed point under a repeated constant, unwind depth is bounded by
+; MAXPLY, and the strobe is untouched so the key still reaches entkey exactly
+; once.)
 ;
 ; ★ TWO INPUT MODES, ONE READER (docs/ui-design.md §18). Typed entry is
 ; unchanged: letters compose a line, RETURN submits it, left-arrow/DELETE

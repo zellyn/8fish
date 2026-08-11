@@ -624,6 +624,64 @@ func TestPonderBetweenKeystrokes(t *testing.T) {
 		"restores; commit and a real ESC swap end it")
 }
 
+// TestPonderKeyResponse gates the RESPONSIVENESS of pondering-between-keys:
+// a keystroke that lands while a burst is live must be read within
+// keyRespBudget cycles. The per-node cost model (asm/defs.inc SOFTA/SOFTB:
+// ~3,084+71*phase cycles per counted node) makes checkclock's native
+// 128-node poll quantum worth ~0.5 s and a fresh burst's 256-node lead-in
+// ~1 s — measured 0.53-1.16 s key-to-read before the pkclk cadence fix
+// (PKQUANT + the uidrive first-poll arming). With bursts in EVERY
+// between-keystroke gap that lag would be on every arrow of a cursor walk,
+// so it is gated, at both ends of a burst:
+//
+//	r=0     the key lands immediately after a park early in a fresh burst
+//	        (rapid navigation) — this leg fails if uidrive's first-poll
+//	        arming is dropped (the 256-node lead-in returns);
+//	r>=1M   the key lands deep in the ponder search — these legs fail if
+//	        pkclk stops re-arming NODECNT to PKQUANT (128-node cadence).
+func TestPonderKeyResponse(t *testing.T) {
+	const keyRespBudget = 200_000 // cycles ~= 0.2 s; measured ~40-120K fixed
+	tc := devPonderFENs[0]
+	for _, r := range []uint64{0, 1_000_000, 5_000_000} {
+		u := boot(t)
+		enablePonder(u)
+		setupRootM(t, u, tc.fen)
+		u.Poke(ui.UIHTO, psqE4)
+		if got := keyParked(t, u, pkeyUp, "pop the cursor"); got != 1 {
+			t.Fatalf("r=%d: not pondering after the arrow (PONDERING=%d)", r, got)
+		}
+		// Advance r cycles deeper into the burst on the modelled hardware
+		// keyboard, then land the next key and time until the image READS it
+		// (the input queue drains at entkey's data read — by then the abort
+		// has unwound and the key handler is about to run).
+		savedStat, savedIn := u.M.Mem.InStatusAddr, u.M.Mem.InAddr
+		u.M.Mem.InStatusAddr, u.M.Mem.InAddr = 0, 0
+		if _, _, err := u.M.Run(r); err != nil {
+			t.Fatal(err)
+		}
+		u.M.Mem.InStatusAddr, u.M.Mem.InAddr = savedStat, savedIn
+		live := u.Peek(ui.PONDERING)
+		u.M.SendInput([]byte{pkeyDown})
+		c0 := u.M.Cycles
+		for len(u.M.Mem.Input) > 0 {
+			if _, _, err := u.M.Run(4096); err != nil {
+				t.Fatal(err)
+			}
+			if u.M.Cycles-c0 > 5_000_000 {
+				break
+			}
+		}
+		lat := u.M.Cycles - c0
+		t.Logf("r=%8d into the burst (PONDERING=%d): key read after %6d cycles = %5.1f ms",
+			r, live, lat, float64(lat)/1020.484)
+		if lat > keyRespBudget {
+			t.Errorf("r=%d: the keystroke waited %d cycles (%.0f ms) for the ponder "+
+				"burst — over the %d-cycle response budget",
+				r, lat, float64(lat)/1020.484, keyRespBudget)
+		}
+	}
+}
+
 // TestPonderBurstsGated proves the bursts stay OFF everywhere they must:
 // the game-over command prompt (the PONDEROK gate itself — m8ponder's own
 // guards would all pass there), two-player mode, in the big book, and before

@@ -1977,6 +1977,10 @@ uidrive:
         ldy #>ENG_checkclocks
         lda PONDERING
         beq :+
+        lda #PKQUANT            ; a ponder's FIRST keyboard poll comes after
+        sta NODECNT             ;  PKQUANT nodes, not the 256-node lead-in a
+        lda #16                 ;  0 countdown means — a key landing early in
+        sta PKDIV               ;  a fresh burst must not wait ~1 s (pkclk)
         ldx #<pkclk
         ldy #>pkclk
 :       stx ENG_ccsite+1
@@ -2138,14 +2142,41 @@ PPMAXDEPTH = 20         ; deep-ponder depth cap (the clock/keypress stops it
 ; entropy.inc documents) and raises ABORT (unwind, exactly as the clock does)
 ; and PONDERKEY (tell the driver tail to discard). Clobbers A,X; preserves Y,
 ; matching the checkclocks it replaces (search relies on Y surviving ccsite).
-pkclk:  jsr ENG_checkclocks
+;
+; ★ THE POLL CADENCE IS PKQUANT NODES, NOT 128, AND THE REASON IS MEASURED.
+; A counted node costs ~3,084+71*phase cycles (the SOFTA/SOFTB game fit), so
+; checkclock's native 128-node quantum notices a keystroke only after up to
+; ~0.5 s — and with pondering in EVERY between-keystroke gap that lag would
+; be on every arrow of a cursor walk, not once per turn (measured 0.5-1.2 s
+; key-to-handled, internal/ui TestPonderKeyResponse). So while PONDERING,
+; pkclk re-arms NODECNT to PKQUANT itself and calls ENG_checkclocks only
+; every 16th poll: 16*PKQUANT = 128, so the soft clock still accrues one
+; PCOST quantum per 128 nodes and the ABORTL walk-away backstop is priced
+; exactly as before. While ABORT is set the re-arm is 1, preserving
+; checkclock's every-node unwind; a keystroke also arms 1 directly, so the
+; abort unwinds immediately instead of coasting to the next 128-node poll.
+; ~26 cycles per extra poll = ~0.1% of ponder throughput; the own-move
+; search never runs this code (ccsite -> ENG_checkclocks, cadence 128,
+; byte-identical).
+PKQUANT = 8             ; ponder keyboard-poll cadence, in nodes (~30 ms)
+pkclk:  dec PKDIV               ; charge the soft clock every 16th poll —
+        bne pknc                ;  the same 128-node quantum PCOST prices
+        lda #16
+        sta PKDIV
+        jsr ENG_checkclocks     ; accumulate + the ABORTL hard backstop
+pknc:   ldx #PKQUANT            ; re-arm the poll countdown ourselves...
+        lda ABORT
+        beq pkarm
+        ldx #1                  ; ...except mid-unwind: every node returns
+pkarm:  stx NODECNT             ;  to ccsite, exactly as checkclock arms it
         lda ENTKSTAT            ; $C000 (or the harness trap): bit 7 = key
         bpl pkdone              ;  waiting. A plain READ leaves the strobe set.
         lda CLOCK_TRAP          ; how far the estimate got before the key — as
         jsr entfold             ;  unpredictable as the keypress; adds mixing
         lda #1
-        sta ABORT               ; -> the existing 128-node unwind path
+        sta ABORT               ; -> the unwind, exactly as the clock does
         sta PONDERKEY           ; -> uidrive's tail discards, does not recover
+        sta NODECNT             ; unwind NOW: next node polls, sees ABORT
 pkdone: rts
 
 ; m8ponder: ONE pondering burst, called from uiread's per-key wait (urdkey)

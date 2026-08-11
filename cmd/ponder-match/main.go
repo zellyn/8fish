@@ -17,10 +17,13 @@
 //
 // THE PER-MOVE LOOP (P = the pondering machine, N = the non-pondering one):
 //
-//  1. P plays its move M (a normal typed-RETURN engine turn). Its main loop
-//     then falls into m8ponder — predicts N's reply, makes it, and parks at
-//     the first pkclk keyboard poll (the harness breaks Run on a status read
-//     with no key pending).
+//  1. P plays its move M (a normal typed-RETURN engine turn). Its input
+//     loop's per-key wait (asm/m8.s urdkey) then opens a ponder burst —
+//     m8ponder predicts N's reply, makes it, and parks at the first pkclk
+//     keyboard poll (the harness breaks Run on a status read with no key
+//     pending). On the device the wait re-opens a fresh burst after EVERY
+//     keystroke of N's move as it is typed in; each of those micro-bursts
+//     aborts on the next key and is booked as ponder overhead below.
 //  2. M is typed into N; N's engine computes its reply S, spending T_N
 //     emulated cycles under its own level budget.
 //  3. P is granted a PONDER WINDOW of exactly T_N cycles: its emulator is run
@@ -527,10 +530,11 @@ func (s *side) engineTurn(inject string, rnd *rand.Rand) (reply string, think ui
 	return reply, think, depth, hitClass, nil
 }
 
-// kickPonder re-enters the main loop with an empty line so m8ponder starts —
-// needed once at game start when the pondering side moves second (mid-game the
-// ponder starts by itself on the tail of the side's own engine turn). The
-// cycles it takes to park inside the ponder are ponder spend, booked as such.
+// kickPonder re-enters the main loop with an empty line so the input loop's
+// first ponder burst (urdkey -> m8ponder) starts — needed once at game start
+// when the pondering side moves second (mid-game the ponder starts by itself
+// on the tail of the side's own engine turn). The cycles it takes to park
+// inside the ponder are ponder spend, booked as such.
 func (s *side) kickPonder() error {
 	s.u.Poke(ui.PPFROM, ppSentinel)
 	c0 := s.u.M.Cycles

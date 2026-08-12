@@ -302,4 +302,37 @@ func TestDiskLoadDegrades(t *testing.T) {
 		t.Fatalf("UIHCNT = %d after a refused load, want 1 (game intact)", got)
 	}
 	t.Logf("corrupt record: %q, game intact", strings.TrimSpace(m2.Screen().Text(17)))
+
+	// ---- a WELL-FORMED record with an ILLEGAL move: the replay guard --------
+	// The checksum passes, so only the per-ply uifind/uitrylegal validation
+	// stands between a hand-crafted record and a corrupted board. e2-e5 is no
+	// pawn move; the load must refuse it and leave a CLEAN NEW GAME, never a
+	// half-replayed position.
+	forged := saveload.Encode([]saveload.Ply{{From: 0x14, To: 0x44}}, 0xFF, 4, 0, 0)
+	evil := append([]byte(nil), raw...)
+	for i, off := range delivery.SaveFileOffsets() {
+		copy(evil[off:off+delivery.SectorBytes], forged[i*delivery.SectorBytes:(i+1)*delivery.SectorBytes])
+	}
+	dskEvil := filepath.Join(t.TempDir(), "8fish-forged-save.dsk")
+	if err := os.WriteFile(dskEvil, evil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m3, _ := slMachine(t, dskEvil)
+	if err := m3.Enter("o", slKeyBudget); err != nil {
+		t.Fatalf("o on the forged disk: %v\n%v", err, m3.Screen())
+	}
+	if msg := m3.Screen().Text(17); !strings.Contains(msg, "UNREADABLE") {
+		t.Fatalf("forged record: message %q, want SAVED GAME UNREADABLE\n%v",
+			strings.TrimSpace(msg), m3.Screen())
+	}
+	if got := m3.Mem.Main[ui.UIHCNT]; got != 0 {
+		t.Fatalf("UIHCNT = %d after a refused forged load, want 0 (a clean new game)", got)
+	}
+	if err := m3.Enter("e2e4", slKeyBudget); err != nil {
+		t.Fatalf("e2e4 after the refused forged load: %v", err)
+	}
+	if got := m3.Mem.Main[ui.UIHCNT]; got != 1 {
+		t.Fatalf("UIHCNT = %d after e2e4, want 1 (the machine must still referee)", got)
+	}
+	t.Logf("forged record (valid checksum, illegal ply): refused, clean new game")
 }

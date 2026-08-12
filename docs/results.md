@@ -3,6 +3,49 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-12 — ★ SAVE / LOAD GAMES ship (ProRWTS2 Feature 2: transient write driver); engine + resident driver byte-identical
+
+The first feature that WRITES to disk. **W** saves the game, **O** loads it (one
+slot). The resident read-only driver loads a transient write-capable ProRWTS2
+build (**1,024 B**, `enable_write=1`) into dead MOVESTACK scratch (`$0E00`) on
+demand, which writes the record in place to a dedicated 2-block save file; then
+a resident read-back VERIFY confirms it. Nothing write-capable is ever resident.
+LOAD reads the record and replays the moves through the typed-move referee.
+
+- **Feasibility re-validated** first (design predated allow_aux): key catch —
+  our ProRWTS2 config aliases `encbuf = dirbuf`, so a multi-block write would
+  destroy the block list; the write build patches `encbuf` to its own page
+  (`$1400`, dirbuf `$1200`). Write build 1,024 B (design est. 1,114). UICODE was
+  15 B from full, so the save/load logic is a THIRD transient payload (`$1A00`),
+  funded by moving boot-only routines into the SPLASH boot-transient segment.
+- **Save record**: magic `8F` + version + plyCount/human/level/result + a
+  checksum16, page-aligned from/to/flags for UIHCNT plies (tail zeroed);
+  on-device bytes are byte-identical to `internal/saveload.Encode`.
+- **The critical safety gate (`TestDiskSaveLoadRoundTrip`)**: a save changes
+  exactly **4 sectors, all inside the save file's 4** — the SD boot region, the
+  big book, and the resident driver blob on disk are byte-UNCHANGED. Non-vacuous
+  (fatals on 0 changes, errors on any foreign change). Round-trips through the
+  real Disk II write path, including LOAD after a **cold reboot from the written
+  medium**. Failure paths (`TestDiskLoadDegrades`): empty / checksum-corrupt /
+  forged-valid-checksum-with-illegal-ply all refused with named messages, game
+  intact; a failed SAVE leaves the in-memory game untouched (read-back verify).
+- **Untouched (md5)**: `engine.bin` `c7998397…`, resident `rwtsblob.bin`
+  `7835a1a6…`, `bigbook.bin` `82a29dc7…`. New transient write blob
+  `rwtswblob.bin` (separate). 5 mutations caught by name (encbuf re-alias, write
+  aimed at BOOK0 → STRAY WRITE flagged, dropped record field, skipped checksum,
+  skipped replay validation). `make dsk` 381/560 sectors.
+- **Adversarial review**: no stray-write path — the write is bounded four
+  independent ways (fixed size = exact file size; block numbers sourced only
+  from the save file's own index block; the encbuf de-alias patch verified
+  shipped by regenerating both blobs; on-disk block list consistent). Mid-game
+  main `$0200-$03FF` clobber enumerated as tolerable scratch only.
+- **Real-hardware caveat** (inherent to ANY ProRWTS2 write, flagged in the
+  design): an in-place sector write can in principle nick a neighbouring
+  sector's address field if drive timing drifts — the SAVE blocks' neighbours
+  are other region blocks, never the SD boot area, and the read-back verify
+  catches a failed write. Recommended validation: run a save on real hardware
+  with a sacrificial disk and diff the image. Not a code defect.
+
 ## 2026-08-11 — Ponder IN THE GAPS between keystrokes (no more idle while the human doodles/thinks); engine byte-identical
 
 The owner noticed a real waste: while it's the human's turn the engine ponders

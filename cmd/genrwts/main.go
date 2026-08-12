@@ -28,12 +28,31 @@
 //     table that init builds at run time (we never run init: it needs a
 //     live ProDOS), and BAKES the book region's directory block number
 //     (rwts.DirBlock) into the `unrblocklo/hi` operands.
-//  4. emits the three generated artifacts, all committed:
+//  4. emits the generated artifacts, all committed:
 //     internal/rwts/rwtsblob.bin — the blob stage 2 delivers
 //     internal/rwts/gen.go       — addresses/sizes for the Go gates
 //     asm/rwts.inc               — the same numbers for asm/m8.s, plus the
 //     slot-poke site table as .lobytes/.hibytes
 //     macros (see m8rwtsinit)
+//
+// It ALSO builds the TRANSIENT WRITE-CAPABLE driver (docs/prorwts2-design.md
+// Feature 2, docs/saveload-feasibility.md): the same source with
+// enable_write=1, allow_aux=0, load_banked=0, relocated to main $0E00 — the
+// on-demand payload the save command loads from the RWTSW disk file, runs
+// once to overwrite the SAVE file's blocks in place, and discards. Its
+// artifacts: internal/rwts/rwtswblob.bin and asm/rwtsw.inc. Two write-build
+// specifics beyond the read build's treatment:
+//
+//   - encbuf is patched APART from dirbuf. Upstream's fast_subindex=0 floppy
+//     branch aliases encbuf = dirbuf ("writes come from cache"), which for a
+//     multi-block write from a user buffer means the first sector's nibble
+//     staging (encsec's `sta encbuf,y`) overwrites the sapling block list's
+//     LO bytes in dirbuf — block 2+ of the file would be written to a
+//     garbage block number. See the feasibility doc §2.
+//   - the slot pokes come in TWO shapes: the ten $C08x soft-switch operands
+//     (OR the slot into the low byte, as the resident build) and the four
+//     unrslot1-4 sites, whose operand IS the raw slot<<4 immediate
+//     (`ldx #$d1` placeholders inside the timed write loops).
 //
 // Run: go run ./cmd/genrwts   (from the repo root)
 package main
@@ -82,6 +101,19 @@ const (
 	// window rwtszp swaps). allow_aux=1 defines it; set it to 1 in the driver
 	// zp before a call to read straight into aux memory.
 	auxReq = 0x51
+
+	// The TRANSIENT WRITE build's homes (docs/saveload-feasibility.md §4/§6):
+	// dead engine scratch (MOVESTACK, rebuilt by every search), used only
+	// while a save is in flight. wDirBuf is where the assembler naturally
+	// places dirbuf for this build ((dataend+$ff)&-256) — asserted, not
+	// assumed; wEncBuf is the patched separate page (see the package doc).
+	wReloc  = 0x0E00
+	wDirBuf = 0x1200
+	wEncBuf = 0x1400
+	// wReqCmd is the driver's command byte ($54, in the swapped window),
+	// defined only when enable_write=1. cmdwrite = 2.
+	wReqCmd   = 0x54
+	wCmdWrite = 2
 )
 
 // config is the 8fish option set for the RESIDENT READ-ONLY build
@@ -110,6 +142,29 @@ var config = map[string]int{
 	"allow_aux":     1,
 }
 
+// wConfig is the TRANSIENT WRITE-CAPABLE build: the read build's error
+// reporting and sapling support, plus enable_write/detect_wp, minus the aux
+// path (the save record is staged in and written from MAIN) and minus the
+// banked load (it runs from main $0E00). MEASURED (feasibility doc §4):
+// code 692 B + data 256 B = a 1,024 B blob, no timed-loop page-crossing pad
+// needed at this config/reloc.
+var wConfig = map[string]int{
+	"verbose_info":  1,
+	"enable_floppy": 1,
+	"use_smartport": 0,
+	"override_adr":  1,
+	"aligned_read":  1,
+	"enable_write":  1,
+	"check_chksum":  1,
+	"might_exist":   1,
+	"poll_drive":    1,
+	"detect_wp":     1,
+	"allow_saplings": 1,
+	"load_banked":   0,
+	"lc_bank":       1,
+	"allow_aux":     0,
+}
+
 // slotSiteNames are the self-modifying soft-switch operands inside the
 // relocated FLOPPY driver whose low byte must gain the boot slot (slot<<4,
 // the boot ROM's $2B). ProRWTS2's init pokes these; our m8rwtsinit pokes the
@@ -128,6 +183,17 @@ var slotSiteNames = []string{
 	"unrread6",   // ldx Q6L         (data checksum)
 }
 
+// wImmSiteNames are the WRITE build's additional slot sites: `ldx #$d1`
+// immediates inside the timed write loops whose operand must BECOME the raw
+// slot<<4 (ProRWTS2's init stores `DEVNUM and #$70` there). Distinct poke
+// rule from slotSiteNames (store, not OR-into-a-$C08x-low-byte).
+var wImmSiteNames = []string{
+	"unrslot1", // ldx #slot16 (prime drive / write prologue)
+	"unrslot2", // ldx #slot16 (bit2tbl nibble loop)
+	"unrslot3", // ldx #slot16 (encbuf nibble loop)
+	"unrslot4", // ldx #slot16 (writenib2)
+}
+
 func main() {
 	src, err := os.ReadFile(srcPath)
 	check(err)
@@ -138,68 +204,51 @@ func main() {
 			srcPath, hex.EncodeToString(got[:]), srcSHA256, upstreamCommit)
 	}
 
-	patched := configure(string(src))
+	acme := findACME()
+	buildRead(string(src), acme)
+	buildWrite(string(src), acme)
+}
 
+// assemble runs ACME over the patched source in a temp dir and returns the
+// symbol table and the raw object image (a plain image of $0800..: the init
+// code, then the unrelocated driver images).
+func assemble(patched, acme string) (map[string]int, []byte) {
 	tmp, err := os.MkdirTemp("", "genrwts")
 	check(err)
 	defer os.RemoveAll(tmp)
 	asmPath := filepath.Join(tmp, "prorwts2-8fish.s")
 	check(os.WriteFile(asmPath, []byte(patched), 0o644))
 
-	acme := findACME()
 	cmd := exec.Command(acme, "-l", "sym.txt", "prorwts2-8fish.s")
 	cmd.Dir = tmp
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		fatal("genrwts: %s failed: %v\n%s", acme, err, out)
 	}
-
 	syms := parseSyms(filepath.Join(tmp, "sym.txt"))
-	need := func(n string) int {
+	obj, err := os.ReadFile(filepath.Join(tmp, "prorwts2#060800"))
+	check(err)
+	return syms, obj
+}
+
+// needer returns a symbol lookup that fails loudly for the named build.
+func needer(syms map[string]int, build string) func(string) int {
+	return func(n string) int {
 		v, ok := syms[n]
 		if !ok {
-			fatal("genrwts: symbol %q missing from the ACME symbol list", n)
+			fatal("genrwts: symbol %q missing from the ACME symbol list (%s build)", n, build)
 		}
 		return v
 	}
+}
 
-	unreloc := need("unrelocdsk") // file-space base of the floppy driver image
-	codeEnd := need("codeend")    // reloc-space, exclusive
-	nibtbl := need("nibtbl")
-	dataEnd := need("dataend")
-	trackd1 := need("trackd1")
-	entry := need("opendir")
-	if entry != reloc {
-		fatal("genrwts: opendir = $%04X, want the blob entry at $%04X (did rdwrpart grow a jmp?)", entry, reloc)
-	}
-	if got := need("dirbuf"); got != dirbufAddr {
-		fatal("genrwts: dirbuf = $%04X, want $%04X (the dirbuf patch did not take)", got, dirbufAddr)
-	}
-	if got := need("auxreq"); got != auxReq {
-		fatal("genrwts: auxreq = $%04X, want $%04X (allow_aux must define it in the driver zp window)", got, auxReq)
-	}
-	if dataEnd > 0xDFC0 {
-		fatal("genrwts: driver data ends at $%04X, past the $DFC0 budget in LC bank 1", dataEnd)
-	}
-
-	// The assembled output file is a plain image of $0800..: the init code,
-	// then the unrelocated driver images. The floppy driver's bytes are at
-	// file offset (unrelocdsk - $0800), codeend-reloc long.
-	obj, err := os.ReadFile(filepath.Join(tmp, "prorwts2#060800"))
-	check(err)
-	codeLen := codeEnd - reloc
-	off := unreloc - 0x800
-	if off < 0 || off+codeLen > len(obj) {
-		fatal("genrwts: driver image [$%X..+%d] outside the %d-byte ACME output", off, codeLen, len(obj))
-	}
-
-	blob := make([]byte, dataEnd-reloc)
-	copy(blob, obj[off:off+codeLen])
-
-	// Prebuild the 6-and-2 denibble table exactly as init's loop would:
-	//   ldx #$16 / -- stx zp / txa / asl / bit zp / beq + / ora zp /
-	//   eor #$ff / and #$7e / - bcs + / lsr / bne - / tya /
-	//   sta nibtbl-$16,x / iny / + inx / bpl --
+// prebuildNibTables fills nibtbl (and, if xlattbl >= 0, xlattbl) in the blob
+// exactly as ProRWTS2's init loop would:
+//
+//	ldx #$16 / -- stx zp / txa / asl / bit zp / beq + / ora zp /
+//	eor #$ff / and #$7e / - bcs + / lsr / bne - / tya /
+//	sta nibtbl-$16,x / [txa / ora #$80 / sta xlattbl,y] / iny / + inx / bpl --
+func prebuildNibTables(blob []byte, base, nibtbl, xlattbl int) {
 	y := 0
 	for x := 0x16; x <= 0x7F; x++ {
 		a := byte(x << 1)
@@ -223,17 +272,22 @@ func main() {
 			}
 		}
 		if valid {
-			blob[nibtbl-reloc+(x-0x16)] = byte(y)
+			blob[nibtbl-base+(x-0x16)] = byte(y)
+			if xlattbl >= 0 {
+				blob[xlattbl-base+y] = byte(x) | 0x80
+			}
 			y++
 		}
 	}
 	if y != 64 {
 		fatal("genrwts: denibble table has %d valid nibbles, want 64", y)
 	}
+}
 
-	// Bake the book region's directory key block into the driver: init would
-	// have poked unrblocklo/hi from a ProDOS prefix walk; our disk layout is
-	// fixed at build time, so the operands are data.
+// bakeDirBlock pokes the book region's directory key block into the driver:
+// init would have poked unrblocklo/hi from a ProDOS prefix walk; our disk
+// layout is fixed at build time, so the operands are data.
+func bakeDirBlock(blob []byte, need func(string) int, unreloc int) {
 	for _, b := range []struct {
 		sym string
 		val byte
@@ -244,20 +298,67 @@ func main() {
 		site := need(b.sym) - unreloc // blob offset of the instruction
 		blob[site+1] = b.val
 	}
+}
 
-	// The slot-poke sites, as reloc-space OPERAND addresses (site+1).
+// operandSites resolves names to reloc-space OPERAND addresses (site+1),
+// sorted, and verifies each assembled operand byte against ok.
+func operandSites(blob []byte, need func(string) int, names []string, unreloc, base int,
+	ok func(byte) bool, what string) []int {
 	var sites []int
-	for _, n := range slotSiteNames {
-		sites = append(sites, need(n)-unreloc+reloc+1)
+	for _, n := range names {
+		sites = append(sites, need(n)-unreloc+base+1)
 	}
 	sort.Ints(sites)
 	for _, s := range sites {
-		lo := blob[s-reloc]
-		if lo != 0x80 && lo != 0x88 && lo != 0x89 && lo != 0x8C {
-			fatal("genrwts: slot site $%04X operand is $%02X, not a slot-0 Disk II "+
-				"soft switch low byte — the site list is stale", s, lo)
+		if b := blob[s-base]; !ok(b) {
+			fatal("genrwts: %s site $%04X operand is $%02X — the site list is stale", what, s, b)
 		}
 	}
+	return sites
+}
+
+// buildRead assembles the RESIDENT READ-ONLY build and writes its blob and
+// both generated includes. Its outputs are byte-for-byte the ones the
+// shipping disk carries; nothing in the write build may change them.
+func buildRead(src, acme string) {
+	syms, obj := assemble(configure(src), acme)
+	need := needer(syms, "read")
+
+	unreloc := need("unrelocdsk") // file-space base of the floppy driver image
+	codeEnd := need("codeend")    // reloc-space, exclusive
+	nibtbl := need("nibtbl")
+	dataEnd := need("dataend")
+	trackd1 := need("trackd1")
+	entry := need("opendir")
+	if entry != reloc {
+		fatal("genrwts: opendir = $%04X, want the blob entry at $%04X (did rdwrpart grow a jmp?)", entry, reloc)
+	}
+	if got := need("dirbuf"); got != dirbufAddr {
+		fatal("genrwts: dirbuf = $%04X, want $%04X (the dirbuf patch did not take)", got, dirbufAddr)
+	}
+	if got := need("auxreq"); got != auxReq {
+		fatal("genrwts: auxreq = $%04X, want $%04X (allow_aux must define it in the driver zp window)", got, auxReq)
+	}
+	if dataEnd > 0xDFC0 {
+		fatal("genrwts: driver data ends at $%04X, past the $DFC0 budget in LC bank 1", dataEnd)
+	}
+
+	// The floppy driver's bytes are at file offset (unrelocdsk - $0800),
+	// codeend-reloc long.
+	codeLen := codeEnd - reloc
+	off := unreloc - 0x800
+	if off < 0 || off+codeLen > len(obj) {
+		fatal("genrwts: driver image [$%X..+%d] outside the %d-byte ACME output", off, codeLen, len(obj))
+	}
+
+	blob := make([]byte, dataEnd-reloc)
+	copy(blob, obj[off:off+codeLen])
+	prebuildNibTables(blob, reloc, nibtbl, -1)
+	bakeDirBlock(blob, need, unreloc)
+
+	sites := operandSites(blob, need, slotSiteNames, unreloc, reloc,
+		func(lo byte) bool { return lo == 0x80 || lo == 0x88 || lo == 0x89 || lo == 0x8C },
+		"slot (soft-switch low byte)")
 	// APPEND the site table to the blob itself (lo bytes, then hi bytes):
 	// m8rwtsinit reads it out of Language Card bank 1 — the resting bank —
 	// so the table costs the tight UICODE budget nothing.
@@ -279,6 +380,90 @@ func main() {
 		reloc, codeEnd-1, codeLen, dataEnd-1, len(blob))
 	fmt.Printf("  entry $%04X, trackd1 operand $%04X, dir key block %d, %d slot-poke sites\n",
 		reloc, trackd1, rwts.DirBlock, len(sites))
+}
+
+// buildWrite assembles the TRANSIENT WRITE-CAPABLE build and writes
+// internal/rwts/rwtswblob.bin + asm/rwtsw.inc. The blob is the full
+// reloc..dataend image (code, the gap, bit2tbl scratch, prebuilt
+// nibtbl+xlattbl) — exactly dataend-reloc bytes, a whole number of blocks by
+// construction is NOT assumed: the disk file pads it. The two slot-site
+// tables are tucked into the code/data GAP (codeend..bit2tbl), so they ride
+// inside the same 1,024 bytes instead of growing the file.
+func buildWrite(src, acme string) {
+	syms, obj := assemble(configureWrite(src), acme)
+	need := needer(syms, "write")
+
+	unreloc := need("unrelocdsk")
+	codeEnd := need("codeend")
+	bit2tbl := need("bit2tbl")
+	nibtbl := need("nibtbl")
+	xlattbl := need("xlattbl")
+	dataEnd := need("dataend")
+	trackd1 := need("trackd1")
+	if entry := need("opendir"); entry != wReloc {
+		fatal("genrwts: write build opendir = $%04X, want $%04X", entry, wReloc)
+	}
+	if got := need("dirbuf"); got != wDirBuf {
+		fatal("genrwts: write build dirbuf = $%04X, want $%04X (the code grew across a page "+
+			"boundary; re-measure the transient window in docs/saveload-feasibility.md §6)", got, wDirBuf)
+	}
+	if got := need("encbuf"); got != wEncBuf {
+		fatal("genrwts: write build encbuf = $%04X, want $%04X (the anti-aliasing patch did "+
+			"not take — encbuf sharing dirbuf corrupts multi-block writes)", got, wEncBuf)
+	}
+	if got := need("reqcmd"); got != wReqCmd {
+		fatal("genrwts: write build reqcmd = $%04X, want $%04X", got, wReqCmd)
+	}
+	if _, aux := syms["auxreq"]; aux {
+		fatal("genrwts: write build defines auxreq — allow_aux crept in; the transient driver " +
+			"must be main-only")
+	}
+
+	codeLen := codeEnd - wReloc
+	off := unreloc - 0x800
+	if off < 0 || off+codeLen > len(obj) {
+		fatal("genrwts: write driver image [$%X..+%d] outside the %d-byte ACME output", off, codeLen, len(obj))
+	}
+	blob := make([]byte, dataEnd-wReloc)
+	copy(blob, obj[off:off+codeLen])
+	prebuildNibTables(blob, wReloc, nibtbl, xlattbl)
+	bakeDirBlock(blob, need, unreloc)
+
+	swSites := operandSites(blob, need, slotSiteNames, unreloc, wReloc,
+		func(lo byte) bool { return lo == 0x80 || lo == 0x88 || lo == 0x89 || lo == 0x8C },
+		"write-build slot (soft-switch low byte)")
+	immSites := operandSites(blob, need, wImmSiteNames, unreloc, wReloc,
+		func(b byte) bool { return b == 0xD1 }, // upstream's `ldx #$d1` placeholder
+		"write-build slot (raw slot<<4 immediate)")
+
+	// The site tables live in the gap between codeend and bit2tbl.
+	tblLen := 2*len(swSites) + 2*len(immSites)
+	if codeLen+tblLen > bit2tbl-wReloc {
+		fatal("genrwts: write build gap $%04X-$%04X cannot hold the %d-byte site tables",
+			codeEnd, bit2tbl-1, tblLen)
+	}
+	slotLo := codeEnd
+	slotHi := slotLo + len(swSites)
+	immLo := slotHi + len(swSites)
+	immHi := immLo + len(immSites)
+	for i, s := range swSites {
+		blob[slotLo-wReloc+i] = byte(s)
+		blob[slotHi-wReloc+i] = byte(s >> 8)
+	}
+	for i, s := range immSites {
+		blob[immLo-wReloc+i] = byte(s)
+		blob[immHi-wReloc+i] = byte(s >> 8)
+	}
+
+	check(os.WriteFile("internal/rwts/rwtswblob.bin", blob, 0o644))
+	check(os.WriteFile("asm/rwtsw.inc", []byte(genWInc(codeLen, len(blob), trackd1,
+		slotLo, slotHi, len(swSites), immLo, immHi, len(immSites))), 0o644))
+
+	fmt.Printf("genrwts: ProRWTS2 TRANSIENT WRITE driver\n")
+	fmt.Printf("  code $%04X-$%04X (%d B), data to $%04X; blob %d B -> internal/rwts/rwtswblob.bin\n",
+		wReloc, codeEnd-1, codeLen, dataEnd-1, len(blob))
+	fmt.Printf("  entry $%04X, trackd1 $%04X, dirbuf $%04X, encbuf $%04X, %d+%d slot sites\n",
+		wReloc, trackd1, wDirBuf, wEncBuf, len(swSites), len(immSites))
 }
 
 // configure applies the option block edits and the dirbuf relocation patch.
@@ -313,6 +498,31 @@ func configure(src string) string {
         !if ((aligned_read xor 1) + enable_write) > 0 {
           encbuf = dirbuf + $200
         } ;aligned_read = 0 or enable_write = 1`, dirbufAddr))
+	return src
+}
+
+// configureWrite applies the write build's option set and its two structural
+// patches: reloc (the load_banked=0 branch's $bc00 default) and the encbuf
+// anti-aliasing fix (see the package doc). dirbuf is NOT patched — the
+// assembler's natural placement ((dataend+$ff)&-256 = $1200) is asserted in
+// buildWrite instead.
+func configureWrite(src string) string {
+	for k, v := range wConfig {
+		pat := regexp.MustCompile(`(?m)^(\s*` + k + `\s*=\s*)\d+`)
+		n := len(pat.FindAllString(src, -1))
+		if n != 1 {
+			fatal("genrwts: option %q matched %d times in %s, want 1", k, n, srcPath)
+		}
+		src = pat.ReplaceAllString(src, "${1}"+strconv.Itoa(v))
+	}
+	// reloc for the load_banked=0, load_high=0 branch.
+	src = replaceOnce(src, "reloc     = $bc00", fmt.Sprintf("reloc     = $%04x", wReloc))
+	// encbuf: its own page. Upstream's fast_subindex=0 alias (encbuf=dirbuf)
+	// makes the first written sector's nibble staging destroy the block
+	// list's lo bytes — fatal for any multi-block write from a user buffer.
+	src = replaceOnce(src,
+		"        encbuf = dirbuf ;writes come from cache",
+		"        encbuf = dirbuf + $200 ;8fish: NOT aliased -- see cmd/genrwts")
 	return src
 }
 
@@ -409,6 +619,36 @@ func genInc(codeLen, blobLen, trackd1, slotLo, slotHi int, sites []int) string {
 	b.WriteString("RWTS_SIZELO   = $52     ; 16-bit read size (block multiple)\n")
 	b.WriteString("RWTS_LDRLO    = $55     ; 16-bit load address\n")
 	b.WriteString("RWTS_NAMLO    = $57     ; 16-bit pointer to length-prefixed name\n")
+	return b.String()
+}
+
+// genWInc emits asm/rwtsw.inc: the TRANSIENT WRITE driver's layout facts for
+// asm/saveload.s (the on-demand save/load orchestrator).
+func genWInc(codeLen, blobLen, trackd1, slotLo, slotHi, nSlot, immLo, immHi, nImm int) string {
+	var b strings.Builder
+	b.WriteString("; Generated by cmd/genrwts. DO NOT EDIT.\n")
+	b.WriteString("; The TRANSIENT ProRWTS2 write-capable floppy driver (docs/prorwts2-design.md\n")
+	b.WriteString("; Feature 2, docs/saveload-feasibility.md): loaded ON DEMAND from the RWTSW\n")
+	b.WriteString("; disk file into dead engine scratch at main $0E00 by the save command,\n")
+	b.WriteString("; materialized (slot pokes + trackd1 seed), run once to overwrite the SAVE\n")
+	b.WriteString("; file's blocks in place, and discarded. Nothing write-capable is resident.\n\n")
+	fmt.Fprintf(&b, "RWTSW_ENTRY   = $%04X   ; opendir: open the named file, then read/write per REQCMD\n", wReloc)
+	fmt.Fprintf(&b, "RWTSW_SIZE    = %d   ; blob bytes ($%04X-$%04X), incl. prebuilt tables + site lists\n", blobLen, wReloc, wReloc+blobLen-1)
+	fmt.Fprintf(&b, "RWTSW_CODE    = %d    ; of which code\n", codeLen)
+	fmt.Fprintf(&b, "RWTSW_TRACKD1 = $%04X   ; current-track operand (seed from the RESIDENT driver's)\n", trackd1)
+	fmt.Fprintf(&b, "RWTSW_DIRBUF  = $%04X   ; 512-byte directory/index scratch, MAIN\n", wDirBuf)
+	fmt.Fprintf(&b, "RWTSW_ENCBUF  = $%04X   ; 512-byte write nibblize scratch, MAIN (NOT dirbuf)\n", wEncBuf)
+	fmt.Fprintf(&b, "RWTSW_NSLOT   = %d     ; soft-switch operand addresses (ORA the slot into the lo byte):\n", nSlot)
+	fmt.Fprintf(&b, "RWTSW_SLOTLO  = $%04X   ; their lo bytes...\n", slotLo)
+	fmt.Fprintf(&b, "RWTSW_SLOTHI  = $%04X   ; ...and hi bytes\n", slotHi)
+	fmt.Fprintf(&b, "RWTSW_NIMM    = %d      ; raw slot<<4 IMMEDIATE operands (STORE the slot):\n", nImm)
+	fmt.Fprintf(&b, "RWTSW_IMMLO   = $%04X   ; their lo bytes...\n", immLo)
+	fmt.Fprintf(&b, "RWTSW_IMMHI   = $%04X   ; ...and hi bytes\n", immHi)
+	b.WriteString("; zero-page API: same $3C-$67 window as the resident driver (rwtszp serves\n")
+	b.WriteString("; both), same STATUS/SIZELO/LDRLO/NAMLO bytes, PLUS the command byte —\n")
+	b.WriteString("; there is NO auxreq in this build ($51 is unused; the write is main-only).\n")
+	fmt.Fprintf(&b, "RWTSW_REQCMD  = $%02X     ; 1 = read, 2 = write (set before every call)\n", wReqCmd)
+	fmt.Fprintf(&b, "RWTSW_CMDWRITE = %d      ; the write command\n", wCmdWrite)
 	return b.String()
 }
 

@@ -41,3 +41,32 @@ const DirBlock = 208
 //
 //go:embed rwtsblob.bin
 var Blob []byte
+
+// WBlob is the TRANSIENT WRITE-CAPABLE driver image (docs/prorwts2-design.md
+// Feature 2, docs/saveload-feasibility.md): the same ProRWTS2 source built
+// with enable_write=1, allow_aux=0, relocated to WEntryAddr. It ships as the
+// RWTSW file in the ProDOS-shaped region; the save command loads it into
+// dead engine scratch with the RESIDENT reader, materializes it (slot pokes
+// + trackd1 seed, from the site tables cmd/genrwts tucked into its code/data
+// gap), runs it once to overwrite the SAVE file's blocks IN PLACE, and
+// forgets it. Nothing write-capable is ever resident.
+//
+//go:embed rwtswblob.bin
+var WBlob []byte
+
+// The write build's layout facts, mirrored from cmd/genrwts (which asserts
+// every one of them against the ACME symbol list on each regeneration).
+const (
+	// WEntryAddr is the transient driver's entry (and load address), in the
+	// dead MOVESTACK window (asm/defs.inc: garbage until the first search).
+	WEntryAddr = 0x0E00
+	// WDirBuf/WEncBuf are its 512-byte op-time buffers, directly above the
+	// blob. Encbuf is deliberately NOT upstream's dirbuf alias — the alias
+	// corrupts multi-block writes from a user buffer (cmd/genrwts pkg doc).
+	WDirBuf = 0x1200
+	WEncBuf = 0x1400
+	// ZPReqCmd is the driver's command byte (enable_write builds only),
+	// inside the same $3C-$67 window rwtszp swaps. CmdWrite writes.
+	ZPReqCmd = 0x54
+	CmdWrite = 2
+)

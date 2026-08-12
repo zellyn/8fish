@@ -76,6 +76,13 @@ func TestDiskLayout(t *testing.T) {
 		t.Errorf("m8sd.bin (%d B) differs from m8.bin (%d B): the payload must not "+
 			"depend on where it was staged", len(staged), len(shipped))
 	}
+	// ...and so must the transient save/load orchestrator, which every link
+	// emits to its own file but only the m8.cfg link's ships (as the SAVELOAD
+	// disk file — delivery.Build reads asm/m8saveload.bin).
+	if sl, sdsl := read("m8saveload.bin"), read("m8sdsaveload.bin"); !bytes.Equal(sl, sdsl) {
+		t.Errorf("m8sdsaveload.bin (%d B) differs from m8saveload.bin (%d B): the "+
+			"orchestrator must not depend on which link emitted it", len(sdsl), len(sl))
+	}
 	// The two COPIERS are no longer the same program: -D SDCHAIN gives the
 	// disk one the chain loader, which the BLOAD one cannot have (a BRUN from
 	// BASIC arrives with none of the boot loader's read state). What must

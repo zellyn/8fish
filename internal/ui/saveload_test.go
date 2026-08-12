@@ -124,16 +124,10 @@ func TestDiskSaveLoadRoundTrip(t *testing.T) {
 	if err := m.Enter("w", slKeyBudget); err != nil {
 		t.Fatalf("w: %v\n%v", err, m.Screen())
 	}
-	if msg := m.Screen().Text(17); !strings.Contains(msg, "GAME SAVED") {
-		t.Fatalf("no save confirmation on the message row: %q\n%v",
-			strings.TrimSpace(msg), m.Screen())
-	}
-	// The save must not have disturbed the game in memory.
-	if got := memPlies(m); len(got) != 4 || got[0] != prePlies[0] || got[3] != prePlies[3] {
-		t.Fatalf("the save changed the in-memory history: %v -> %v", prePlies, got)
-	}
 
-	// ---- THE INTEGRITY GATE: only the SAVE file's sectors changed ----------
+	// ---- THE INTEGRITY GATE, FIRST: only the SAVE file's sectors changed ---
+	// (Before the softer assertions, so a stray write is always named as a
+	// stray write, whatever else the save did or did not manage.)
 	after, err := w.ExtractSectors()
 	if err != nil {
 		t.Fatalf("extracting the written disk: %v", err)
@@ -158,6 +152,15 @@ func TestDiskSaveLoadRoundTrip(t *testing.T) {
 	}
 	t.Logf("integrity: %d sector(s) changed, all inside the SAVE file's %d",
 		changed, len(delivery.SaveFileOffsets()))
+
+	if msg := m.Screen().Text(17); !strings.Contains(msg, "GAME SAVED") {
+		t.Fatalf("no save confirmation on the message row: %q\n%v",
+			strings.TrimSpace(msg), m.Screen())
+	}
+	// The save must not have disturbed the game in memory.
+	if got := memPlies(m); len(got) != 4 || got[0] != prePlies[0] || got[3] != prePlies[3] {
+		t.Fatalf("the save changed the in-memory history: %v -> %v", prePlies, got)
+	}
 
 	// ---- the record on disk is EXACTLY the Go encoder's --------------------
 	rec, err := delivery.ExtractSaveFile(after)

@@ -1,9 +1,10 @@
 # ProRWTS2 on the 8fish disk — design
 
-Status: **FEATURE 1 SHIPPED (2026-08-08)** — the big book and its resident
-read-only reader are implemented as specified; see §10 for the measured
-deltas against this design, and docs/results.md for the entry. Feature 2
-(saves) remains design-only.
+Status: **FEATURE 1 SHIPPED (2026-08-08); FEATURE 2 SHIPPED (2026-08-12)** —
+the big book and its resident read-only reader are implemented as specified
+(§10 has the measured deltas), and save/load games shipped with the
+amendments re-validated in docs/saveload-feasibility.md (§11 here has its
+deltas).
 
 Original status line: DESIGN ONLY (2026-08-08). No engine code, no `asm/`
 edits, no build changes. This document specifies how peterferrie's ProRWTS2 (read+write ProDOS
@@ -612,3 +613,31 @@ executes the driver against the real nibblised disk.
 | TT geometry and validation | `asm/defs.inc` TTBASE $4000, 4096x8; `asm/tt.s` 24-bit verify; `asm/search.s` `ttmovevalid` |
 | history arrays / replay-based takeback | `asm/ui.s` 150-166 and the history comment ("Takeback replays the game from the start position") |
 | ponder state and its TT writes | `docs/ponder-design.md`; `asm/ui.s` PONDER* block |
+
+---
+
+## 11. Feature 2 implementation deltas (2026-08-12, measured)
+
+Re-validated first (docs/saveload-feasibility.md — the design predated
+allow_aux, the aux $0200 dirbuf, and the UICODE budget's exhaustion), then
+built. What shipped differs from §4 in exactly these places:
+
+| design said | shipped | why |
+|---|---|---|
+| write driver 1,114 B packed, 28-byte pad | **1,024 B exactly** (692 code + 256 data), no pad needed | use_smartport=0 and no aux path; the timed loops happen to land page-clean at this config/reloc. The slot-site tables ride in the code/data gap, so the blob stays one 2-block file |
+| ~430 B of save/load glue in UICODE | **the glue is a THIRD transient payload** (asm/saveload.s, the SAVELOAD file, loaded to $1A00 on demand); only two ~40 B stubs are resident, funded by moving the boot-only m8bookaux/copyx/m8rwtsinit into the boot-transient SPLASH segment | UICODE measured 15 B from full — the §8 "re-measure before committing" warning fired. Main-RAM transient code also dodges every bank-discipline hazard the bank-2 escape hatch had |
+| three save slots, slot-picker UI | **one slot** (`SAVE`), W saves / O loads | the single-slot model is the design's own §4.2 fallback; three slots is UI and directory growth with no new machinery, priced for later |
+| dirbuf/encbuf at $1300/$1500 | dirbuf $1200 (assembler-natural, asserted), **encbuf $1400 by a required patch**: upstream's fast_subindex=0 branch ALIASES encbuf onto dirbuf, which corrupts any multi-block write from a user buffer (the first sector's nibble staging overwrites the block list) | found in Phase-1 source reading; the disk-integrity gate demonstrates the corruption when the patch is removed (a genuine stray-sector write) |
+| save = header + arrays, checksum trailer | as designed, but PAGE-ALIGNED arrays (from/to/flags at record +$100/+$200/+$300) and the checksum in the header ($00E) — and only UIHCNT plies are copied, the tail zeroed | one absolute-indexed loop per array on the 6502; determinism (past UIHCNT the live arrays hold the spent splash code) |
+| load = replay through takeback's machinery | replay goes through **uifind + uitrylegal + uiapply** (the typed-move path, not cmd_take's trusting one) | a checksummed-but-forged record must fail at the first illegal ply and leave a clean new game; gated |
+| — (not priced) | the write driver's slot pokes come in TWO shapes: ten $C08x operand low bytes (OR) and four raw slot<<4 immediates (unrslot1-4, STORE) | enable_write's timed loops carry the slot as an immediate; cmd/genrwts emits both tables and verifies both operand kinds |
+
+Gates: `TestDiskSaveLoadRoundTrip` (the whole pipeline on the real nibblised
+disk, through the Disk II card's write path; ONLY the SAVE file's 4 sectors
+of 560 may change; the written record is byte-identical to
+internal/saveload.Encode; the position restores same-session and after a
+cold reboot from the written medium) and `TestDiskLoadDegrades` (empty slot,
+checksum-corrupt record, forged-legal-checksum record). Five mutations were
+run against them — encbuf re-aliased, write aimed at BOOK0, a header byte
+dropped, checksum validation skipped, replay validation skipped — and each
+was caught by name.

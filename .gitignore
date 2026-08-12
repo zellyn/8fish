@@ -26,6 +26,7 @@
 !internal/book/booknames.bin
 !internal/book/bigbook.bin
 !internal/rwts/rwtsblob.bin
+!internal/rwts/rwtswblob.bin
 !internal/tiles/tileblob.bin
 !internal/splash/splashblob.bin
 

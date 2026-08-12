@@ -17,6 +17,7 @@ import (
 	"fmt"
 
 	"github.com/zellyn/chess6502/internal/rwts"
+	"github.com/zellyn/chess6502/internal/saveload"
 	"github.com/zellyn/chess6502/internal/splash"
 )
 
@@ -54,13 +55,46 @@ const (
 	// splashRegionBlocks is the splash's footprint (index + data).
 	splashRegionBlocks = 1 + splashDataBlocks
 
+	// The SAVE/LOAD trio (docs/saveload-feasibility.md §5/§6), chained
+	// downward below the splash the same way the splash chains below the
+	// directory — each file is [index block, data blocks...]:
+	//
+	//	SAVE      the 2-block saved-game slot, a valid-checksum EMPTY record
+	//	          at build time, overwritten IN PLACE by the on-device save
+	//	          (the one file on the disk whose content is not fixed)
+	//	SAVELOAD  the transient save/load orchestrator (asm/saveload.s),
+	//	          loaded to main $1A00 on demand; a FIXED 3-block budget so
+	//	          the layout never moves when the code grows a byte
+	//	RWTSW     the transient write-capable ProRWTS2 build (rwts.WBlob),
+	//	          loaded to main $0E00 by a save, run once, discarded
+	saveDataBlocks = saveload.RecordBytes / 512
+	saveIndexBlock = splashIndexBlock - 1 - saveDataBlocks
+	saveDataBase   = saveIndexBlock + 1
+
+	// SaveLoadFileBytes is the orchestrator's fixed on-disk budget. Its
+	// run-time window is $1A00-$1FFF (1,536 B, the top of dead MOVESTACK
+	// scratch), so the file budget IS the memory budget.
+	SaveLoadFileBytes  = 0x600
+	saveloadDataBlocks = SaveLoadFileBytes / 512
+	saveloadIndexBlock = saveIndexBlock - 1 - saveloadDataBlocks
+	saveloadDataBase   = saveloadIndexBlock + 1
+
+	rwtswDataBlocks = (rwtswBlobCap + 511) / 512
+	rwtswIndexBlock = saveloadIndexBlock - 1 - rwtswDataBlocks
+	rwtswDataBase   = rwtswIndexBlock + 1
+	// rwtswBlobCap: the write driver is 1,024 B today (2 blocks); a growth
+	// past 2 blocks moves every block number above, so it is pinned here and
+	// checked against the real blob in buildBookRegion.
+	rwtswBlobCap = 1024
+
 	// entrySize is one ProDOS directory entry.
 	entrySize = 0x27
 
 	blocksPerDisk = Tracks * 8
 	// bookRegionBlocks is the whole region's footprint: the directory, the
-	// book's index+data blocks above it, and the splash's index+data below.
-	bookRegionBlocks = 1 + BookFiles + BookFiles*bookFileBlocks + splashRegionBlocks
+	// book's index+data blocks above it, and everything chained below.
+	bookRegionBlocks = 1 + BookFiles + BookFiles*bookFileBlocks + splashRegionBlocks +
+		(1 + saveDataBlocks) + (1 + saveloadDataBlocks) + (1 + rwtswDataBlocks)
 )
 
 // SplashFileName is the name of the boot-splash file in the directory block
@@ -119,10 +153,29 @@ func layFile(blocks map[int][]byte, dir []byte, slot int, name string, indexBloc
 	blocks[indexBlock] = idx
 }
 
+// Directory slot numbers (0-based, after the volume header). The save/load
+// gates read files back by slot, so the assignment is named once.
+const (
+	slotSplash   = BookFiles // 4
+	slotRwtsw    = BookFiles + 1
+	slotSaveLoad = BookFiles + 2
+	slotSave     = BookFiles + 3
+	dirFileCount = BookFiles + 4
+)
+
+// padToBlocks zero-pads data to exactly n*512 bytes (it must already fit).
+func padToBlocks(data []byte, n int) []byte {
+	out := make([]byte, n*512)
+	copy(out, data)
+	return out
+}
+
 // buildBookRegion lays the region out as block-number -> 512-byte block: the
-// directory key block, the four BOOK files' index+data above it, and the
-// SPLASH file's index+data below it.
-func buildBookRegion(bigbook []byte) (map[int][]byte, error) {
+// directory key block, the four BOOK files' index+data above it, and — in
+// order downward below it — the SPLASH, SAVE, SAVELOAD and RWTSW files.
+// saveloadBin is asm/m8saveload.bin (the caller reads it; tests may pass a
+// stand-in). The SAVE file ships as the valid-checksum EMPTY record.
+func buildBookRegion(bigbook, saveloadBin []byte) (map[int][]byte, error) {
 	if len(bigbook) > BookFiles*BookFileBytes {
 		return nil, fmt.Errorf("delivery: big book is %d B, over the %d B region",
 			len(bigbook), BookFiles*BookFileBytes)
@@ -130,12 +183,21 @@ func buildBookRegion(bigbook []byte) (map[int][]byte, error) {
 	if bookDataBase+BookFiles*bookFileBlocks > blocksPerDisk {
 		return nil, fmt.Errorf("delivery: book region runs past block %d", blocksPerDisk-1)
 	}
-	if splashIndexBlock <= 0 {
-		return nil, fmt.Errorf("delivery: splash region runs below block 0 (index block %d): "+
-			"the splash no longer fits under the directory", splashIndexBlock)
+	if rwtswIndexBlock <= 0 {
+		return nil, fmt.Errorf("delivery: region runs below block 0 (RWTSW index block %d): "+
+			"the save/load files no longer fit under the splash", rwtswIndexBlock)
 	}
 	if s := splash.Disk(); len(s) != SplashFileBytes {
 		return nil, fmt.Errorf("delivery: splash blob is %d B, want %d", len(s), SplashFileBytes)
+	}
+	if len(rwts.WBlob) > rwtswBlobCap {
+		return nil, fmt.Errorf("delivery: write-driver blob is %d B, over the %d B cap "+
+			"(rwtswBlobCap moves every block below the splash — re-plan the chain)",
+			len(rwts.WBlob), rwtswBlobCap)
+	}
+	if len(saveloadBin) == 0 || len(saveloadBin) > SaveLoadFileBytes {
+		return nil, fmt.Errorf("delivery: save/load orchestrator is %d B, want 1..%d "+
+			"(its $1A00-$1FFF run window is the budget)", len(saveloadBin), SaveLoadFileBytes)
 	}
 	blocks := map[int][]byte{}
 
@@ -149,7 +211,7 @@ func buildBookRegion(bigbook []byte) (map[int][]byte, error) {
 	vol := "EIGHTFISH"
 	hdr[0] = 0xF0 | byte(len(vol)) // volume directory header
 	copy(hdr[1:], vol)
-	hdr[0x21] = BookFiles + 1 // FILE_COUNT (lo; block offset $25): books + splash
+	hdr[0x21] = dirFileCount // FILE_COUNT (lo; block offset $25)
 
 	// The four book files, laid contiguously ABOVE the directory.
 	pad := make([]byte, BookFiles*BookFileBytes)
@@ -160,9 +222,20 @@ func buildBookRegion(bigbook []byte) (map[int][]byte, error) {
 			pad[i*BookFileBytes:(i+1)*BookFileBytes])
 	}
 
-	// The splash file, laid just BELOW the directory (slot 4, the 5th entry).
-	layFile(blocks, dir, BookFiles, SplashFileName,
+	// The splash file, laid just BELOW the directory.
+	layFile(blocks, dir, slotSplash, SplashFileName,
 		splashIndexBlock, splashDataBase, splashDataBlocks, splash.Disk())
+
+	// The save/load trio, chained on downward.
+	layFile(blocks, dir, slotSave, saveload.DiskFileName,
+		saveIndexBlock, saveDataBase, saveDataBlocks,
+		padToBlocks(saveload.Empty(), saveDataBlocks))
+	layFile(blocks, dir, slotSaveLoad, saveload.CodeFileName,
+		saveloadIndexBlock, saveloadDataBase, saveloadDataBlocks,
+		padToBlocks(saveloadBin, saveloadDataBlocks))
+	layFile(blocks, dir, slotRwtsw, saveload.WriterFileName,
+		rwtswIndexBlock, rwtswDataBase, rwtswDataBlocks,
+		padToBlocks(rwts.WBlob, rwtswDataBlocks))
 
 	blocks[BookDirBlock] = dir
 	return blocks, nil
@@ -171,10 +244,23 @@ func buildBookRegion(bigbook []byte) (map[int][]byte, error) {
 // BookRegionSectors is the region's disk cost in sectors.
 func BookRegionSectors() int { return bookRegionBlocks * 2 }
 
+// SaveFileOffsets returns the .dsk byte offsets of the SAVE file's DATA
+// sectors — the ONLY sectors an on-device save may change. The disk
+// integrity gate byte-compares the whole image around a save and requires
+// every difference to be inside these.
+func SaveFileOffsets() []int {
+	var offs []int
+	for b := saveDataBase; b < saveDataBase+saveDataBlocks; b++ {
+		o := BlockOffsets(b)
+		offs = append(offs, o[0], o[1])
+	}
+	return offs
+}
+
 // BookRegionOffsets returns every .dsk sector offset the region occupies —
 // the overlap gate against the Standard Delivery stages reads this.
-func BookRegionOffsets(bigbook []byte) ([]int, error) {
-	blocks, err := buildBookRegion(bigbook)
+func BookRegionOffsets(bigbook, saveloadBin []byte) ([]int, error) {
+	blocks, err := buildBookRegion(bigbook, saveloadBin)
 	if err != nil {
 		return nil, err
 	}
@@ -187,8 +273,8 @@ func BookRegionOffsets(bigbook []byte) ([]int, error) {
 }
 
 // writeBookRegion writes the region into a .dsk image in place.
-func writeBookRegion(dsk, bigbook []byte) error {
-	blocks, err := buildBookRegion(bigbook)
+func writeBookRegion(dsk, bigbook, saveloadBin []byte) error {
+	blocks, err := buildBookRegion(bigbook, saveloadBin)
 	if err != nil {
 		return err
 	}
@@ -212,6 +298,12 @@ func ExtractBookFile(dsk []byte, i int) ([]byte, error) {
 	if i < 0 || i >= BookFiles {
 		return nil, fmt.Errorf("delivery: no book file %d", i)
 	}
+	return extractSlot(dsk, i, BookFileName(i), bookFileBlocks)
+}
+
+// extractSlot reads one file back out of a .dsk exactly as the driver would:
+// directory entry -> index block -> data blocks, through BlockOffsets.
+func extractSlot(dsk []byte, slot int, name string, dataBlocks int) ([]byte, error) {
 	readBlock := func(b int) ([]byte, error) {
 		out := make([]byte, 0, 512)
 		for _, off := range BlockOffsets(b) {
@@ -226,17 +318,16 @@ func ExtractBookFile(dsk []byte, i int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	e := dir[4+(i+1)*0x27:]
-	fn := BookFileName(i)
-	if e[0] != 0x20|byte(len(fn)) || !bytes.Equal(e[1:1+len(fn)], []byte(fn)) {
-		return nil, fmt.Errorf("delivery: directory entry %d is not %s", i, fn)
+	e := dir[4+(slot+1)*entrySize:]
+	if e[0] != 0x20|byte(len(name)) || !bytes.Equal(e[1:1+len(name)], []byte(name)) {
+		return nil, fmt.Errorf("delivery: directory slot %d is not %s", slot, name)
 	}
 	idx, err := readBlock(int(e[0x11]) | int(e[0x12])<<8)
 	if err != nil {
 		return nil, err
 	}
 	var out []byte
-	for j := range bookFileBlocks {
+	for j := 0; j < dataBlocks; j++ {
 		d, err := readBlock(int(idx[j]) | int(idx[256+j])<<8)
 		if err != nil {
 			return nil, err
@@ -247,39 +338,25 @@ func ExtractBookFile(dsk []byte, i int) ([]byte, error) {
 }
 
 // ExtractSplashFile reads the SPLASH file back out of a .dsk exactly as the
-// driver would: directory entry -> index block -> data blocks. It returns the
-// SplashFileBytes-byte padded blob, so the disk gate can compare what the
-// booted machine will read against internal/splash.Disk().
+// driver would. It returns the SplashFileBytes-byte padded blob, so the disk
+// gate can compare what the booted machine will read against
+// internal/splash.Disk().
 func ExtractSplashFile(dsk []byte) ([]byte, error) {
-	readBlock := func(b int) ([]byte, error) {
-		out := make([]byte, 0, 512)
-		for _, off := range BlockOffsets(b) {
-			if off+SectorBytes > len(dsk) {
-				return nil, fmt.Errorf("delivery: block %d beyond the disk", b)
-			}
-			out = append(out, dsk[off:off+SectorBytes]...)
-		}
-		return out, nil
-	}
-	dir, err := readBlock(BookDirBlock)
-	if err != nil {
-		return nil, err
-	}
-	e := dir[4+(BookFiles+1)*entrySize:]
-	if e[0] != 0x20|byte(len(SplashFileName)) || !bytes.Equal(e[1:1+len(SplashFileName)], []byte(SplashFileName)) {
-		return nil, fmt.Errorf("delivery: directory slot %d is not %s", BookFiles, SplashFileName)
-	}
-	idx, err := readBlock(int(e[0x11]) | int(e[0x12])<<8)
-	if err != nil {
-		return nil, err
-	}
-	var out []byte
-	for j := 0; j < splashDataBlocks; j++ {
-		d, err := readBlock(int(idx[j]) | int(idx[256+j])<<8)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, d...)
-	}
-	return out, nil
+	return extractSlot(dsk, slotSplash, SplashFileName, splashDataBlocks)
+}
+
+// ExtractSaveFile reads the SAVE file's 1,024-byte record back out of a .dsk
+// — the round-trip gate's view of what the on-device save actually wrote.
+func ExtractSaveFile(dsk []byte) ([]byte, error) {
+	return extractSlot(dsk, slotSave, saveload.DiskFileName, saveDataBlocks)
+}
+
+// ExtractSaveLoadFile reads the orchestrator file back (padded to its fixed
+// budget); ExtractRwtswFile the transient write driver's blob (block-padded).
+func ExtractSaveLoadFile(dsk []byte) ([]byte, error) {
+	return extractSlot(dsk, slotSaveLoad, saveload.CodeFileName, saveloadDataBlocks)
+}
+
+func ExtractRwtswFile(dsk []byte) ([]byte, error) {
+	return extractSlot(dsk, slotRwtsw, saveload.WriterFileName, rwtswDataBlocks)
 }

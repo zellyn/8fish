@@ -112,11 +112,12 @@ asm/engsyms.inc: asm/engine.bin internal/engsyms/engsyms.go cmd/genengsyms/main.
 internal/rwts/rwtsblob.bin: asm/third_party/PRORWTS2.S cmd/genrwts/main.go internal/rwts/rwts.go
 	ACME=$(ACME) go run ./cmd/genrwts
 
-asm/rwts.inc internal/rwts/gen.go: internal/rwts/rwtsblob.bin
+asm/rwts.inc asm/rwtsw.inc internal/rwts/gen.go internal/rwts/rwtswblob.bin: internal/rwts/rwtsblob.bin
 	@:
 
-M8_SRCS = asm/m8.s asm/ui.s asm/dhgr.s asm/entropy.inc asm/defs.inc asm/book.inc \
-          asm/tiledefs.inc asm/tiles.inc asm/engsyms.inc asm/rwts.inc asm/m8.cfg
+M8_SRCS = asm/m8.s asm/ui.s asm/dhgr.s asm/saveload.s asm/entropy.inc asm/defs.inc \
+          asm/book.inc asm/tiledefs.inc asm/tiles.inc asm/engsyms.inc asm/rwts.inc \
+          asm/rwtsw.inc asm/m8.cfg
 
 asm/m8.bin: $(M8_SRCS)
 	cd asm && $(CA65) -g m8.s -o m8.o
@@ -142,7 +143,8 @@ dsk: asm/8fish.dsk
 
 asm/8fish.dsk: asm/m8sdboot.bin asm/m8.bin asm/engine.bin internal/book/bookblob.bin \
                internal/book/bigbook.bin internal/rwts/rwtsblob.bin \
-               internal/tiles/tileblob.bin internal/splash/splashblob.bin \
+               internal/rwts/rwtswblob.bin internal/tiles/tileblob.bin \
+               internal/splash/splashblob.bin internal/saveload/saveload.go \
                cmd/mkdsk/main.go internal/delivery/delivery.go \
                internal/delivery/bookregion.go
 	@command -v $(DISKII) >/dev/null 2>&1 || { \

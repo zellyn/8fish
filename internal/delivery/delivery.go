@@ -86,6 +86,8 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/zellyn/chess6502/internal/rwts"
+	"github.com/zellyn/chess6502/internal/saveload"
 	"github.com/zellyn/chess6502/internal/splash"
 )
 
@@ -550,7 +552,12 @@ func Build(root, imgPath, dskPath string) (Ledger, error) {
 	for i := range l.Stage1Sectors + l.Stage2Sectors {
 		sdUsed[SectorOffset(i)] = true
 	}
-	regionOffs, err := BookRegionOffsets(bigbook)
+	saveloadBin, err := os.ReadFile(filepath.Join(root, "asm", "m8saveload.bin"))
+	if err != nil {
+		return l, fmt.Errorf("delivery: %w (run `make dsk` -- the save/load orchestrator "+
+			"is linked alongside asm/m8.bin)", err)
+	}
+	regionOffs, err := BookRegionOffsets(bigbook, saveloadBin)
 	if err != nil {
 		return l, err
 	}
@@ -561,7 +568,7 @@ func Build(root, imgPath, dskPath string) (Ledger, error) {
 				off, off/SectorBytes/SectorsPerTrk)
 		}
 	}
-	if err := writeBookRegion(dsk, bigbook); err != nil {
+	if err := writeBookRegion(dsk, bigbook, saveloadBin); err != nil {
 		return l, err
 	}
 	if err := os.WriteFile(dskPath, dsk, 0o644); err != nil {
@@ -614,6 +621,26 @@ func Build(root, imgPath, dskPath string) (Ledger, error) {
 		return l, err
 	} else if !bytes.Equal(got, splash.Disk()) {
 		return l, fmt.Errorf("delivery: %s does not read back from %s", SplashFileName, dskPath)
+	}
+	// ...and the save/load trio: the EMPTY save record, the orchestrator,
+	// and the transient write driver (each block-padded like its file).
+	for _, f := range []struct {
+		name    string
+		extract func([]byte) ([]byte, error)
+		want    []byte
+		blocks  int
+	}{
+		{saveload.DiskFileName, ExtractSaveFile, saveload.Empty(), saveDataBlocks},
+		{saveload.CodeFileName, ExtractSaveLoadFile, saveloadBin, saveloadDataBlocks},
+		{saveload.WriterFileName, ExtractRwtswFile, rwts.WBlob, rwtswDataBlocks},
+	} {
+		got, err := f.extract(written)
+		if err != nil {
+			return l, err
+		}
+		if !bytes.Equal(got, padToBlocks(f.want, f.blocks)) {
+			return l, fmt.Errorf("delivery: %s does not read back from %s", f.name, dskPath)
+		}
 	}
 	return l, nil
 }

@@ -40,7 +40,7 @@ func TestBookRegionRoundTrip(t *testing.T) {
 		t.Fatalf("%v (run `go run ./cmd/genbook`)", err)
 	}
 	dsk := make([]byte, SectorsPerDisk*SectorBytes)
-	if err := writeBookRegion(dsk, big); err != nil {
+	if err := writeBookRegion(dsk, big, []byte("SAVELOAD STUB")); err != nil {
 		t.Fatal(err)
 	}
 	padded := make([]byte, BookFiles*BookFileBytes)
@@ -76,17 +76,17 @@ func TestSplashRegionRoundTrip(t *testing.T) {
 		t.Fatalf("%v (run `go run ./cmd/genbook`)", err)
 	}
 	dsk := make([]byte, SectorsPerDisk*SectorBytes)
-	if err := writeBookRegion(dsk, big); err != nil {
+	if err := writeBookRegion(dsk, big, []byte("SAVELOAD STUB")); err != nil {
 		t.Fatal(err)
 	}
 
 	// The FILE_COUNT header now names five files (four BOOK + SPLASH).
-	blocks, err := buildBookRegion(big)
+	blocks, err := buildBookRegion(big, []byte("SAVELOAD STUB"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := blocks[BookDirBlock][4+0x21]; got != BookFiles+1 {
-		t.Fatalf("directory FILE_COUNT = %d, want %d (books + splash)", got, BookFiles+1)
+	if got := blocks[BookDirBlock][4+0x21]; got != dirFileCount {
+		t.Fatalf("directory FILE_COUNT = %d, want %d (books + splash + save/load trio)", got, dirFileCount)
 	}
 
 	// The splash reads back byte-for-byte and decodes to the asset.
@@ -140,7 +140,7 @@ func TestBookRegionDoesNotTouchTheSDRegion(t *testing.T) {
 	for i := range stage1.Sectors() + stage2.Sectors() {
 		sd[SectorOffset(i)] = "SD stage sector"
 	}
-	offs, err := BookRegionOffsets(big)
+	offs, err := BookRegionOffsets(big, []byte("SAVELOAD STUB"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -33,6 +33,7 @@
         .include "tiledefs.inc"
         .include "engsyms.inc"
         .include "rwts.inc"
+        .include "rwtsw.inc"
 
 ; ---------------------------------------------------------------------------
 ; LANGUAGE CARD BANK 1, above the engine's 65-byte LCCODE at $D000. Until now
@@ -85,6 +86,14 @@ DHTILES   = $D300
 ; BOOK_BASE. It is main hi-res page 1, i.e. the DHGR MAIN half, which is
 ; exactly the 8 KB the book had to stop occupying.
 BOOKSTAGE = $2000
+
+; The transient SAVE/LOAD orchestrator's window (asm/saveload.s, delivered
+; as the SAVELOAD disk file; docs/saveload-feasibility.md §6): the top of
+; the dead MOVESTACK scratch, below BOOKSTAGE. SLSIZE is both the on-disk
+; file size and the link-time cap; keep = delivery.SaveLoadFileBytes.
+SLCODE    = $1A00
+SLSIZE    = $0600
+
 DHROWL    = DHTILES + TILE_BLOB_SIZE            ; $DA20
 DHROWH    = DHROWL + 152
 dhblnk    = DHROWH + 152
@@ -734,7 +743,15 @@ m8irq:  rti
 ; the DHGR aux half at $2000, which internal/delivery's TestMainMemoryLayout
 ; asserts against the real blob size rather than against this sentence, and
 ; TestBookClearsTheAuxTextPage asserts the bottom end the same way.
+;
+; ★ BOOT-ONLY, so it lives in the SPLASH segment (the boot-transient code the
+; copier lands at $F800, reclaimed as game history from m8new on). It runs
+; from m8main strictly before m8new, like m8rwtsinit below and m8splash
+; itself. Moving the boot-only routines here is what funded the save/load
+; command stubs in the full $E000-$F6FF UICODE budget
+; (docs/saveload-feasibility.md §6). NOTHING may call these after m8new.
 ; ---------------------------------------------------------------------------
+        .segment "SPLASH"
 m8bookaux:
         lda #<BOOKSTAGE
         sta ZPTR
@@ -750,11 +767,12 @@ m8bookaux:
         sta RAMWRTOFF
         rts
 
-; copyx: copy X pages from (ZPTR) to (TTPTR). The UICODE twin of the boot
-; copier's copyp, shared by m8bookaux, m8rwtsinit and m8bigbook -- needed
+; copyx: copy X pages from (ZPTR) to (TTPTR). The LC twin of the boot
+; copier's copyp, shared by m8bookaux, m8rwtsinit and m8splash -- needed
 ; here because the copier's copy runs from main RAM the engine reclaims.
 ; Honours whatever RAMWRT/RAMRD state the caller set (that is how one loop
 ; serves main->aux and main->LC alike). Clobbers A,X,Y and both pointers.
+; Its three callers are ALL boot-only, so it is SPLASH-segment code too.
 copyx:  ldy #0
 cxl:    lda (ZPTR),y
         sta (TTPTR),y
@@ -787,6 +805,9 @@ cxl:    lda (ZPTR),y
 ;
 ; The denibble table is not built here: cmd/genrwts prebakes it into the blob.
 ; Runs ONCE, before anything can search (the staged blob sits in MOVESTACK).
+; BOOT-ONLY, so it is SPLASH-segment code like m8bookaux above (the segment
+; directive is still in force); the save command's transient orchestrator
+; re-does the same two pokes for the WRITE driver (asm/saveload.s slmat).
 ; ---------------------------------------------------------------------------
 m8rwtsinit:
         lda #0                  ; both the staging zone and the resident home
@@ -813,6 +834,11 @@ mrw2:   sta $FFFF               ;  table is data, the poke is two stores
         lda RWTSTRK
         sta RWTS_TRACKD1
         rts
+
+        .segment "UICODE"       ; end of the boot-only run: rwtszp and
+                                ;  m8bigbook below are LIVE post-boot (New
+                                ;  Game reloads, save/load) and must survive
+                                ;  m8new reclaiming $F800 for the history
 
 ; rwtszp: SWAP the zero-page window $3C-$67 with the held image at RWTSHOLD.
 ; The driver claims that window (its API bytes and its scratch), and the
@@ -3184,6 +3210,53 @@ qstub:  lda $C082               ; bank the ROM back in over $D000-$FFFF
         jmp ($FFFC)             ; ...and take its RESET vector: a cold boot,
 qstubend:                       ;  since m8main invalidated the power-up byte
 
+; cmd_save / cmd_load: W WRITES the game to the disk's SAVE file, O reads it
+; back (docs/saveload-feasibility.md). The LOGIC is not resident — the
+; $E000-$F6FF budget was full — so these stubs pull the SAVELOAD file (the
+; orchestrator, asm/saveload.s) to $1A00 with the resident reader, exactly
+; the way a save then pulls the write driver, and jump in with the command
+; in A. One save slot; the whole window is dead engine scratch, reclaimed by
+; the next search. On the BLOAD build there is no reader and no disk: say so.
+cmd_save:
+        lda #0
+        beq cslgo
+cmd_load:
+        lda #1
+cslgo:  sta SLCMD
+        lda RWTSDEF
+        bne cslrd
+        lda #<m_needdisk
+        ldx #>m_needdisk
+        jmp uisetmsg
+cslrd:  jsr rwtszp              ; engine zp (incl. board rows) out, driver in
+        lda #<f_saveload
+        sta RWTS_NAMLO
+        lda #>f_saveload
+        sta RWTS_NAMLO+1
+        lda #0
+        sta RWTS_AUXREQ         ; read to MAIN (after m8bigbook the held
+        sta RWTS_SIZELO         ;  image says aux — same trap m8splash hit)
+        sta RWTS_LDRLO
+        lda #>SLCODE
+        sta RWTS_LDRLO+1
+        lda #>SLSIZE
+        sta RWTS_SIZELO+1
+        jsr RWTS_ENTRY
+        lda RWTS_STATUS
+        sta SLSTAT
+        jsr rwtszp              ; driver zp out, engine zp back
+        lda SLSTAT
+        beq cslok
+        lda #<m_slnoread        ; no disk / wrong disk: nothing ran, nothing
+        ldx #>m_slnoread        ;  in the game was touched
+        jmp uisetmsg
+cslok:  lda SLCMD               ; 0 = save, 1 = load; the orchestrator's rts
+        jmp SLCODE              ;  returns to uidispatch's caller
+
+; The orchestrator file's name, length-prefixed ASCII, read by the bank-1
+; driver through (namlo) — UICODE is bank-independent, like f_book.
+f_saveload: .byte 8, "SAVELOAD"
+
 ; ===========================================================================
 ; Painting
 ; ===========================================================================
@@ -3974,12 +4047,14 @@ KTAB:   .byte 101, 101, 101, 101, 101, 101, 101, 101
 
 promoltr: .byte 'n', 'b', 'r', 'q'
 
-NCMDS = 8
-cmdkeys: .byte 'n', 't', 'r', 'd', 'l', 's', 'q', '?'
+NCMDS = 10
+cmdkeys: .byte 'n', 't', 'r', 'd', 'l', 's', 'q', '?', 'w', 'o'
 cmdlo:  .byte <(cmd_new-1),  <(cmd_take-1),  <(cmd_resign-1), <(cmd_draw-1)
         .byte <(cmd_level-1), <(cmd_swap-1), <(cmd_quit-1),   <(cmd_help-1)
+        .byte <(cmd_save-1),  <(cmd_load-1)
 cmdhi:  .byte >(cmd_new-1),  >(cmd_take-1),  >(cmd_resign-1), >(cmd_draw-1)
         .byte >(cmd_level-1), >(cmd_swap-1), >(cmd_quit-1),   >(cmd_help-1)
+        .byte >(cmd_save-1),  >(cmd_load-1)
 
 stmlo:  .byte <s_white, <s_black
 stmhi:  .byte >s_white, >s_black
@@ -4018,8 +4093,8 @@ s_agreed:  SCRSTR "DRAW AGREED"
 s_err:     SCRSTR "INTERNAL ERROR"
 s_movq:    SCRSTR "YOUR MOVE? "
 s_cmdq:    SCRSTR "COMMAND?   "
-s_help1:   SCRSTR "N-NEW T-TAKEBACK R-RESIGN D-DRAW"
-s_help2:   SCRSTR "L-LEVEL S-SIDES Q-QUIT ?-HELP"
+s_help1:   SCRSTR "N-NEW T-TAKEBACK R-RESIGN D-DRAW W-SAVE"
+s_help2:   SCRSTR "O-LOAD L-LEVEL S-SIDES Q-QUIT ?-HELP"
 s_bookpfx: SCRSTR "BOOK: "
 
 m_illegal:  SCRSTR "ILLEGAL MOVE - TRY AGAIN"
@@ -4053,6 +4128,18 @@ m_cursor:   SCRSTR "ARROWS MOVE. SPACE SELECTS. ESC CANCELS"
 ; Only the failure sentence remains: the game then runs on the resident book,
 ; exactly as a diskless 8fish always has.
 m_nobigbook: SCRSTR "DISK NOT READ - USING THE SMALL BOOK"
+; Save/load (cmd_save/cmd_load and asm/saveload.s). 39 characters is the
+; message row's limit (uisetmsg). Every failure names its stage: could not
+; read the disk at all / the record failed validation / the slot is empty /
+; the write-or-verify failed (the game in memory is intact in every case).
+m_needdisk:  SCRSTR "SAVE/LOAD NEEDS THE 8FISH DISK"
+m_slnoread:  SCRSTR "DISK NOT READ - IS THE 8FISH DISK IN?"
+m_saved:     SCRSTR "GAME SAVED. O LOADS IT"
+m_savefull:  SCRSTR "SAVED THE FIRST 255 MOVES ONLY"
+m_savefail:  SCRSTR "SAVE FAILED - GAME UNTOUCHED. TAB SET?"
+m_slempty:   SCRSTR "NO SAVED GAME YET - W SAVES ONE"
+m_slbad:     SCRSTR "SAVED GAME UNREADABLE - NOT LOADED"
+m_loaded:    SCRSTR "GAME LOADED"
 
         ; Pad UIDATA2 to a whole number of pages. The copier copies
         ; >(__UIDATA2_SIZE__+255) pages of it and then finds the SPLASH segment
@@ -4093,3 +4180,11 @@ UIDHGRDEF: .byte 0
 RWTSDEF:  .byte 0
 RWTSSLOT: .byte 0
 RWTSTRK:  .byte 0
+
+; ---------------------------------------------------------------------------
+; The TRANSIENT save/load orchestrator: its own SAVELOAD segment, emitted to
+; its own output file (the SAVELOAD disk file) — nothing here is in the
+; resident payload. Included last so it can name everything above; it is
+; linked at SLCODE and entered only by cmd_save/cmd_load's stub.
+; ---------------------------------------------------------------------------
+        .include "saveload.s"

@@ -288,7 +288,7 @@ func TestBigBookLoadFailureDegradesHonestly(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Flip one byte of the last book file's first data block, on a copy.
-	offs, err := delivery.BookRegionOffsets(book.DefaultBig())
+	offs, err := delivery.BookRegionOffsets(book.DefaultBig(), []byte("SAVELOAD STUB"))
 	if err != nil {
 		t.Fatal(err)
 	}

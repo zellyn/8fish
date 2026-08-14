@@ -18,8 +18,8 @@ entry:
         sta PCOUNT+2
         sta PCOUNT+3
         sta GENFUT              ; full generation always (the captures-
-                                ;  only latch is search's; ZP is garbage
-                                ;  on hardware)
+                                ;  only latch is search's; RAM is
+                                ;  garbage at power-on)
         lda #<MOVESTACK
         sta MSP
         lda #>MOVESTACK

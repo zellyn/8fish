@@ -17,7 +17,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/zellyn/chess6502/internal/splash"
+	"github.com/zellyn/8fish/internal/splash"
 )
 
 const (

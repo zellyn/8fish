@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/ui"
+	"github.com/zellyn/8fish/internal/ui"
 	"github.com/zellyn/go6502/cpu"
 	"github.com/zellyn/goapple2/iie"
 )

@@ -4,7 +4,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // TestGivesCheckVsRefchess validates the exact "does this move give

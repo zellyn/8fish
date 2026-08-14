@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // playGame plays the engine (as white if engineWhite) against a random

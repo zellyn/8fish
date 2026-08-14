@@ -69,7 +69,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/zellyn/chess6502/internal/rwts"
+	"github.com/zellyn/8fish/internal/rwts"
 )
 
 const (

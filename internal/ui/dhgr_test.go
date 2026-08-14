@@ -26,10 +26,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/zellyn/chess6502/harness"
-	"github.com/zellyn/chess6502/internal/asmbuild"
-	"github.com/zellyn/chess6502/internal/chesstest"
-	"github.com/zellyn/chess6502/internal/tiles"
+	"github.com/zellyn/8fish/harness"
+	"github.com/zellyn/8fish/internal/asmbuild"
+	"github.com/zellyn/8fish/internal/chesstest"
+	"github.com/zellyn/8fish/internal/tiles"
 )
 
 const (

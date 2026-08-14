@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // searchFT2 runs the asm engine over pos under FEATURES 0x1f + the given

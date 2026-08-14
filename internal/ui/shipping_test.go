@@ -20,8 +20,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/refchess"
-	"github.com/zellyn/chess6502/internal/ui"
+	"github.com/zellyn/8fish/internal/refchess"
+	"github.com/zellyn/8fish/internal/ui"
 	"github.com/zellyn/goapple2/chargen"
 )
 

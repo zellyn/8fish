@@ -24,8 +24,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/tiles"
-	"github.com/zellyn/chess6502/internal/ui"
+	"github.com/zellyn/8fish/internal/tiles"
+	"github.com/zellyn/8fish/internal/ui"
 	"github.com/zellyn/goapple2/chargen"
 	"github.com/zellyn/goapple2/videoscan"
 )

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/chesstest"
-	"github.com/zellyn/chess6502/internal/refchess"
-	"github.com/zellyn/chess6502/internal/ui"
+	"github.com/zellyn/8fish/internal/chesstest"
+	"github.com/zellyn/8fish/internal/refchess"
+	"github.com/zellyn/8fish/internal/ui"
 )
 
 // engineBin / engineDefs load the engine image the reference searches use.

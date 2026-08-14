@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zellyn/chess6502/internal/asmbuild"
-	"github.com/zellyn/chess6502/internal/chesstest"
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/asmbuild"
+	"github.com/zellyn/8fish/internal/chesstest"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // ---------------------------------------------------------------------------

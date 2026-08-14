@@ -4,7 +4,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 var passedBonus = [8]int{0, 15, 0, 21, 50, 52, 20, 0} // keep = cmd/gentables (Texel-tuned, diversified corpus)

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/tiles"
+	"github.com/zellyn/8fish/internal/tiles"
 )
 
 // artFile returns the committed artwork's bytes and an ABSOLUTE path to

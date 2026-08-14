@@ -13,9 +13,9 @@ import (
 	"runtime"
 	"strconv"
 
-	"github.com/zellyn/chess6502/internal/book"
-	"github.com/zellyn/chess6502/internal/chesstest"
-	"github.com/zellyn/chess6502/internal/sprt"
+	"github.com/zellyn/8fish/internal/book"
+	"github.com/zellyn/8fish/internal/chesstest"
+	"github.com/zellyn/8fish/internal/sprt"
 )
 
 func main() {

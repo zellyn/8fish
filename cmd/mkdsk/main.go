@@ -15,7 +15,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/zellyn/chess6502/internal/delivery"
+	"github.com/zellyn/8fish/internal/delivery"
 )
 
 func main() {

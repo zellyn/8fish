@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // buildbig.go compiles the BIG BOOK: the curated book, unchanged, plus the

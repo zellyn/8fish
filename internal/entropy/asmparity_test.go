@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zellyn/chess6502/harness"
-	"github.com/zellyn/chess6502/internal/asmbuild"
-	"github.com/zellyn/chess6502/internal/chesstest"
-	"github.com/zellyn/chess6502/internal/entropy"
+	"github.com/zellyn/8fish/harness"
+	"github.com/zellyn/8fish/internal/asmbuild"
+	"github.com/zellyn/8fish/internal/chesstest"
+	"github.com/zellyn/8fish/internal/entropy"
 )
 
 // The REAL 6502 collector, driven under emulation.

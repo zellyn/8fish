@@ -19,7 +19,7 @@ package chesstest
 import (
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/mirror"
+	"github.com/zellyn/8fish/internal/mirror"
 )
 
 // seeVal10 is the piece value in tens (byte-sized), by type 1..6.

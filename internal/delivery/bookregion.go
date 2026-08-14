@@ -16,9 +16,9 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/zellyn/chess6502/internal/rwts"
-	"github.com/zellyn/chess6502/internal/saveload"
-	"github.com/zellyn/chess6502/internal/splash"
+	"github.com/zellyn/8fish/internal/rwts"
+	"github.com/zellyn/8fish/internal/saveload"
+	"github.com/zellyn/8fish/internal/splash"
 )
 
 // The region's layout in ProDOS block numbers. A block is 512 bytes = two

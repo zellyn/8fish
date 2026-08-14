@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // apply a sequence of UCI moves, failing the test on any tracker error.

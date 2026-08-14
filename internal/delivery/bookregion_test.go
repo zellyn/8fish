@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/rwts"
-	"github.com/zellyn/chess6502/internal/splash"
+	"github.com/zellyn/8fish/internal/rwts"
+	"github.com/zellyn/8fish/internal/splash"
 )
 
 // TestBlockOffsetsMatchTheCanonicalSkew pins BlockOffsets — which mirrors

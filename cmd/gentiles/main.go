@@ -47,7 +47,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/zellyn/chess6502/internal/tiles"
+	"github.com/zellyn/8fish/internal/tiles"
 )
 
 const (

@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/zellyn/chess6502/internal/book"
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/book"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // parseOpenings reads the human-maintained SAN source file and compiles it

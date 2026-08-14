@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/ui"
+	"github.com/zellyn/8fish/internal/ui"
 )
 
 // winKeyBudget is the per-keystroke cycle allowance. Everything here is a

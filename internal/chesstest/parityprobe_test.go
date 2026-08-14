@@ -6,8 +6,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/mirror"
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/mirror"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // TestParityDivergenceProbe is the root-cause harness for a

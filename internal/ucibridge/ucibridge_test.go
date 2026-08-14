@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/asmbuild"
-	"github.com/zellyn/chess6502/internal/chesstest"
+	"github.com/zellyn/8fish/internal/asmbuild"
+	"github.com/zellyn/8fish/internal/chesstest"
 )
 
 // TestBridgeSession drives a short UCI session: handshake, a position

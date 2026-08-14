@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/refchess"
-	"github.com/zellyn/chess6502/internal/ui"
+	"github.com/zellyn/8fish/internal/refchess"
+	"github.com/zellyn/8fish/internal/ui"
 )
 
 // normFEN drops a FEN's fullmove number, which the UI does not track.

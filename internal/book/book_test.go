@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/chesstest"
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/chesstest"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // buildOrFatal compiles the curated lines; Build fails loudly on any

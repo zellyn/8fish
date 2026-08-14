@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/zellyn/chess6502/harness"
+	"github.com/zellyn/8fish/harness"
 )
 
 // TestBankedBuild runs the multi-segment banked image: loader installs a

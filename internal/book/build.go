@@ -3,7 +3,7 @@ package book
 import (
 	"fmt"
 
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // uciTo0x88 converts a UCI move ("e2e4", "e7e8q") to the engine's 0x88

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/asmbuild"
+	"github.com/zellyn/8fish/internal/asmbuild"
 )
 
 // ---------------------------------------------------------------------------

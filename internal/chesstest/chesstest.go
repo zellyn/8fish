@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/zellyn/chess6502/harness"
+	"github.com/zellyn/8fish/harness"
 )
 
 // CyclesPerMs is the engine's effective clock rate in cycles per emulated

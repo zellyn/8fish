@@ -86,9 +86,9 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/zellyn/chess6502/internal/rwts"
-	"github.com/zellyn/chess6502/internal/saveload"
-	"github.com/zellyn/chess6502/internal/splash"
+	"github.com/zellyn/8fish/internal/rwts"
+	"github.com/zellyn/8fish/internal/saveload"
+	"github.com/zellyn/8fish/internal/splash"
 )
 
 // The delivery layout. Addresses are load addresses in main RAM.

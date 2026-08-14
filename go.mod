@@ -1,4 +1,4 @@
-module github.com/zellyn/chess6502
+module github.com/zellyn/8fish
 
 go 1.24.2
 

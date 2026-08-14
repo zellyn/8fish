@@ -27,7 +27,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/ui"
+	"github.com/zellyn/8fish/internal/ui"
 )
 
 // restingBank1 asserts the Language Card is in the state everything assumes

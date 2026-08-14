@@ -4,8 +4,8 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/mirror"
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/mirror"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // TestPStructMirrorParity guards the mirror's DEFAULT pawn-structure

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/asmbuild"
-	"github.com/zellyn/chess6502/internal/chesstest"
+	"github.com/zellyn/8fish/internal/asmbuild"
+	"github.com/zellyn/8fish/internal/chesstest"
 )
 
 // TestBridgeSoftClock drives a whole banked-clock UCI session the way a real

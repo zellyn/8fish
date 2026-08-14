@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/book"
-	"github.com/zellyn/chess6502/internal/chesstest"
-	"github.com/zellyn/chess6502/internal/ui"
+	"github.com/zellyn/8fish/internal/book"
+	"github.com/zellyn/8fish/internal/chesstest"
+	"github.com/zellyn/8fish/internal/ui"
 )
 
 // TestBookIntegration: with the resident book at $2000, the engine's turn

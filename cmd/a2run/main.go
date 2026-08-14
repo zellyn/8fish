@@ -19,7 +19,7 @@
 // runs may overshoot it by up to 7 cycles.
 //
 // This command is a thin CLI wrapper: the emulation core lives in package
-// harness (github.com/zellyn/chess6502/harness), so 6502 binaries can also
+// harness (github.com/zellyn/8fish/harness), so 6502 binaries can also
 // be run in-process from Go tests.
 package main
 
@@ -29,7 +29,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/zellyn/chess6502/harness"
+	"github.com/zellyn/8fish/harness"
 )
 
 func fail(format string, args ...any) {

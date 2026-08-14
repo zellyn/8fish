@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/zellyn/chess6502/internal/engsyms"
+	"github.com/zellyn/8fish/internal/engsyms"
 )
 
 func main() {

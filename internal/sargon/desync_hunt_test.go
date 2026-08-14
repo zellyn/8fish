@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // Desync regression / self-play soak. In the 2026-07 standard-start match, 17 of

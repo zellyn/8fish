@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // repTracker maintains an independent referee history of the game (via

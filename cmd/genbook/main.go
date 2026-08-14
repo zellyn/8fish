@@ -27,7 +27,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/zellyn/chess6502/internal/book"
+	"github.com/zellyn/8fish/internal/book"
 )
 
 const openingsPath = "internal/book/openings.txt"

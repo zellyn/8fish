@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/zellyn/chess6502/harness"
+	"github.com/zellyn/8fish/harness"
 )
 
 // TestAttackedDifferential compares the current attacked() against a

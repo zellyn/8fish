@@ -59,8 +59,11 @@ make dsk    # build asm/8fish.dsk, the bootable floppy
 
 `make dsk` also needs [diskii](https://github.com/zellyn/diskii)
 (`go install github.com/zellyn/diskii@latest`), which writes peterferrie's
-"Standard Delivery" boot loader, and — only when regenerating the vendored
-disk driver or the on-disk book — [ACME](https://sourceforge.net/projects/acme-crossass/).
+"Standard Delivery" boot loader. Everything is assembled with **cc65**; the
+one exception is the vendored [ProRWTS2](https://github.com/peterferrie/prorwts)
+disk driver, which is [ACME](https://sourceforge.net/projects/acme-crossass/)
+source — but its blobs are committed, so ACME is needed only to *regenerate*
+them, not for a normal build.
 
 `cmd/a2run` runs any 6502 binary against the go6502 core and the Apple IIe 128K
 memory model (`goapple2/iie`, validated against

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/zellyn/chess6502/harness"
-	"github.com/zellyn/chess6502/internal/asmbuild"
+	"github.com/zellyn/8fish/harness"
+	"github.com/zellyn/8fish/internal/asmbuild"
 )
 
 // Correctness gates for FT2_GENDEFER (deferred full-width move generation

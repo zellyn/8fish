@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/chesstest"
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/chesstest"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // TestScreenTokenToCoord audits every Sargon move-list token form the parser must

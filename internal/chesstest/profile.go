@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/zellyn/chess6502/harness"
+	"github.com/zellyn/8fish/harness"
 )
 
 // Profile accumulates per-PC cycle counts from a profiled run, plus

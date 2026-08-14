@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/mirror"
+	"github.com/zellyn/8fish/internal/mirror"
 )
 
 // ---------------------------------------------------------------------------

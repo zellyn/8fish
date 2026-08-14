@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/book"
+	"github.com/zellyn/8fish/internal/book"
 )
 
 // TestOpeningsCompileCleanly (deliverable a): the committed SAN source

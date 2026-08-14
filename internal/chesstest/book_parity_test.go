@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/book"
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/internal/book"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // bookProbeDeps loads the engine binary, the bookentry label, the parsed

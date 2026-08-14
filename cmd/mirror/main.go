@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zellyn/chess6502/internal/mirror"
-	"github.com/zellyn/chess6502/internal/sprt"
+	"github.com/zellyn/8fish/internal/mirror"
+	"github.com/zellyn/8fish/internal/sprt"
 )
 
 func main() {

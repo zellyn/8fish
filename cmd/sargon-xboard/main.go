@@ -23,8 +23,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/zellyn/chess6502/internal/refchess"
-	"github.com/zellyn/chess6502/internal/sargon"
+	"github.com/zellyn/8fish/internal/refchess"
+	"github.com/zellyn/8fish/internal/sargon"
 )
 
 func main() {

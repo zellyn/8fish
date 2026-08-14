@@ -24,9 +24,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/delivery"
-	"github.com/zellyn/chess6502/internal/saveload"
-	"github.com/zellyn/chess6502/internal/ui"
+	"github.com/zellyn/8fish/internal/delivery"
+	"github.com/zellyn/8fish/internal/saveload"
+	"github.com/zellyn/8fish/internal/ui"
 )
 
 // uiWin mirrors asm/ui.s UIWIN (M8VARS+$19); not exported by package ui.

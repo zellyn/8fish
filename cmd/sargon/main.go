@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/zellyn/chess6502/internal/sargon"
+	"github.com/zellyn/8fish/internal/sargon"
 )
 
 // runScript executes a ';'-separated action list against m. Actions:

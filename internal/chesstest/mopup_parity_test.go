@@ -4,9 +4,9 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/zellyn/chess6502/harness"
-	"github.com/zellyn/chess6502/internal/mirror"
-	"github.com/zellyn/chess6502/internal/refchess"
+	"github.com/zellyn/8fish/harness"
+	"github.com/zellyn/8fish/internal/mirror"
+	"github.com/zellyn/8fish/internal/refchess"
 )
 
 // ft2Mopup is FT2_MOPUP (asm defs.inc): the phase-gated endgame mop-up

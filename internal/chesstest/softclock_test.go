@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zellyn/chess6502/harness"
+	"github.com/zellyn/8fish/harness"
 )
 
 // ---------------------------------------------------------------------------

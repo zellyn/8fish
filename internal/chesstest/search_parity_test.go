@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/mirror"
+	"github.com/zellyn/8fish/internal/mirror"
 )
 
 // TestSearchMirrorParity proves the mirror reproduces the asm's fixed-depth

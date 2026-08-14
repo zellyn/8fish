@@ -3,7 +3,7 @@ package entropy_test
 import (
 	"testing"
 
-	"github.com/zellyn/chess6502/internal/entropy"
+	"github.com/zellyn/8fish/internal/entropy"
 )
 
 // TestFold pins the mixing algorithm (asm/entropy.inc entfold): one step of

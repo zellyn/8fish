@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/zellyn/chess6502/harness"
+	"github.com/zellyn/8fish/harness"
 )
 
 // BookBase is the resident opening book's fixed load address: AUXILIARY RAM

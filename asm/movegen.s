@@ -39,7 +39,11 @@
 ; site in movegenbody.inc sits inside .if QMODE = 0, and the QMODE = 1
 ; copy keeps only captures, ep, and promotions (including promo
 ; pushes, which ARE kept in quiescence). A new quiet emission in the
-; body must be wrapped the same way.
+; body must be wrapped the same way. The capture/promo/ep emission
+; ORDER must stay identical between the two copies (it is: one body),
+; because FUTILE full-width nodes now take the generateq body through
+; generate's GENFUT dispatch (movegenbody.inc head) and their passes
+; 1-2 must see the same captures in the same order as a full list.
 ;
 ; Overflow: MSP+1 only reaches >MOVESTACKTOP via a carry out of a bump,
 ; checked at empage (per-emit paths) and flushpage (batched paths).

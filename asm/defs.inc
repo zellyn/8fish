@@ -245,7 +245,16 @@ PSQSQ     = $D8         ; psqt: square (possibly rank-flipped)
 PSQPIECE  = $D9         ; psqt: piece byte
 MULCNT    = $DA         ; multiply loop counter
 MAXDEPTH  = $DB         ; full-width search depth; qs beyond (poked by rig)
-; $DC free (was GENCAPS; qs uses the compile-time generateq copy)
+GENFUT    = $DC         ; nonzero: the NEXT `generate` call takes the
+                        ; captures-only body (generateq) — set by search
+                        ; at FUTILE full-width nodes whose quiet passes
+                        ; never run, consumed (cleared) by generate
+                        ; itself. Must be 0 between calls: evalinit and
+                        ; the perft driver clear it, and every search
+                        ; call site that wants captures-only re-arms it
+                        ; immediately before its jsr. (This slot WAS
+                        ; GENCAPS, the runtime flag for the same idea
+                        ; before generateq became a compile-time copy.)
 HASH0     = $DD         ; 32-bit incremental Zobrist hash
 HASH1     = $DE
 HASH2     = $DF

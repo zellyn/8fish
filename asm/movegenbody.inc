@@ -358,6 +358,27 @@ next:
 
 .endif  ; macro guard
 
+.if ::QMODE = 0
+        ; FUTILE full-width nodes (search.s sngen/srdefer): p2done jumps
+        ; straight past the quiet passes at a futile node, so quiet
+        ; emission (batched ray quiets, pawn pushes, castling and its
+        ; attacked() probes) is pure waste there. The caller arms GENFUT
+        ; immediately before the call; consume it and take the
+        ; captures-only copy. RECAPONLY is cleared so generateq's own
+        ; dispatch falls through to the full capture surface (it can
+        ; hold a stale 1 from a deep qs node in another subtree).
+        ; Entering through `generate` (instead of dispatching at the
+        ; call sites) keeps every probe and profile count on the
+        ; `generate` label honest — only `attacked` moves, by exactly
+        ; the castle-safety probes the futile nodes no longer run.
+        lda GENFUT
+        beq :+
+        lda #0
+        sta GENFUT
+        sta RECAPONLY
+        jmp generateq
+:
+.endif
 .if ::QMODE = 1
         ; recap2 shaping: when gennode set RECAPONLY, take the
         ; attacker-driven recapture generator instead of walking every

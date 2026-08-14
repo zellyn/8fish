@@ -1062,6 +1062,10 @@ evalinit:
         sta PSP0                ; pointer lo bytes are always 0
         sta PSP1
         sta ZPTR                ; (the loader used ZPTR as scratch)
+        sta GENFUT              ; captures-only latch: 0 between calls
+                                ;  (hardware powers up with ZP garbage,
+                                ;  and uigen may generate before any
+                                ;  search has run)
         sta GSLOT
 eviloop:
         ldy GSLOT

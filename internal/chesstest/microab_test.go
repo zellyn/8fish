@@ -38,7 +38,25 @@ type microABRow struct {
 // changed the TREE: that is a bug, or a feature needing an SPRT. Never a
 // silent table update.
 //
-// THE ONE UPDATE SO FAR, and the argument for it. The SINGLE-RAY PIN TEST
+// UPDATE #2 (2026-08-14, captures-only generation at FUTILE nodes): a
+// FUTILE full-width node jumps straight past the quiet passes (search.s
+// p2done -> sdone), so generating its quiets was pure waste. `generate`
+// now dispatches to the generateq (captures-only) body at those nodes
+// (movegenbody.inc GENFUT head; armed only by sngen — no TT move — and
+// srdefer — TT move already staged and searched, so no quiet TT move can
+// be lost; the eager TT-move path snp0 still builds the full list pass 0
+// hunts in). The dispatch lives AT the generate label, so the `generate`
+// column is untouched, and the signature is `attacked` falling ALONE, in
+// exactly the six rows whose position retains castling rights (rows 0-2
+// and 6-8: positions 1-3 under both futility-enabled masks; the m00 tier
+// has FT_FUTIL off and every row is untouched): the castle-safety probes
+// (gcsafe2) of castling generation those futile nodes no longer perform.
+// score, move, search,
+// make, eval, ttprobe and generate are byte-identical in all 18 rows —
+// the same signature class as the pin-ray update below. Cycles over the
+// 18 searches: 3,225,425,169 -> 3,200,497,294 (-0.773%).
+//
+// UPDATE #1, and the argument for it. The SINGLE-RAY PIN TEST
 // (2026-07-30, asm/board.s pinray) answers "does this move expose my own
 // king" by walking ONE ray instead of calling attacked(), for the movers whose
 // FROM square is on a ray through their king. Its signature is `attacked`
@@ -53,15 +71,15 @@ type microABRow struct {
 // direction against an independent oracle) and by the PINVERIFY build.
 // Cycles over these 18 searches: 3,365,500,241 -> 3,249,555,705 (-3.44%).
 var microABGolden = []microABRow{
-	{0x1f, -40, "a3a4", 53273, 54507, 49821, 11753, 8495, 8384},
-	{0x1f, 354, "e1c1", 89096, 89726, 83136, 12073, 13262, 13935},
-	{0x1f, -38, "e2a6", 105654, 110128, 97883, 71321, 24985, 16827},
+	{0x1f, -40, "a3a4", 53273, 54507, 49821, 11347, 8495, 8384},
+	{0x1f, 354, "e1c1", 89096, 89726, 83136, 11303, 13262, 13935},
+	{0x1f, -38, "e2a6", 105654, 110128, 97883, 64565, 24985, 16827},
 	{0x1f, 84, "c3d5", 74627, 75467, 66420, 13462, 18723, 14615},
 	{0x1f, 96, "b4f4", 4807, 5455, 4141, 2565, 1366, 1262},
 	{0x1f, -18, "d4c6", 25474, 25617, 24065, 1926, 4039, 3734},
-	{0x07, -24, "a3a4", 55781, 56742, 50855, 10464, 9593, 8679},
-	{0x07, 349, "e1c1", 81098, 81509, 75289, 13482, 8006, 8165},
-	{0x07, 7, "d5e6", 106475, 110351, 99233, 38507, 5490, 7578},
+	{0x07, -24, "a3a4", 55781, 56742, 50855, 10456, 9593, 8679},
+	{0x07, 349, "e1c1", 81098, 81509, 75289, 13062, 8006, 8165},
+	{0x07, 7, "d5e6", 106475, 110351, 99233, 37987, 5490, 7578},
 	{0x07, 77, "c3d5", 54679, 55196, 48443, 7539, 5634, 7681},
 	{0x07, 102, "b4f4", 2247, 2620, 1890, 1352, 432, 548},
 	{0x07, -29, "f1e2", 37634, 37897, 34672, 2606, 4745, 4274},

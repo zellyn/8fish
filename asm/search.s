@@ -862,7 +862,10 @@ snp0:   jsr gennodef            ; eager: CURPTR = base, SENDL/H = end,
         lda #0
         sta PASSNO,y
         beq p0loopj             ; always
-sngen:  jsr gennodef            ; (gennd2 leaves Y = PLY, which stop0 wants)
+sngen:  lda FUTILE,y            ; futile + no TT move: the quiet passes
+        sta GENFUT              ;  never run, so generate captures only
+                                ;  (movegenbody.inc consumes the flag)
+        jsr gennodef            ; (gennd2 leaves Y = PLY, which stop0 wants)
         jmp stop0
 p0loopj:
         jmp p0loop
@@ -1216,7 +1219,10 @@ sntry:  jsr ttmovevalid         ; C set: pseudo-legal here, MVFLAGS = the
         lda MSP+1
         sta GDVMSP+1
         lda #0
-        sta CLSP
+        sta CLSP                ; (GENFUT is 0 here — every arming site
+                                ;  is consumed by its own jsr — so this
+                                ;  builds the FULL list, as the check
+                                ;  of a possibly-quiet TT move needs)
         jsr generate
         lda GDVMSP
         sta CURPTR
@@ -1291,6 +1297,10 @@ gdvfound:
                                 ;  from PLYEND, and srdefer rewrites both)
 
 srdefer:
+        lda FUTILE,y            ; futile: the staged TT move has already
+        sta GENFUT              ;  been searched and the quiet passes
+                                ;  never run — generate captures only
+                                ;  (Y = PLY from sloopret)
         lda #0
         sta CLSP                ; class-presence accumulator (as gennodef)
         jsr generate            ; MSP is back at PLYBASE+4: every child
@@ -1330,10 +1340,14 @@ sdcloop:
         bne sdcgo
         lda CURPTR+1
         cmp SENDH
-        beq sdcdone             ; not in the list: only reachable if
-                                ;  ttmovevalid was MORE permissive than
-                                ;  generate, which the exhaustive gate
-                                ;  (and the GDVERIFY variant) forbid
+        beq sdcdone             ; not in the list: normal at a FUTILE
+                                ;  node whose TT move is quiet (the list
+                                ;  is captures-only there, and passes 1-2
+                                ;  can't re-search a quiet anyway).
+                                ;  Otherwise only reachable if ttmovevalid
+                                ;  was MORE permissive than generate,
+                                ;  which the exhaustive gate (and the
+                                ;  GDVERIFY variant) forbid
 sdcgo:  ldy #1
         lda (CURPTR),y
         cmp TTF0

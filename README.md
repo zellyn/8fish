@@ -16,8 +16,10 @@ opening book, and thinks on your clock while you pick your move.
 ## Play it
 
 The easy way, right in your browser with nothing to install:
-**[play 8fish in apple2ts](https://apple2ts.com/?machine=APPLE2EE#https://raw.githubusercontent.com/zellyn/8fish/main/asm/8fish.dsk)**.
-That link hands the disk image to Chris Torrence's apple2ts emulator.
+**[play 8fish in apple2ts](https://apple2ts.com/?machine=APPLE2EE&color=green&ghosting=on#https://raw.githubusercontent.com/zellyn/8fish/main/asm/8fish.dsk)**.
+That link hands the disk image to Chris Torrence's apple2ts emulator, set up as
+a 128K //e with a green screen and phosphor ghosting (about how the screenshots
+above look).
 
 Or grab [`asm/8fish.dsk`](asm/8fish.dsk) and boot it in slot 6 of a 128K Apple
 IIe, real or emulated. Virtual ][, MAME, and the goapple2 core in this repo all

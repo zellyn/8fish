@@ -5,12 +5,14 @@ controls are wall time. See docs/plan.md for the measurement protocol.
 
 ## 2026-08-14 — null-threat recycling: DO NOT PORT (5-variant triage, all inside ±25 noise)
 
-A brainstorm moonshot: when a node's static eval already refutes the
-opponent's last-moved threat (a cheap "null-threat" signal), recycle that
-into the reduction/pruning decisions — exempt the threatened reply from
-LMR, and optionally inherit the flag forward. Screened in the mirror at
-asm-matched cost (`-cbudget 143000000 -ackext 1 -bckext 1`, 250 pairs /
-500 games each, `nt=...` toggle A vs OFF B). Five forms:
+A brainstorm moonshot: when a null-move search fails high, the opponent's
+best reply names a *threat* square (the move they'd make if we passed);
+recycle that into the reduction/pruning decisions — exempt the reply that
+answers the threat from LMR, and optionally inherit/chain the flag forward.
+(The signal is the null-child's fail-high move, NOT a static-eval
+refutation.) Screened in the mirror at asm-matched cost (`-cbudget
+143000000 -ackext 1 -bckext 1`, 250 pairs / 500 games each, `nt=...` toggle
+A vs OFF B). Five forms:
 
 | variant | `nt` flags | Elo |
 |---|---|---|
@@ -21,12 +23,26 @@ asm-matched cost (`-cbudget 143000000 -ackext 1 -bckext 1`, 250 pairs /
 | nt-all-inh (fire everywhere) | 1,1,1,1 | +6 ± 24 |
 
 Mean ≈ −2; not one variant escapes its ±25 band, and even the maximal
-"fire everywhere" form is +6 ± 24. The diagnostic explains it: the
-own-threat exemption fires only ~1×/move, too sparse to shift the tree at
-6502 depths. Same signature as LMP (task #7) and history+LMP (task #58) —
-the pruning family is dry at 6502 prices; the mirror can flatter these but
-asm-cost erases them. **DO NOT PORT.** Mirror instrument (zero-value-off
-toggle, plus an `NT_DIAG` node-delta probe) preserved on branch
+"fire everywhere" form is +6 ± 24. The nominal leader (nt-lmr-inh),
+pooled with a confirm seed to 1,000 games, settles at **−2 ± 18** — the
+null hardens with data, it doesn't turn positive. The diagnostic explains
+it: null-move is gated at rem ≥ 4, so at device depth (~4–6 ply) only
+plies 0–2 ever null and the LMR exemption fires ~1×/move — too sparse to
+shift the tree; node counts move ≤ 0.11% and completed depths are
+identical. Same signature as LMP (task #7) and history+LMP (task #58).
+
+One reusable structural fact fell out: **the spec's depth-1 futility
+exemption is provably vacuous in own-threat form** — a futile node has
+rem 1 and can never own a threat — which is why the screen also tried an
+`Inherit` knob (ply-2 chaining) to give the mechanism something to bite
+on. Even fully armed it doesn't pay. So the "reduce-less danger-signal"
+family scoreboard now reads: check-extension **+24** (shipped),
+improving-LMR **+13** (shipped), null-threat **≈ 0** — the cheap danger
+signals at this depth are exhausted.
+
+**DO NOT PORT.** Mirror instrument (zero-value-off toggle, `NT_DIAG`
+node-delta probe, `TestNullThreatFires` / `NoCarryover` /
+`PromotePreservesMoveSet` determinism gates) preserved on branch
 `worktree-agent-a96311721eb89a37d`, unmerged; the shipped engine is
 untouched.
 

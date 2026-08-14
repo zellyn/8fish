@@ -12,14 +12,14 @@ ENG_LCCODE_RUN     = $D000   ; where they must be copied to ($D000)
 ENG_LCCODE_SIZE    = $006C   ; how many bytes to copy
 ENG_adaptaborthi   = $BB7A   ; FT2_ADAPT hard-abort override (ABORTL = 2*CEILMAX)
 ENG_adaptmaybe     = $BB8D   ; FT2_ADAPT post-iteration policy
-ENG_attacked       = $5C0D   ; square-attacked test (the legality half of move validation)
-ENG_bookpg         = $79E8   ; the probe's base page byte ($08 resident / $40 big book)
-ENG_bookprobe      = $7A26   ; resident opening-book probe (C=1 on a hit)
+ENG_attacked       = $5C10   ; square-attacked test (the legality half of move validation)
+ENG_bookpg         = $79ED   ; the probe's base page byte ($08 resident / $40 big book)
+ENG_bookprobe      = $7A2B   ; resident opening-book probe (C=1 on a hit)
 ENG_ccsite         = $42E9   ; the `jsr checkclock` whose operand FT2_SOFTCLK patches
 ENG_checkclocks    = $4262   ; FT2_SOFTCLK accumulating-clock entry point
 ENG_curincheck     = $4250   ; is the side to move in check?
-ENG_evalinit       = $5A3A   ; root accumulators, PHASE and HASH0-3 from the board
+ENG_evalinit       = $5A3C   ; root accumulators, PHASE and HASH0-3 from the board
 ENG_gennodef       = $421D   ; full-width generate + per-ply move-list bookkeeping
 ENG_iterate        = $4137   ; one full-window search at CURDEPTH (the UI drives ID itself)
-ENG_make           = $5E05   ; play FROM/TO/MVFLAGS, PLY++
-ENG_unmake         = $63C0   ; undo the move at PLY-1
+ENG_make           = $5E08   ; play FROM/TO/MVFLAGS, PLY++
+ENG_unmake         = $63C3   ; undo the move at PLY-1

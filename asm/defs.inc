@@ -245,16 +245,10 @@ PSQSQ     = $D8         ; psqt: square (possibly rank-flipped)
 PSQPIECE  = $D9         ; psqt: piece byte
 MULCNT    = $DA         ; multiply loop counter
 MAXDEPTH  = $DB         ; full-width search depth; qs beyond (poked by rig)
-GENFUT    = $DC         ; nonzero: the NEXT `generate` call takes the
-                        ; captures-only body (generateq) — set by search
-                        ; at FUTILE full-width nodes whose quiet passes
-                        ; never run, consumed (cleared) by generate
-                        ; itself. Must be 0 between calls: evalinit and
-                        ; the perft driver clear it, and every search
-                        ; call site that wants captures-only re-arms it
-                        ; immediately before its jsr. (This slot WAS
-                        ; GENCAPS, the runtime flag for the same idea
-                        ; before generateq became a compile-time copy.)
+; $DC is FEATURES2 (below). A stale "free (was GENCAPS)" note sat here
+; until 2026-08-14 and nearly re-allocated it out from under FEATURES2;
+; the zero page is FULL ($FF is PSTRUCT's high byte). GENFUT, the flag
+; that note's ghost finally became, lives in the page-2 tail instead.
 HASH0     = $DD         ; 32-bit incremental Zobrist hash
 HASH1     = $DE
 HASH2     = $DF
@@ -729,6 +723,17 @@ CLSPRES    = $0278      ; 32 bytes: per-ply move-list class presence (CLSP
                         ;  (bit 0 = heavy capture/promo, bit 1 = light
                         ;  capture; conservative - a consumed TT move may
                         ;  leave a set bit with nothing left to find).
+GENFUT     = $02B8      ; nonzero: the NEXT `generate` call takes the
+                        ;  captures-only body (generateq) — armed by
+                        ;  search at FUTILE full-width nodes whose quiet
+                        ;  passes never run (sngen/srdefer only; the
+                        ;  eager TT-move path needs the full list), and
+                        ;  consumed (cleared) by generate itself. Must
+                        ;  be 0 between calls: evalinit and the perft
+                        ;  driver clear it, and each arming site writes
+                        ;  it immediately before its jsr. NOT zero page:
+                        ;  ZP is full ($DC, the old GENCAPS slot this
+                        ;  flag descends from, is FEATURES2 now).
 
 ; FT2_ADAPT adaptive-effort scratch (page 3, $0300-$030C). "Free RAM" here
 ; means free of ENGINE allocations -- nothing the engine defines sits between

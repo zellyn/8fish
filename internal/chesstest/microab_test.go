@@ -54,7 +54,7 @@ type microABRow struct {
 // score, move, search,
 // make, eval, ttprobe and generate are byte-identical in all 18 rows —
 // the same signature class as the pin-ray update below. Cycles over the
-// 18 searches: 3,225,425,169 -> 3,200,497,294 (-0.773%).
+// 18 searches: 3,225,425,169 -> 3,201,068,834 (-0.755%).
 //
 // UPDATE #1, and the argument for it. The SINGLE-RAY PIN TEST
 // (2026-07-30, asm/board.s pinray) answers "does this move expose my own

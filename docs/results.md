@@ -3,6 +3,60 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-14 — captures-only generation at FUTILE nodes: −0.755% at identical trees, +30 image bytes
+
+Deep-optimization-review class change, gated the r4-r6 way: `TestMicroAB`
+fingerprints plus the EXACT cycle total over its 18 fixed-depth searches.
+The observation: a FUTILE full-width node (rem-1, eval+margin ≤ alpha)
+jumps from `p2done` straight past the quiet passes to `sdone`, so every
+quiet it generated — batched ray emission, pawn pushes, castling and
+castling's `gcsafe2` attacked() safety probes — was work nothing ever
+read. Roughly the r4 "batched quiet emission" costs, being paid at nodes
+that discard the product.
+
+**Mechanism.** `generate` gains a one-byte latch at its head (`GENFUT`,
+$02B8 in the free page-2 tail): when armed it consumes the flag, clears a
+possibly-stale `RECAPONLY`, and jumps to the `generateq` captures-only
+body (one shared movegenbody.inc, so capture/promo/ep emission order is
+identical by construction — the order IS the tree shape). Only two sites
+arm it, chosen so no quiet TT move can be lost:
+
+- `sngen` — the node has NO TT move at all;
+- `srdefer` (FT2_GENDEFER) — the TT move was staged and searched BEFORE
+  generation, and the consume scan already tolerates not finding it.
+
+The eager TT-move path (`snp0`) keeps full generation because pass 0
+hunts the TT move — including a quiet one — in the list. Mate/stalemate
+claims were already FUTILE-guarded at `sdone`. `evalinit` and the perft
+driver zero the latch (ZP/RAM is garbage at power-on and `uigen`
+generates before any search); arming sites write it per call and
+`generate` consumes it, so it is 0 between calls.
+
+**Gate.** All 18 MicroAB rows: score, move, search, make, eval, ttprobe
+and generate byte-identical. `attacked` falls ALONE, in exactly the six
+rows whose position retains castling rights (the castle-safety probes
+futile nodes no longer run) — the same argued-golden-update signature
+class as the 07-30 pin-ray change, recorded as UPDATE #2 in
+microab_test.go. Cycles: **3,225,425,169 → 3,201,068,834 (−24,356,335,
+−0.755%)**, ~the size of the whole r6 round, for +30 CODE bytes
+($3BCB → $3BE9; 23 B of CODE slack remain).
+
+**The gate lattice fired once, and it was real.** The first cut put
+GENFUT on ZP $DC, whose "free (was GENCAPS)" comment was STALE — $DC is
+FEATURES2. The engine-side MicroAB run was numerically clean (its
+harness config runs FEATURES2=0), but the UI suite failed loudly:
+`evalinit` zeroing FEATURES2 killed FT2_SOFTCLK on the booted device, so
+budgeted searches never aborted and every ponder test hung, and
+TestShippedFeatureConfig read FEATURES2=$00 — precisely the
+second-driver defect class those gates were built for (07-28's shipped
+$1F, r6's fgpatch trampoline). The zero page is genuinely FULL; the
+fix (and a corrected comment where the stale one sat) is its own commit.
+
+Untried from the same brainstorm: the futile node also still pays full
+TT-probe and eval costs before discovering futility; and generateq's
+slider walks still traverse empty squares to ray ends. Both are
+tree-identical-candidate follow-ups if a later profile shows them hot.
+
 ## 2026-08-13 — ★ The owed PONDER-ENABLED Sargon III headline: 91–38–21 over 150 games ≈ +128 Elo (both sides pondering, full book)
 
 The representative number the 2026-08-07 note called for (the *ponder-enabled,

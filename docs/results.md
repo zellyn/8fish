@@ -3,6 +3,34 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-13 — ★ The owed PONDER-ENABLED Sargon III headline: 91–38–21 over 150 games ≈ +128 Elo (both sides pondering, full book)
+
+The representative number the 2026-08-07 note called for (the *ponder-enabled,
+symmetric* `sargon-symmatch` match, replacing the no-ponder +148/+161 controls)
+is measured. Config: `-standard-start -book -bookfile internal/book/bigbook.bin`
+(the filled 3,639-entry book), both sides pondering, Hard Mode, 30M-cycle
+symmetric budget, dither=entropy. **150 games: 91 wins, 38 losses, 21 draws**,
+score 0.677 → **≈ +128 Elo (95% CI ≈ [+77, +187])**. Engine binary byte-identical
+to the +148/+161 configs (md5 `c7998397…`), so this prices the shipped
+disk-config exactly.
+
+- Consistent with the record: the no-ponder gauntlet was +148 [+117,+182] /
+  +161; both-sides-pondering lands slightly under (Sargon ponders too), and the
+  earlier audit note that at 1.5× time the match approaches parity holds — the
+  edge is real but budget-sensitive.
+- The book fill (633 → 3,639) did NOT move the Sargon number materially, as
+  predicted: against a fixed opponent the extra breadth covers lines Sargon
+  never plays ("self-play can't price breadth"). Its value is against varied
+  opponents, not this gauntlet.
+- Depth footnote (measured with a throwaway `CURDEPTH` harness at the 30M
+  budget): 8fish reaches ~4 plies in the opening/middlegame, ~6 in the endgame
+  (up to 10), plus QS and check extensions. Sargon III (full-width αβ + QS + its
+  own TT/book) reaches a comparable ~4–6 + QS. 8fish does NOT out-search Sargon
+  on raw depth; the edge is a stronger eval (PeSTO vs material) and a more
+  selective tree, most of which would run in Sargon's ~48K. The 128K genuinely
+  buys pondering (a separate ~+100, held out of the headline) and a larger
+  TT/book whose marginal value over Sargon's own is unmeasured.
+
 ## 2026-08-12 — ★ SAVE / LOAD GAMES ship (ProRWTS2 Feature 2: transient write driver); engine + resident driver byte-identical
 
 The first feature that WRITES to disk. **W** saves the game, **O** loads it (one

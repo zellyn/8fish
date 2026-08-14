@@ -30,6 +30,10 @@
 !internal/tiles/tileblob.bin
 !internal/splash/splashblob.bin
 
+# The bootable disk image itself ships in the repo (143 KB) so it can be
+# downloaded and linked (README's browser-play link). Regenerate with `make dsk`.
+!asm/8fish.dsk
+
 # stray binaries from `go build ./cmd/...` in the repo root
 /genbook
 /sargon

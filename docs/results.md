@@ -3,6 +3,55 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-14 — KPvK bitbase (perfect endgame knowledge): NO-GO — unreachable value
+
+Brainstorm moonshot #2: a perfectly-correct king+pawn-vs-king bitbase
+(retrograde-solved in Go, no RAM limit in the mirror), consulted in eval
+to replace PeSTO's guess with ground truth (won → decisive-minus-distance
+so it still makes progress; drawn → 0). Screened idealized-first: measure
+whether PERFECT KPvK knowledge buys Elo BEFORE spending scarce 6502 RAM to
+port it. Symmetric knowledge → screened ONE-SIDED (A oracle-on vs B off,
+otherwise identical, asm-matched `-cbudget 143000000 -ackext 1 -bckext 1`).
+
+**Realized full-game Elo (the port-decision number): −1 ± 13 over 2,000
+games** (+684 =626 −690, 49.9%). CI tight and centred on zero, far under
+the +15 GO bar. No signal.
+
+**Why — unreachable value, two independent reasons:**
+- *Reachability.* Only **73/2000 games (3.65%)** ever reach bare KPvK;
+  **526/197,709 plies (0.27%)** are bare KPvK on the board. Our openings
+  rarely simplify all the way to lone K+P vs K.
+- *The search already solves the easy ones.* Conversion suite (14 textbook
+  KPvK, oracle vs plain, each played out at the SAME 143M budget): oracle
+  14/14, plain 12/14 — the oracle uniquely fixes only a deep king-escort
+  win and an opposition hold-draw. And the reachable ceiling SHRINKS as
+  budget grows: at a shallow 8M diagnostic the oracle fixed 2 *different,
+  easier* positions that plain search then solves by 143M. At screen depth
+  perfect play only helps on deep-technique cases — a rare subset of an
+  already-rare (3.65%) event. Real ceiling ≈ 14% of textbook positions,
+  realized ≈ 0.
+
+**Correctness of the instrument.** The retrograde solve produces exactly
+**111,282 WIN** entries (of 165,676 legal), matching the canonical
+Stockfish KPK reference bit-for-bit — independent proof the bitbase is
+right. Feature-OFF is a true no-op (`Engine.KPK == nil` nil-gate):
+`TestSearchMirrorParity` + `TestCheckExtMirrorParity` (asm↔mirror) pass
+unchanged, so shipped-config trees stay byte-identical. Gate
+(`kpk_test.go`) mutation-checked: flipping `kpkClassify`'s black-to-move
+reduction to treat the weak side like the strong side broke three
+assertions (rook-pawn corner BTM, opposition WTM draw, override-draw
+score); restored → green. Gate also pins opposition stm-asymmetry
+(Ke5/Pe4/Ke7: WTM draw, BTM win — the true zugzwang position).
+
+**Port note (moot):** canonical table is 24×64×64×2 = 196,608 entries × 1
+bit = **~24 KB** before further symmetry — a large slice of scarce 6502
+RAM, sharing the TT window, for ~0 realized Elo. **NO-GO.** Mirror
+implementation preserved on branch `worktree-agent-aa82687ce0c41b2a1`
+(`kpk.go`, `kpk_test.go`, `kpk_convert_test.go` + wiring), unmerged; no
+asm touched. Same lesson shape as KPK's cousin ideas: at our depth the
+search is the eval — idealized knowledge that the search already recovers
+by budget buys nothing.
+
 ## 2026-08-14 — null-threat recycling: DO NOT PORT (5-variant triage, all inside ±25 noise)
 
 A brainstorm moonshot: when a null-move search fails high, the opponent's

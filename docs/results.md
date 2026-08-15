@@ -3,6 +3,57 @@
 Newest first. Engine budgets are emulated time (1.0205 MHz); opponent
 controls are wall time. See docs/plan.md for the measurement protocol.
 
+## 2026-08-15 — drawishness scaler (OCB + insufficient material): NO-GO — reachable, mechanism proven, still ~0
+
+Brainstorm moonshot #3, and the one that passed the beyond-horizon triage
+KPvK failed: PeSTO counts material, so the engine trades INTO an
+opposite-colored-bishop or insufficient-material *draw* it still scores as
+"+2," many plies before the search could see the draw — a scaler damping
+those toward 0 should steer it away while the choice is live. Screened
+idealized-first, ONE-SIDED (A scaler-ON vs B OFF, otherwise identical,
+asm-matched `-cbudget 143000000 -ackext 1 -bckext 1 -seed 6502`).
+
+**Realized one-sided Elo: −8 ± 13 over 2,000 games** (1,000 pairs, +671
+=613 −716, 48.9%). Tight CI, slightly negative, far under the +15 GO bar.
+
+**What makes this verdict sharper than KPvK's: the two excuses that killed
+KPvK don't apply here.**
+- *It IS reachable.* OCB arises in **18/600 games (3.00%)** and persists —
+  **846/59,742 plies (1.416%)**, comparable to KPK's 3.65%. (Insufficient
+  material: 2.17% of games but only 0.022% of plies — fleeting, the search
+  claims those itself.)
+- *The mechanism IS real, deterministically proven.*
+  `TestDrawishAvoidanceMechanism`: with the scaler OFF, a drawn OCB scores
+  +120 — tied with/above its genuinely-winning siblings (+118/+120), so the
+  engine would trade into the draw; with it ON, only the OCB line drops to
+  +37, so the real wins strictly beat it. The steering works when teed up.
+
+It still nets a hair below zero. Recognizing the draw doesn't convert to
+Elo because the search already resolves most of it at screen depth, and the
+margin-ramp (full damping at +1 pawn, less as extra-pawn count grows —
+built to avoid damping genuinely-winning multi-passer OCB) keeps the upside
+small. Port would've been cheap (<100 B, OCB = a square-color test on the
+two bishops, no table) but dies on merit. **NO-GO.**
+
+**Gates:** feature-OFF is a true no-op — asm↔mirror parity
+(`TestSearchMirrorParity` + `TestCheckExtMirrorParity`) unchanged with it
+disabled, so shipped-config trees stay byte-identical; drawish unit gates
+green. (The full EG self-play suite hit go test's 600 s default while
+competing with the match for CPU — a timeout, not an assertion failure;
+re-run solo to confirm.) Mirror implementation on branch
+`worktree-agent-a241b84b697404a0b`, unmerged; no asm touched.
+
+**Campaign close.** Three "wild idea" moonshots screened idealized-first:
+null-threat (search technique) and KPvK + drawishness (knowledge) all
+NO-GO; the one merged win was **futility captures-only** (+1,
+tree-identical) — a structural/optimization find, not a new feature. The
+through-line: at ~4–6 ply on a 1 MHz 6502 the search IS the eval, so
+knowledge the tree recovers by budget buys nothing — and being reachable
+and mechanism-proven (drawishness was both) isn't enough; the search has to
+NOT resolve it, which at this depth is a very high bar. Elo now comes from
+cycles (deeper search) and from beyond-horizon facts the search genuinely
+can't reach — a shrinking set.
+
 ## 2026-08-14 — KPvK bitbase (perfect endgame knowledge): NO-GO — unreachable value
 
 Brainstorm moonshot #2: a perfectly-correct king+pawn-vs-king bitbase
